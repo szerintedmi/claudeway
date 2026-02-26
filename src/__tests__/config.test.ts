@@ -68,6 +68,22 @@ describe('resolvedChannelConfig', () => {
     };
     expect(resolvedChannelConfig(config, 'C004')?.responseMode).toBe('stream-native');
   });
+
+  it('preserves allowedUsers in resolved config', () => {
+    const config: Config = {
+      channels: {
+        C005: { name: 'restricted', folder: '/r', allowedUsers: ['U111', 'U222'] },
+      },
+      defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
+    };
+    const result = resolvedChannelConfig(config, 'C005');
+    expect(result?.allowedUsers).toEqual(['U111', 'U222']);
+  });
+
+  it('returns undefined allowedUsers when not set', () => {
+    const result = resolvedChannelConfig(baseConfig, 'C001');
+    expect(result?.allowedUsers).toBeUndefined();
+  });
 });
 
 describe('getChannelConfig', () => {

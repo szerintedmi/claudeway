@@ -12,6 +12,7 @@ export interface ChannelConfig {
   timeoutMs?: number;
   responseMode?: ResponseMode;
   processMode?: ProcessMode;
+  allowedUsers?: string[];
 }
 
 export interface Defaults {

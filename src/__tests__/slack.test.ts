@@ -1,4 +1,4 @@
-import { markdownToSlackMrkdwn, splitMessage, formatDuration } from '../slack.js';
+import { markdownToSlackMrkdwn, splitMessage, formatDuration, isUserAllowed } from '../slack.js';
 
 describe('markdownToSlackMrkdwn', () => {
   describe('links', () => {
@@ -215,5 +215,27 @@ describe('formatDuration', () => {
 
   it('formats 0 seconds as "0s"', () => {
     expect(formatDuration(ago(0))).toBe('0s');
+  });
+});
+
+describe('isUserAllowed', () => {
+  it('allows any user when allowedUsers is undefined', () => {
+    expect(isUserAllowed(undefined, 'U123')).toBe(true);
+  });
+
+  it('allows any user when allowedUsers is empty', () => {
+    expect(isUserAllowed([], 'U123')).toBe(true);
+  });
+
+  it('allows a user in the allowedUsers list', () => {
+    expect(isUserAllowed(['U123', 'U456'], 'U123')).toBe(true);
+  });
+
+  it('denies a user not in the allowedUsers list', () => {
+    expect(isUserAllowed(['U123', 'U456'], 'U789')).toBe(false);
+  });
+
+  it('denies unknown user when allowedUsers is set', () => {
+    expect(isUserAllowed(['U123'], 'unknown')).toBe(false);
   });
 });
