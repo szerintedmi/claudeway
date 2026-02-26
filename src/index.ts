@@ -43,17 +43,30 @@ function killOrphanProcesses(): void {
   }
 }
 
-async function notifySystemChannel(app: App | null, message: string): Promise<void> {
+let ownerDmChannelId: string | null = null;
+
+async function notifyOwner(app: App | null, message: string): Promise<void> {
   if (!app) return;
   try {
     const config = loadConfig();
-    if (!config.systemChannel) return;
+    if (!config.botOwner) return;
+    if (!ownerDmChannelId) {
+      const result = await app.client.conversations.open({ users: config.botOwner });
+      ownerDmChannelId = result.channel?.id ?? null;
+      if (!ownerDmChannelId) return;
+    }
     await app.client.chat.postMessage({
-      channel: config.systemChannel,
+      channel: ownerDmChannelId,
       text: message,
     });
-  } catch {
-    // Best-effort — don't crash on notification failure
+  } catch (err) {
+    console.error('notifyOwner failed:', err instanceof Error ? err.message : err);
+    if (err && typeof err === 'object' && 'data' in err) {
+      console.error(
+        'API response:',
+        JSON.stringify((err as Record<string, unknown>).data, null, 2),
+      );
+    }
   }
 }
 
@@ -62,7 +75,7 @@ let slackApp: App | null = null;
 function shutdown(): void {
   console.log('Claudeway shutting down');
   // Fire-and-forget shutdown notification, then exit after brief delay
-  notifySystemChannel(slackApp, ':wave: Claudeway shutting down').finally(() => {
+  notifyOwner(slackApp, ':wave: Claudeway shutting down').finally(() => {
     killOrphanProcesses();
     releaseLock();
     process.exit(0);
@@ -121,7 +134,7 @@ for (const [id, ch] of Object.entries(config.channels)) {
   console.log(`  #${ch.name} (${id}) -> ${ch.folder}`);
 }
 
-await notifySystemChannel(
+await notifyOwner(
   app,
   `:rocket: Claudeway started (${channelCount} channel${channelCount === 1 ? '' : 's'} configured)`,
 );

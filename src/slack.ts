@@ -4,7 +4,12 @@ import type { ChatStreamer } from '@slack/web-api';
 import { mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { loadConfig, resolvedChannelConfig, type ResponseMode } from './config.js';
+import {
+  loadConfig,
+  resolvedChannelConfig,
+  resolvedDmConfig,
+  type ResponseMode,
+} from './config.js';
 import {
   runClaude,
   runClaudeStreaming,
@@ -741,10 +746,14 @@ async function processQueuedMessage(queued: QueuedMessage, client: WebClient): P
     return;
   }
 
-  const channelConfig = resolvedChannelConfig(config, queued.channelId);
+  let channelConfig = resolvedChannelConfig(config, queued.channelId);
   if (!channelConfig) {
-    dequeue(queued.channelId, queued.ts);
-    return;
+    if (queued.channelId.startsWith('D') && config.botOwner) {
+      channelConfig = resolvedDmConfig(config);
+    } else {
+      dequeue(queued.channelId, queued.ts);
+      return;
+    }
   }
 
   processingMessages.add(processingKey(queued.channelId, queued.ts));
@@ -1120,7 +1129,22 @@ export function registerMessageHandler(app: App): void {
     // Quick config check
     try {
       const config = loadConfig();
-      if (!resolvedChannelConfig(config, msg.channel)) return;
+      if (!resolvedChannelConfig(config, msg.channel)) {
+        if (msg.channel.startsWith('D')) {
+          if (msg.user !== config.botOwner) {
+            await safeReact(client, msg.channel, msg.ts, 'no_entry');
+            await client.chat.postMessage({
+              channel: msg.channel,
+              thread_ts: msg.thread_ts ?? msg.ts,
+              text: 'Sorry, DMs are not enabled for your account.',
+            });
+            return;
+          }
+          // botOwner DM — allow through
+        } else {
+          return;
+        }
+      }
     } catch {
       return;
     }

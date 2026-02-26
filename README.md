@@ -40,14 +40,19 @@ Claude Code edits `config.json` directly, and changes take effect on the next me
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app
 2. **Enable Socket Mode** (Settings > Socket Mode) and generate an App-Level Token with `connections:write` scope
 3. **Add Bot Token Scopes** (OAuth & Permissions):
-   - `chat:write`
    - `channels:history`
    - `channels:read`
+   - `chat:write`
    - `files:read` (for image attachments)
+   - `groups:history` (for private channels)
+   - `im:history` (for receiving DMs from botOwner)
+   - `im:read`
+   - `im:write` (for botOwner DM notifications)
    - `reactions:write`
 4. **Subscribe to Bot Events** (Event Subscriptions):
    - `message.channels`
    - `message.groups` (for private channels)
+   - `message.im` (for DMs to the bot)
 5. **Install the app** to your workspace and copy the Bot Token (`xoxb-...`)
 6. Invite the bot to your channels: `/invite @YourBot`
 
@@ -68,7 +73,7 @@ SLACK_APP_TOKEN=xapp-your-app-level-token
 Create `config.json`:
 ```json
 {
-  "systemChannel": "C0123456789",
+  "botOwner": "U0123456789",
   "channels": {
     "C0123456789": {
       "name": "my-project",
@@ -141,11 +146,11 @@ The install script auto-detects your `node` path, project directory, and user en
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `systemChannel` | Channel ID for startup/shutdown notifications | none (disabled) |
+| `botOwner` | Slack user ID — receives startup/shutdown DMs, can use magic commands | none (disabled) |
 | `channels` | Channel-to-folder mappings | required |
 | `defaults` | Default model, prompt, timeout, and response mode | required |
 
-Set `systemChannel` to the ID of one of your configured channels. Claudeway will post a message there on startup and shutdown, so you can tell when it's running.
+Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutdown, and you can send magic commands (`!config`, `!ps`, etc.) in that DM as an admin console.
 
 ### Channel Config
 
