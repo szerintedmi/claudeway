@@ -26,7 +26,7 @@ export interface Defaults {
 export interface Config {
   channels: Record<string, ChannelConfig>;
   defaults: Defaults;
-  systemChannel?: string;
+  botOwner?: string;
 }
 
 type ConfigFormat = 'yaml' | 'json';
@@ -100,6 +100,18 @@ export function saveConfig(config: Config): void {
 
   // Atomic rename: temp → original
   renameSync(tmpPath, configPath);
+}
+
+export function resolvedDmConfig(config: Config) {
+  return {
+    name: 'dm',
+    folder: '.',
+    model: config.defaults.model,
+    systemPrompt: config.defaults.systemPrompt,
+    timeoutMs: config.defaults.timeoutMs,
+    responseMode: config.defaults.responseMode,
+    processMode: config.defaults.processMode ?? ('oneshot' as ProcessMode),
+  };
 }
 
 export function getChannelConfig(config: Config, channelId: string): ChannelConfig | null {

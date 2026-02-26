@@ -1,5 +1,5 @@
 {
-  "systemChannel": "C0123456789",
+  "botOwner": "U0123456789",
   "channels": {
     "C0123456789": {
       "name": "my-project",

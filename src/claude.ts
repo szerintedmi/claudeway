@@ -462,7 +462,8 @@ function buildClaudeArgs(
   options: ClaudeOptions,
   outputFormat: 'json' | 'stream-json',
 ): { args: string[]; sessionId: string; cwd: string; resuming: boolean } {
-  const { message, cwd, model, systemPrompt, channelId } = options;
+  const { message, cwd: rawCwd, model, systemPrompt, channelId } = options;
+  const cwd = resolve(rawCwd);
 
   const configPath = getConfigPath();
   const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
@@ -586,7 +587,8 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
   cwd: string;
   resuming: boolean;
 } {
-  const { cwd, model, systemPrompt, channelId } = options;
+  const { cwd: rawCwd, model, systemPrompt, channelId } = options;
+  const cwd = resolve(rawCwd);
 
   const configPath = getConfigPath();
   const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
