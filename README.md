@@ -61,7 +61,7 @@ Claude Code edits the config file directly (JSON or YAML), and changes take effe
 ```bash
 git clone https://github.com/ktamas77/claudeway.git
 cd claudeway
-npm install
+bun install
 ```
 
 Create `.env`:
@@ -107,12 +107,12 @@ Optionally, create `mcp.json` to give Claude access to MCP servers (e.g. persist
 ### 3. Run
 
 ```bash
-npm start
+bun start
 ```
 
 For development with auto-reload:
 ```bash
-npm run dev
+bun dev
 ```
 
 ### 4. Run as a Background Service (macOS)
@@ -139,7 +139,7 @@ launchctl unload ~/Library/LaunchAgents/com.claudeway.plist   # stop temporarily
 launchctl load -w ~/Library/LaunchAgents/com.claudeway.plist  # start again
 ```
 
-The install script auto-detects your `node` path, project directory, and user environment. The generated plist is placed at `~/Library/LaunchAgents/com.claudeway.plist`.
+The install script auto-detects your `bun` path, project directory, and user environment. The generated plist is placed at `~/Library/LaunchAgents/com.claudeway.plist`.
 
 ## Config Options
 
@@ -216,14 +216,14 @@ Killed processes are handled gracefully — the error handler posts a message in
 ## Development
 
 ```bash
-npm start          # Run with tsx
-npm run dev        # Run with tsx watch (auto-reload)
-npm run build      # TypeScript compile
-npm run typecheck  # Type check only
-npm run lint       # ESLint
-npm run format     # Prettier
-npm test           # Run unit tests
-npm run test:watch # Watch mode
+bun start          # Run with bun
+bun dev            # Run with bun --watch (auto-reload)
+bun run build      # TypeScript compile
+bun run typecheck  # Type check only
+bun run lint       # ESLint
+bun run format     # Prettier
+bun test           # Run unit tests
+bun test --watch   # Watch mode
 ```
 
 Unit tests cover the pure-function layer: NDJSON stream-json line parsing (the Claude CLI wire format), Slack mrkdwn conversion, message splitting, config resolution, session ID derivation, and path encoding. Tests run automatically on every commit via the pre-commit hook.
@@ -256,7 +256,7 @@ Unit tests cover the pure-function layer: NDJSON stream-json line parsing (the C
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - Claude Pro or Max subscription
-- Node.js 20+
+- [Bun](https://bun.sh) 1.0+
 
 ## Changelog
 
