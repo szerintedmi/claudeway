@@ -8,6 +8,7 @@ import {
   loadConfig,
   resolvedChannelConfig,
   resolvedDmConfig,
+  getChannelConfig,
   type ResponseMode,
 } from './config.js';
 import {
@@ -92,6 +93,16 @@ function cleanupImages(paths: string[]): void {
       // Already removed
     }
   }
+}
+
+/**
+ * Check if a user is allowed to use a channel.
+ * Returns true if allowedUsers is not set or empty (open to everyone),
+ * or if the user's Slack ID is in the list.
+ */
+export function isUserAllowed(allowedUsers: string[] | undefined, userId: string): boolean {
+  if (!allowedUsers || allowedUsers.length === 0) return true;
+  return allowedUsers.includes(userId);
 }
 
 const MAX_MESSAGE_LENGTH = 3900;
@@ -1183,7 +1194,8 @@ export function registerMessageHandler(app: App): void {
     // Require at least text or images
     if (!hasText && !hasImages) return;
 
-    // Quick config check
+    // Quick config check + user authorization
+    let channelAllowedUsers: string[] | undefined;
     try {
       const config = loadConfig();
       if (!resolvedChannelConfig(config, msg.channel)) {
@@ -1202,7 +1214,23 @@ export function registerMessageHandler(app: App): void {
           return;
         }
       }
+      const chConfig = getChannelConfig(config, msg.channel);
+      if (chConfig) {
+        channelAllowedUsers = chConfig.allowedUsers;
+      }
     } catch {
+      return;
+    }
+
+    // Reject unauthorized users
+    const userId = msg.user ?? 'unknown';
+    if (!isUserAllowed(channelAllowedUsers, userId)) {
+      await safeReact(client, msg.channel, msg.ts, 'no_entry');
+      await client.chat.postMessage({
+        channel: msg.channel,
+        thread_ts: msg.thread_ts ?? msg.ts,
+        text: "Sorry, you're not authorized to use this bot in this channel.",
+      });
       return;
     }
 

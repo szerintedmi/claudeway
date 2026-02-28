@@ -4,6 +4,7 @@ import {
   formatDuration,
   formatTimeout,
   formatChannelConfig,
+  isUserAllowed,
 } from '../slack.js';
 
 describe('markdownToSlackMrkdwn', () => {
@@ -278,5 +279,27 @@ describe('formatChannelConfig', () => {
     expect(result).toContain('`sonnet`');
     expect(result).toContain('`batch` / `oneshot`');
     expect(result).toContain('1m');
+  });
+});
+
+describe('isUserAllowed', () => {
+  it('allows any user when allowedUsers is undefined', () => {
+    expect(isUserAllowed(undefined, 'U123')).toBe(true);
+  });
+
+  it('allows any user when allowedUsers is empty', () => {
+    expect(isUserAllowed([], 'U123')).toBe(true);
+  });
+
+  it('allows a user in the allowedUsers list', () => {
+    expect(isUserAllowed(['U123', 'U456'], 'U123')).toBe(true);
+  });
+
+  it('denies a user not in the allowedUsers list', () => {
+    expect(isUserAllowed(['U123', 'U456'], 'U789')).toBe(false);
+  });
+
+  it('denies unknown user when allowedUsers is set', () => {
+    expect(isUserAllowed(['U123'], 'unknown')).toBe(false);
   });
 });
