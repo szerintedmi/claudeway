@@ -9,7 +9,8 @@
     "rootDir": "src",
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "declaration": true
+    "declaration": true,
+    "types": ["bun-types"]
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist"]
