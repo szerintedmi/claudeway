@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 import { resolve } from 'path';

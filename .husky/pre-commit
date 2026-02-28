@@ -1,2 +1,2 @@
-npx lint-staged
-npm test -- --passWithNoTests
+bunx lint-staged
+bun test

@@ -10,16 +10,10 @@ PLIST_PATH="$HOME/Library/LaunchAgents/${LABEL}.plist"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Find node binary
-NODE_BIN=$(which node 2>/dev/null)
-if [ -z "$NODE_BIN" ]; then
-  echo "Error: node not found in PATH"
-  exit 1
-fi
-
-TSX_BIN="$PROJECT_DIR/node_modules/.bin/tsx"
-if [ ! -f "$TSX_BIN" ]; then
-  echo "Error: tsx not found. Run 'npm install' first."
+# Find bun binary
+BUN_BIN=$(which bun 2>/dev/null)
+if [ -z "$BUN_BIN" ]; then
+  echo "Error: bun not found in PATH. Install from https://bun.sh"
   exit 1
 fi
 
@@ -55,8 +49,7 @@ cat > "$PLIST_PATH" << EOF
     <string>${LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${NODE_BIN}</string>
-        <string>${TSX_BIN}</string>
+        <string>${BUN_BIN}</string>
         <string>${PROJECT_DIR}/src/index.ts</string>
     </array>
     <key>WorkingDirectory</key>

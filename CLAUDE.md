@@ -34,10 +34,11 @@ Remotes: `origin` = `szerintedmi/claudeway` (fork), `upstream` = `ktamas77/claud
 ## Development
 
 ```bash
-npm start        # Run with tsx
-npm run dev      # Run with tsx watch (auto-reload)
-npm run build    # TypeScript compile
-npm run typecheck # Type check only
-npm run lint     # ESLint
-npm run format   # Prettier
+bun start        # Run with bun
+bun dev          # Run with bun --watch (auto-reload)
+bun run build    # TypeScript compile
+bun run typecheck # Type check only
+bun run lint     # ESLint
+bun run format   # Prettier
+bun test         # Run tests
 ```
