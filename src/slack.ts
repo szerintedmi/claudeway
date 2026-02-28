@@ -258,17 +258,26 @@ class NativeStreamingResponder {
   private client: WebClient;
   private channel: string;
   private threadTs: string;
+  private recipientTeamId?: string;
+  private recipientUserId?: string;
   private streamer: ChatStreamer | null = null;
   private fullText = '';
   private thinkingTs: string | null;
   private finished = false;
   private appendChain: Promise<void> = Promise.resolve();
 
-  constructor(client: WebClient, channel: string, threadTs: string, thinkingTs?: string) {
+  constructor(
+    client: WebClient,
+    channel: string,
+    threadTs: string,
+    options?: { thinkingTs?: string; recipientTeamId?: string; recipientUserId?: string },
+  ) {
     this.client = client;
     this.channel = channel;
     this.threadTs = threadTs;
-    this.thinkingTs = thinkingTs ?? null;
+    this.thinkingTs = options?.thinkingTs ?? null;
+    this.recipientTeamId = options?.recipientTeamId;
+    this.recipientUserId = options?.recipientUserId;
   }
 
   onTextDelta(text: string): void {
@@ -279,6 +288,8 @@ class NativeStreamingResponder {
         channel: this.channel,
         thread_ts: this.threadTs,
         buffer_size: 1,
+        ...(this.recipientTeamId ? { recipient_team_id: this.recipientTeamId } : {}),
+        ...(this.recipientUserId ? { recipient_user_id: this.recipientUserId } : {}),
       });
       // Delete the thinking preview now that the real stream has started
       if (this.thinkingTs) {
@@ -551,12 +562,11 @@ async function processStreamNative(
       // Non-critical — proceed without thinking preview
     }
 
-    const responder = new NativeStreamingResponder(
-      client,
-      queued.channelId,
-      queued.threadTs,
+    const responder = new NativeStreamingResponder(client, queued.channelId, queued.threadTs, {
       thinkingTs,
-    );
+      recipientTeamId: queued.teamId,
+      recipientUserId: queued.userId,
+    });
 
     const result = await runClaudeStreaming({
       message: queued.text,
@@ -702,12 +712,11 @@ async function processPersistent(
         // Non-critical
       }
 
-      const responder = new NativeStreamingResponder(
-        client,
-        queued.channelId,
-        queued.threadTs,
+      const responder = new NativeStreamingResponder(client, queued.channelId, queued.threadTs, {
         thinkingTs,
-      );
+        recipientTeamId: queued.teamId,
+        recipientUserId: queued.userId,
+      });
 
       const result = await runClaudePersistentStreaming({
         message: queued.text,
@@ -1253,11 +1262,13 @@ export function registerMessageHandler(app: App): void {
 
     const threadTs = msg.thread_ts ?? msg.ts;
     const text = msg.text || (imagePaths.length > 0 ? 'What is in this image?' : '');
+    const teamId = context.teamId;
 
     // Persist to queue
     enqueue({
       channelId: msg.channel,
       userId: msg.user ?? 'unknown',
+      ...(teamId ? { teamId } : {}),
       text,
       ts: msg.ts,
       threadTs,
