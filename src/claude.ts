@@ -15,7 +15,7 @@ export interface ClaudeOptions {
   timeoutMs: number;
   channelId: string;
   threadTs?: string;
-  imagePaths?: string[];
+  filePaths?: string[];
 }
 
 export interface ClaudeStreamingOptions extends ClaudeOptions {
@@ -32,6 +32,14 @@ export interface ClaudeResult {
 
 // Claudeway namespace UUID for deterministic session IDs
 const CLAUDEWAY_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+
+/** Append file path references to a message so Claude reads them via its Read tool */
+function buildMessageWithFiles(message: string, filePaths: string[] | undefined): string {
+  if (filePaths && filePaths.length > 0) {
+    return `${message}\n\n[Attached files — use your Read tool to view them]\n${filePaths.join('\n')}`;
+  }
+  return message;
+}
 
 // Absolute maximum runtime — safety net regardless of activity
 const ABSOLUTE_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
@@ -604,15 +612,7 @@ function buildClaudeArgs(
     args.push('--mcp-config', mcpConfigPath);
   }
 
-  // If images are attached, append file path references so Claude reads them
-  if (options.imagePaths && options.imagePaths.length > 0) {
-    const imageRefs = options.imagePaths.map((p) => p).join('\n');
-    args.push(
-      message + '\n\n[Attached image files — use your Read tool to view them]\n' + imageRefs,
-    );
-  } else {
-    args.push(message);
-  }
+  args.push(buildMessageWithFiles(message, options.filePaths));
 
   return { args, sessionId, cwd, resuming };
 }
@@ -906,7 +906,7 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
 export async function runClaudePersistentStreaming(
   options: ClaudeStreamingOptions,
 ): Promise<ClaudeResult> {
-  const { channelId, message, timeoutMs, imagePaths, onTextDelta } = options;
+  const { channelId, message, timeoutMs, filePaths, onTextDelta } = options;
   const regKey = registryKey(channelId, options.threadTs);
 
   let entry = persistentRegistry.get(regKey);
@@ -918,13 +918,7 @@ export async function runClaudePersistentStreaming(
 
   entry.lastMessage = message.substring(0, 80);
 
-  // Build message content (include image refs if any)
-  let content = message;
-  if (imagePaths && imagePaths.length > 0) {
-    const imageRefs = imagePaths.join('\n');
-    content =
-      message + '\n\n[Attached image files — use your Read tool to view them]\n' + imageRefs;
-  }
+  const content = buildMessageWithFiles(message, filePaths);
 
   // Write the user message to stdin as NDJSON
   const inputLine = JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n';

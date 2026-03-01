@@ -9,7 +9,7 @@ export interface QueuedMessage {
   ts: string;
   threadTs: string;
   queuedAt: string;
-  imagePaths?: string[];
+  filePaths?: string[];
 }
 
 const QUEUE_DIR = resolve(process.cwd(), '.queue');
