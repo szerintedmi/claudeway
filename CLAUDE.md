@@ -22,6 +22,7 @@ Claudeway is a Slack-to-Claude Code CLI gateway. Messages arrive via Slack Socke
 - Session IDs are deterministic (derived from channel ID + folder path via UUID v5)
 - One message processed at a time per channel (serialized via `channelBusy` set)
 - Bot does NOT programmatically join Slack channels — requires manual `/invite` + config entry
+- Magic commands (`!kill`, `!killall`, `!nudge`, `!config`, `!ps`) have authorization checks via `isMagicCommandAllowed()` — `botOwner` for global commands, channel `allowedUsers` for channel-scoped commands
 
 ## Branch Strategy (Fork)
 
