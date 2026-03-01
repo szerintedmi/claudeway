@@ -49,6 +49,7 @@ Claude Code edits the config file directly (JSON or YAML), and changes take effe
    - `im:read`
    - `im:write` (for botOwner DM notifications)
    - `reactions:write`
+   - `users:read` (for resolving display names in thread context)
 4. **Subscribe to Bot Events** (Event Subscriptions):
    - `message.channels`
    - `message.groups` (for private channels)
@@ -164,6 +165,18 @@ Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutd
 | `timeoutMs` | Idle timeout in ms (resets on activity) | 1800000 (30 min) |
 | `responseMode` | How responses are delivered (see below) | from defaults |
 | `processMode` | How the Claude CLI process is managed (see below) | from defaults |
+| `triggerMode` | When to respond: `all` or `mention` (see below) | `all` |
+
+### Trigger Modes
+
+Set `triggerMode` in `defaults` or per channel:
+
+| Mode | Description |
+|------|-------------|
+| `all` | Respond to every message in the channel. Default — works for dedicated bot channels. |
+| `mention` | Only respond when `@mentioned`. For shared channels where colleagues have their own conversations and you pull Claude in on demand. |
+
+In `mention` mode, the `@bot` mention is stripped from the prompt before sending to Claude. When invoked inside a thread (in either mode), the full thread history is fetched and prepended as context so Claude can see the conversation it's joining.
 
 ### Process Modes
 

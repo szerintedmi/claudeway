@@ -254,6 +254,7 @@ describe('formatChannelConfig', () => {
       model: 'opus',
       responseMode: 'stream-native',
       processMode: 'persistent',
+      triggerMode: 'mention',
       timeoutMs: 300_000,
     });
     expect(result).toBe(
@@ -262,6 +263,7 @@ describe('formatChannelConfig', () => {
         '• Folder: `/projects/test`',
         '• Model: `opus`',
         '• Mode: `stream-native` / `persistent`',
+        '• Trigger: `mention`',
         '• Timeout: 5m',
       ].join('\n'),
     );
@@ -278,6 +280,7 @@ describe('formatChannelConfig', () => {
     expect(result).toContain('<#C999>');
     expect(result).toContain('`sonnet`');
     expect(result).toContain('`batch` / `oneshot`');
+    expect(result).toContain('Trigger: `all`');
     expect(result).toContain('1m');
   });
 });

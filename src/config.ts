@@ -4,6 +4,7 @@ import { stringify as yamlStringify, parse as yamlParse } from 'yaml';
 
 export type ResponseMode = 'batch' | 'stream-update' | 'stream-native';
 export type ProcessMode = 'oneshot' | 'persistent';
+export type TriggerMode = 'all' | 'mention';
 
 export interface ChannelConfig {
   name: string;
@@ -14,6 +15,7 @@ export interface ChannelConfig {
   responseMode?: ResponseMode;
   processMode?: ProcessMode;
   allowedUsers?: string[];
+  triggerMode?: TriggerMode;
 }
 
 export interface Defaults {
@@ -22,6 +24,7 @@ export interface Defaults {
   timeoutMs: number;
   responseMode: ResponseMode;
   processMode?: ProcessMode;
+  triggerMode?: TriggerMode;
 }
 
 export interface Config {
@@ -112,6 +115,7 @@ export function resolvedDmConfig(config: Config) {
     timeoutMs: config.defaults.timeoutMs,
     responseMode: config.defaults.responseMode,
     processMode: config.defaults.processMode ?? ('oneshot' as ProcessMode),
+    triggerMode: config.defaults.triggerMode ?? ('all' as TriggerMode),
   };
 }
 
@@ -129,6 +133,7 @@ export function resolvedChannelConfig(
       timeoutMs: number;
       responseMode: ResponseMode;
       processMode: ProcessMode;
+      triggerMode: TriggerMode;
     })
   | null {
   const ch = config.channels[channelId];
@@ -140,5 +145,6 @@ export function resolvedChannelConfig(
     timeoutMs: ch.timeoutMs ?? config.defaults.timeoutMs,
     responseMode: ch.responseMode ?? config.defaults.responseMode,
     processMode: ch.processMode ?? config.defaults.processMode ?? 'oneshot',
+    triggerMode: ch.triggerMode ?? config.defaults.triggerMode ?? 'all',
   };
 }
