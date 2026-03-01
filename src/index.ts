@@ -118,13 +118,20 @@ const app = new App({
 });
 slackApp = app;
 
-registerMessageHandler(app);
-
 app.error(async (error) => {
   console.error('Bolt error:', error);
 });
 
 await app.start();
+
+const authResult = await app.client.auth.test();
+const botUserId = authResult.user_id;
+if (!botUserId) {
+  console.error('Could not resolve bot user ID from auth.test — exiting');
+  process.exit(1);
+}
+
+registerMessageHandler(app, botUserId);
 
 const channelCount = Object.keys(config.channels).length;
 console.log('Claudeway started');

@@ -8,7 +8,6 @@ import {
   loadConfig,
   resolvedChannelConfig,
   resolvedDmConfig,
-  getChannelConfig,
   type ResponseMode,
 } from './config.js';
 import {
@@ -29,6 +28,8 @@ import {
   getPending,
   type QueuedMessage,
 } from './queue.js';
+import { shouldRespond, stripBotMention, buildPrompt } from './prompt.js';
+import { fetchThreadContext } from './thread.js';
 
 interface SlackFile {
   id: string;
@@ -880,14 +881,15 @@ async function processQueuedMessage(queued: QueuedMessage, client: WebClient): P
     return;
   }
 
-  let channelConfig = resolvedChannelConfig(config, queued.channelId);
+  const resolvedCh = resolvedChannelConfig(config, queued.channelId);
+  const channelConfig = resolvedCh
+    ? resolvedCh
+    : queued.channelId.startsWith('D') && config.botOwner
+      ? resolvedDmConfig(config)
+      : null;
   if (!channelConfig) {
-    if (queued.channelId.startsWith('D') && config.botOwner) {
-      channelConfig = resolvedDmConfig(config);
-    } else {
-      dequeue(queued.channelId, queued.ts);
-      return;
-    }
+    dequeue(queued.channelId, queued.ts);
+    return;
   }
 
   processingMessages.add(processingKey(queued.channelId, queued.ts));
@@ -1142,6 +1144,7 @@ export function formatChannelConfig(
     responseMode: string;
     processMode: string;
     timeoutMs: number;
+    triggerMode?: string;
   },
 ): string {
   return [
@@ -1149,6 +1152,7 @@ export function formatChannelConfig(
     `• Folder: \`${resolved.folder}\``,
     `• Model: \`${resolved.model}\``,
     `• Mode: \`${resolved.responseMode}\` / \`${resolved.processMode}\``,
+    `• Trigger: \`${resolved.triggerMode ?? 'all'}\``,
     `• Timeout: ${formatTimeout(resolved.timeoutMs)}`,
   ].join('\n');
 }
@@ -1264,7 +1268,7 @@ async function handleMagicCommand(
   return false;
 }
 
-export function registerMessageHandler(app: App): void {
+export function registerMessageHandler(app: App, botUserId: string): void {
   app.message(async ({ message, client, context }) => {
     const msg = message as SlackMessage;
 
@@ -1274,7 +1278,8 @@ export function registerMessageHandler(app: App): void {
       msg.subtype &&
       msg.subtype !== 'file_share' &&
       msg.subtype !== 'message_deleted' &&
-      msg.subtype !== 'message_changed'
+      msg.subtype !== 'message_changed' &&
+      msg.subtype !== 'thread_broadcast'
     )
       return;
 
@@ -1293,7 +1298,11 @@ export function registerMessageHandler(app: App): void {
     if (msg.subtype === 'message_changed' && msg.message?.ts && msg.message?.text) {
       const origTs = msg.message.ts;
       if (!processingMessages.has(processingKey(msg.channel, origTs))) {
-        const updated = updateQueuedText(msg.channel, origTs, msg.message.text);
+        const updated = updateQueuedText(
+          msg.channel,
+          origTs,
+          stripBotMention(msg.message.text, botUserId),
+        );
         if (updated) {
           console.log(`[${msg.channel}] Queued message edited — updated in queue: ${origTs}`);
         }
@@ -1319,9 +1328,11 @@ export function registerMessageHandler(app: App): void {
 
     // Quick config check + user authorization
     let channelAllowedUsers: string[] | undefined;
+    let triggerMode: import('./config.js').TriggerMode = 'all';
     try {
       const config = loadConfig();
-      if (!resolvedChannelConfig(config, msg.channel)) {
+      const resolved = resolvedChannelConfig(config, msg.channel);
+      if (!resolved) {
         if (msg.channel.startsWith('D')) {
           if (msg.user !== config.botOwner) {
             await safeReact(client, msg.channel, msg.ts, 'no_entry');
@@ -1332,18 +1343,20 @@ export function registerMessageHandler(app: App): void {
             });
             return;
           }
-          // botOwner DM — allow through
+          // botOwner DM — allow through (triggerMode stays 'all')
         } else {
           return;
         }
-      }
-      const chConfig = getChannelConfig(config, msg.channel);
-      if (chConfig) {
-        channelAllowedUsers = chConfig.allowedUsers;
+      } else {
+        triggerMode = resolved.triggerMode;
+        channelAllowedUsers = resolved.allowedUsers;
       }
     } catch {
       return;
     }
+
+    // Trigger mode check — in 'mention' mode, ignore messages without @bot
+    if (!shouldRespond(msg.text, botUserId, triggerMode)) return;
 
     // Reject unauthorized users
     const userId = msg.user ?? 'unknown';
@@ -1364,8 +1377,16 @@ export function registerMessageHandler(app: App): void {
       imagePaths = await downloadSlackImages(msg.files, token);
     }
 
+    // Fetch thread context if this is a thread reply
     const threadTs = msg.thread_ts ?? msg.ts;
-    const text = msg.text || (imagePaths.length > 0 ? 'What is in this image?' : '');
+    const isThreadReply = !!(msg.thread_ts && msg.thread_ts !== msg.ts);
+    const threadMessages = isThreadReply
+      ? await fetchThreadContext(client, msg.channel, msg.thread_ts!, msg.ts, botUserId)
+      : [];
+
+    // Build final prompt: strip bot mentions and prepend thread context
+    const rawText = msg.text || (imagePaths.length > 0 ? 'What is in this image?' : '');
+    const text = buildPrompt(rawText, botUserId, threadMessages);
     const teamId = context.teamId;
 
     // Persist to queue
