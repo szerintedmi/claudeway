@@ -1,4 +1,5 @@
 import type { WebClient } from '@slack/web-api';
+import { warnInThread } from './slack-utils.js';
 
 export interface ThreadMessage {
   authorName: string;
@@ -77,6 +78,12 @@ export async function fetchThreadContext(
     console.error(
       '[thread] Failed to fetch thread context:',
       err instanceof Error ? err.message : err,
+    );
+    await warnInThread(
+      client,
+      channelId,
+      threadTs,
+      'Could not load thread history — responding without context.',
     );
     return [];
   }

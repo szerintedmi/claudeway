@@ -10,6 +10,26 @@ export function isUserAllowed(allowedUsers: string[] | undefined, userId: string
   return allowedUsers.includes(userId);
 }
 
+/**
+ * Post a warning to a Slack thread. Swallows errors — safe to call without disrupting the caller.
+ */
+export async function warnInThread(
+  client: WebClient,
+  channel: string,
+  threadTs: string,
+  message: string,
+): Promise<void> {
+  try {
+    await client.chat.postMessage({
+      channel,
+      thread_ts: threadTs,
+      text: `:warning: ${message}`,
+    });
+  } catch {
+    console.error(`[warn] Failed to post warning to thread: ${message}`);
+  }
+}
+
 export async function safeReact(
   client: WebClient,
   channel: string,

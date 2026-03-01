@@ -23,7 +23,7 @@ import {
   type QueuedMessage,
 } from './queue.js';
 import { handleMagicCommand } from './commands.js';
-import { isUserAllowed, safeReact } from './slack-utils.js';
+import { isUserAllowed, safeReact, warnInThread } from './slack-utils.js';
 import { shouldRespond, stripBotMention, buildPrompt } from './prompt.js';
 import { fetchThreadContext } from './thread.js';
 
@@ -51,18 +51,25 @@ interface SlackMessage {
 const FILE_SIZE_LIMIT = 25 * 1024 * 1024; // 25MB
 export const FILE_TEMP_BASE = resolve(process.cwd(), '.files');
 
+interface DownloadResult {
+  paths: string[];
+  failedCount: number;
+  totalCount: number;
+}
+
 async function downloadSlackFiles(
   files: SlackFile[],
   token: string,
   channelId: string,
-): Promise<string[]> {
+): Promise<DownloadResult> {
   const downloadable = files.filter((f) => f.url_private_download && f.size <= FILE_SIZE_LIMIT);
-  if (downloadable.length === 0) return [];
+  if (downloadable.length === 0) return { paths: [], failedCount: 0, totalCount: 0 };
 
   const dir = join(FILE_TEMP_BASE, channelId);
   mkdirSync(dir, { recursive: true });
 
   const paths: string[] = [];
+  let failedCount = 0;
   for (const file of downloadable) {
     try {
       const res = await fetch(file.url_private_download!, {
@@ -70,6 +77,7 @@ async function downloadSlackFiles(
       });
       if (!res.ok) {
         console.error(`[files] Failed to download ${file.name}: HTTP ${res.status}`);
+        failedCount++;
         continue;
       }
       const buffer = Buffer.from(await res.arrayBuffer());
@@ -79,9 +87,10 @@ async function downloadSlackFiles(
       console.log(`[files] Downloaded ${file.name} (${(file.size / 1024).toFixed(1)}KB)`);
     } catch (err) {
       console.error(`[files] Failed to download ${file.name}:`, err);
+      failedCount++;
     }
   }
-  return paths;
+  return { paths, failedCount, totalCount: downloadable.length };
 }
 
 // Re-export shared utilities for backward compatibility
@@ -845,6 +854,12 @@ async function processQueuedMessage(queued: QueuedMessage, client: WebClient): P
     config = loadConfig();
   } catch (err) {
     console.error('Failed to load config:', err);
+    await warnInThread(
+      client,
+      queued.channelId,
+      queued.threadTs,
+      'Failed to load config — message skipped. Check server logs.',
+    );
     dequeue(queued.channelId, queued.ts);
     return;
   }
@@ -1011,7 +1026,15 @@ export function registerMessageHandler(app: App, botUserId: string): void {
         triggerMode = resolved.triggerMode;
         channelAllowedUsers = resolved.allowedUsers;
       }
-    } catch {
+    } catch (err) {
+      console.error('Failed to load config during message routing:', err);
+      await safeReact(client, msg.channel, msg.ts, 'warning');
+      await warnInThread(
+        client,
+        msg.channel,
+        msg.thread_ts ?? msg.ts,
+        'Failed to load config — message not processed. Check server logs.',
+      );
       return;
     }
 
@@ -1035,7 +1058,17 @@ export function registerMessageHandler(app: App, botUserId: string): void {
     let filePaths: string[] = [];
     if (hasFiles && msg.files) {
       const token = context.botToken ?? process.env.SLACK_BOT_TOKEN ?? '';
-      filePaths = await downloadSlackFiles(msg.files, token, msg.channel);
+      const result = await downloadSlackFiles(msg.files, token, msg.channel);
+      filePaths = result.paths;
+      if (result.failedCount > 0) {
+        const threadTs = msg.thread_ts ?? msg.ts;
+        await warnInThread(
+          client,
+          msg.channel,
+          threadTs,
+          `Failed to download ${result.failedCount} of ${result.totalCount} file(s). Check server logs.`,
+        );
+      }
     }
 
     // If files were expected but all exceeded the size limit, and there's no text — abort
