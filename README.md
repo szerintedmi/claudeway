@@ -44,6 +44,7 @@ Claude Code edits the config file directly, and changes take effect on the next 
    - `channels:read`
    - `chat:write`
    - `files:read` (for image attachments)
+   - `files:write` (for file attachments in responses)
    - `groups:history` (for private channels)
    - `im:history` (for receiving DMs from botOwner)
    - `im:read`
@@ -153,6 +154,7 @@ The install script auto-detects your `bun` path, project directory, and user env
 | `botOwner` | Slack user ID — receives startup/shutdown DMs, can use magic commands | none (disabled) |
 | `channels` | Channel-to-folder mappings | required |
 | `defaults` | Default model, prompt, timeout, and response mode | required |
+| `defaults.tempDir` | Temp directory for per-request file attachments (relative to project root) | `.claudeway-tmp` |
 
 Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutdown, and you can send magic commands (`!config`, `!ps`, etc.) in that DM as an admin console.
 

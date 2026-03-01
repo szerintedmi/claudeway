@@ -15,6 +15,8 @@ export interface ClaudeOptions {
   timeoutMs: number;
   channelId: string;
   imagePaths?: string[];
+  tempDir?: string;
+  tempBaseDir?: string;
 }
 
 export interface ClaudeStreamingOptions extends ClaudeOptions {
@@ -296,8 +298,8 @@ interface ToolAccumulator {
   index: number;
 }
 
-function spawnClaudeProcess(args: string[], cwd: string) {
-  const env = { ...process.env };
+function spawnClaudeProcess(args: string[], cwd: string, extraEnv?: Record<string, string>) {
+  const env = { ...process.env, ...extraEnv };
   delete env.CLAUDECODE;
   if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
 
@@ -315,9 +317,10 @@ function runClaudeProcess(
   channelId: string,
   sessionId: string,
   message: string,
+  extraEnv?: Record<string, string>,
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
-    const proc = spawnClaudeProcess(args, cwd);
+    const proc = spawnClaudeProcess(args, cwd, extraEnv);
 
     processRegistry.set(channelId, {
       proc,
@@ -408,9 +411,10 @@ function runClaudeStreamingProcess(
   registrySessionId: string,
   message: string,
   onToolEvent?: (event: ToolEventPayload) => void,
+  extraEnv?: Record<string, string>,
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
-    const proc = spawnClaudeProcess(args, cwd);
+    const proc = spawnClaudeProcess(args, cwd, extraEnv);
 
     processRegistry.set(channelId, {
       proc,
@@ -592,7 +596,7 @@ function buildClaudeArgs(
 
   // If images are attached, append file path references so Claude reads them
   if (options.imagePaths && options.imagePaths.length > 0) {
-    const imageRefs = options.imagePaths.map((p) => p).join('\n');
+    const imageRefs = options.imagePaths.join('\n');
     args.push(
       message + '\n\n[Attached image files — use your Read tool to view them]\n' + imageRefs,
     );
@@ -607,8 +611,18 @@ function makeFreshArgs(args: string[], sessionId: string): string[] {
   return args.map((a, i) => (a === '--resume' && args[i + 1] === sessionId ? '--session-id' : a));
 }
 
+function buildTempDirEnv(options: ClaudeOptions): Record<string, string> | undefined {
+  if (!options.tempDir) return undefined;
+  return {
+    CLAUDEWAY_TEMP_DIR: options.tempDir,
+    CLAUDEWAY_CHANNEL_ID: options.channelId,
+    PATH: `${resolve(process.cwd(), 'scripts')}:${process.env.PATH ?? ''}`,
+  };
+}
+
 export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
   const { args, sessionId, cwd, resuming } = buildClaudeArgs(options, 'json');
+  const tempDirEnv = buildTempDirEnv(options);
 
   console.log(`[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} session ${sessionId}`);
 
@@ -620,6 +634,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
       options.channelId,
       sessionId,
       options.message,
+      tempDirEnv,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -635,6 +650,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
         options.channelId,
         sessionId,
         options.message,
+        tempDirEnv,
       );
     }
     throw err;
@@ -643,6 +659,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
 
 export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promise<ClaudeResult> {
   const { args, sessionId, cwd, resuming } = buildClaudeArgs(options, 'stream-json');
+  const tempDirEnv = buildTempDirEnv(options);
 
   console.log(
     `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} streaming session ${sessionId}`,
@@ -658,6 +675,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
       sessionId,
       options.message,
       options.onToolEvent,
+      tempDirEnv,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -675,6 +693,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
         sessionId,
         options.message,
         options.onToolEvent,
+        tempDirEnv,
       );
     }
     throw err;
@@ -737,6 +756,12 @@ function createPersistentProcess(
   const env = { ...process.env };
   delete env.CLAUDECODE;
   if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
+  // Persistent mode: inject channel ID + temp base dir for pointer file lookup, and scripts PATH
+  env.CLAUDEWAY_CHANNEL_ID = options.channelId;
+  if (options.tempBaseDir) {
+    env.CLAUDEWAY_TEMP_BASE = options.tempBaseDir;
+  }
+  env.PATH = `${resolve(process.cwd(), 'scripts')}:${env.PATH ?? ''}`;
 
   const proc = spawn('claude', args, {
     cwd,

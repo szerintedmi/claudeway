@@ -8,3 +8,4 @@ mcp.json
 *.log
 *.pid
 .queue/
+.claudeway-tmp/

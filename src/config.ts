@@ -25,6 +25,7 @@ export interface Defaults {
   responseMode: ResponseMode;
   processMode?: ProcessMode;
   triggerMode?: TriggerMode;
+  tempDir?: string;
 }
 
 export interface Config {
@@ -35,6 +36,12 @@ export interface Config {
 
 export function getConfigPath(): string {
   return resolve(process.cwd(), 'config.yaml');
+}
+
+const DEFAULT_TEMP_DIR = '.claudeway-tmp';
+
+export function resolvedTempDir(config: Config): string {
+  return resolve(process.cwd(), config.defaults.tempDir ?? DEFAULT_TEMP_DIR);
 }
 
 export function loadConfig(): Config {
