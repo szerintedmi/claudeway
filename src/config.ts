@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync } from 'fs';
 import { resolve } from 'path';
 import { stringify as yamlStringify, parse as yamlParse } from 'yaml';
 
@@ -33,38 +33,14 @@ export interface Config {
   botOwner?: string;
 }
 
-type ConfigFormat = 'yaml' | 'json';
-
-function detectConfigPath(): { path: string; format: ConfigFormat } {
-  const yamlPath = resolve(process.cwd(), 'config.yaml');
-  const jsonPath = resolve(process.cwd(), 'config.json');
-  if (existsSync(yamlPath)) {
-    if (existsSync(jsonPath)) {
-      console.warn('[config] Both config.yaml and config.json exist — using config.yaml');
-    }
-    return { path: yamlPath, format: 'yaml' };
-  }
-  return { path: jsonPath, format: 'json' };
-}
-
-function parseConfig(raw: string, format: ConfigFormat): Config {
-  return format === 'yaml' ? (yamlParse(raw) as Config) : (JSON.parse(raw) as Config);
-}
-
-function serializeConfig(config: Config, format: ConfigFormat): string {
-  return format === 'yaml'
-    ? yamlStringify(config, { lineWidth: 0 })
-    : JSON.stringify(config, null, 2) + '\n';
-}
-
 export function getConfigPath(): string {
-  return detectConfigPath().path;
+  return resolve(process.cwd(), 'config.yaml');
 }
 
 export function loadConfig(): Config {
-  const { path: configPath, format } = detectConfigPath();
+  const configPath = getConfigPath();
   const raw = readFileSync(configPath, 'utf-8');
-  const config = parseConfig(raw, format);
+  const config = yamlParse(raw) as Config;
 
   if (!config.channels || typeof config.channels !== 'object') {
     throw new Error(`${configPath}: "channels" must be an object`);
@@ -89,15 +65,15 @@ export function loadConfig(): Config {
 }
 
 export function saveConfig(config: Config): void {
-  const { path: configPath, format } = detectConfigPath();
-  const content = serializeConfig(config, format);
+  const configPath = getConfigPath();
+  const content = yamlStringify(config, { lineWidth: 0 });
   const tmpPath = configPath + '.tmp';
 
   // Write to temp file
   writeFileSync(tmpPath, content, 'utf-8');
 
   // Validate the temp file parses correctly and has required fields
-  const parsed = parseConfig(readFileSync(tmpPath, 'utf-8'), format);
+  const parsed = yamlParse(readFileSync(tmpPath, 'utf-8')) as Config;
   if (!parsed.channels || typeof parsed.channels !== 'object') {
     throw new Error('saveConfig: validation failed — "channels" must be an object');
   }
