@@ -46,15 +46,20 @@ describe('parseStreamLine — text_delta events', () => {
     expect(parseStreamLine(line)).toBeNull();
   });
 
-  it('returns null when delta.type is not text_delta', () => {
+  it('returns tool_input_delta when delta.type is input_json_delta', () => {
     const line = JSON.stringify({
       type: 'stream_event',
       event: {
         type: 'content_block_delta',
+        index: 1,
         delta: { type: 'input_json_delta', partial_json: '{}' },
       },
     });
-    expect(parseStreamLine(line)).toBeNull();
+    expect(parseStreamLine(line)).toEqual({
+      type: 'tool_input_delta',
+      partialJson: '{}',
+      index: 1,
+    });
   });
 
   it('returns null when delta.text is empty string', () => {
@@ -145,6 +150,76 @@ describe('parseStreamLine — user_receipt', () => {
       message: { role: 'user', content: 'hello' },
     });
     expect(parseStreamLine(line)).toEqual({ type: 'user_receipt' });
+  });
+});
+
+describe('parseStreamLine — tool events', () => {
+  it('returns tool_start for content_block_start with tool_use', () => {
+    const line = JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 1,
+        content_block: { type: 'tool_use', id: 'toolu_123', name: 'Read', input: {} },
+      },
+    });
+    expect(parseStreamLine(line)).toEqual({
+      type: 'tool_start',
+      toolName: 'Read',
+      index: 1,
+    });
+  });
+
+  it('returns tool_start with unknown for missing name', () => {
+    const line = JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 1,
+        content_block: { type: 'tool_use', id: 'toolu_123' },
+      },
+    });
+    expect(parseStreamLine(line)).toEqual({
+      type: 'tool_start',
+      toolName: 'unknown',
+      index: 1,
+    });
+  });
+
+  it('returns null for content_block_start with text type', () => {
+    const line = JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      },
+    });
+    expect(parseStreamLine(line)).toBeNull();
+  });
+
+  it('returns tool_input_delta for input_json_delta events', () => {
+    const line = JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        index: 1,
+        delta: { type: 'input_json_delta', partial_json: '{"file_path":"src/' },
+      },
+    });
+    expect(parseStreamLine(line)).toEqual({
+      type: 'tool_input_delta',
+      partialJson: '{"file_path":"src/',
+      index: 1,
+    });
+  });
+
+  it('returns tool_stop for content_block_stop with index', () => {
+    const line = JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'content_block_stop', index: 1 },
+    });
+    expect(parseStreamLine(line)).toEqual({ type: 'tool_stop', index: 1 });
   });
 });
 

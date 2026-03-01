@@ -19,6 +19,7 @@ export interface ClaudeOptions {
 
 export interface ClaudeStreamingOptions extends ClaudeOptions {
   onTextDelta: (text: string) => void;
+  onToolEvent?: (event: ToolEventPayload) => void;
 }
 
 export interface ClaudeResult {
@@ -66,9 +67,11 @@ interface PersistentProcessEntry {
     resolve: (r: ClaudeResult) => void;
     reject: (e: Error) => void;
     onTextDelta?: (text: string) => void;
+    onToolEvent?: (event: ToolEventPayload) => void;
     fullText: string;
     sessionId: string | null;
     cost: number | null;
+    toolAccum: ToolAccumulator | null;
   } | null;
 }
 
@@ -156,6 +159,10 @@ export function deriveSessionId(channelId: string, folder: string): string {
 
 // --- Stream-json line parser (pure, exported for testing) ---
 
+export type ToolEventPayload =
+  | { phase: 'start'; toolName: string }
+  | { phase: 'complete'; toolName: string; keyArg: string | null };
+
 export type StreamLineEvent =
   | { type: 'text_delta'; text: string }
   | {
@@ -166,6 +173,9 @@ export type StreamLineEvent =
       tokens: number | null;
     }
   | { type: 'user_receipt' }
+  | { type: 'tool_start'; toolName: string; index: number }
+  | { type: 'tool_input_delta'; partialJson: string; index: number }
+  | { type: 'tool_stop'; index: number }
   | null;
 
 /**
@@ -205,10 +215,85 @@ export function parseStreamLine(line: string): StreamLineEvent {
       return { type: 'user_receipt' };
     }
 
+    // Tool use start — content_block_start with tool_use type
+    if (
+      obj.type === 'stream_event' &&
+      obj.event?.type === 'content_block_start' &&
+      obj.event.content_block?.type === 'tool_use'
+    ) {
+      return {
+        type: 'tool_start',
+        toolName: obj.event.content_block.name ?? 'unknown',
+        index: obj.event.index ?? -1,
+      };
+    }
+
+    // Tool input delta — partial JSON for tool arguments
+    if (
+      obj.type === 'stream_event' &&
+      obj.event?.type === 'content_block_delta' &&
+      obj.event.delta?.type === 'input_json_delta'
+    ) {
+      return {
+        type: 'tool_input_delta',
+        partialJson: obj.event.delta.partial_json ?? '',
+        index: obj.event.index ?? -1,
+      };
+    }
+
+    // Content block stop — only meaningful when matched with a tool block by index
+    if (obj.type === 'stream_event' && obj.event?.type === 'content_block_stop') {
+      return { type: 'tool_stop', index: obj.event.index ?? -1 };
+    }
+
     return null;
   } catch {
     return null;
   }
+}
+
+// Known tool parameter priority map for extracting the most relevant argument
+const TOOL_KEY_PARAMS: Record<string, string[]> = {
+  Read: ['file_path'],
+  Write: ['file_path'],
+  Edit: ['file_path'],
+  MultiEdit: ['file_path'],
+  Bash: ['command'],
+  Glob: ['pattern'],
+  Grep: ['pattern'],
+  LS: ['path'],
+  WebFetch: ['url'],
+  WebSearch: ['query'],
+};
+
+function extractKeyArg(toolName: string, accumulatedJson: string): string | null {
+  try {
+    const parsed = JSON.parse(accumulatedJson);
+    const priority = TOOL_KEY_PARAMS[toolName] ?? [];
+    for (const key of priority) {
+      if (typeof parsed[key] === 'string' && parsed[key].length > 0) {
+        const val: string = parsed[key];
+        return val.length > 80 ? val.substring(0, 77) + '...' : val;
+      }
+    }
+    // Fallback: first string-valued key
+    for (const val of Object.values(parsed)) {
+      if (typeof val === 'string' && val.length > 0) {
+        return (val as string).length > 80
+          ? (val as string).substring(0, 77) + '...'
+          : (val as string);
+      }
+    }
+  } catch {
+    // Partial JSON may not be valid — return null gracefully
+  }
+  return null;
+}
+
+interface ToolAccumulator {
+  toolName: string;
+  partialJson: string;
+  index: number;
 }
 
 function spawnClaudeProcess(args: string[], cwd: string) {
@@ -322,6 +407,7 @@ function runClaudeStreamingProcess(
   channelId: string,
   registrySessionId: string,
   message: string,
+  onToolEvent?: (event: ToolEventPayload) => void,
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
     const proc = spawnClaudeProcess(args, cwd);
@@ -343,6 +429,7 @@ function runClaudeStreamingProcess(
     let cost: number | null = null;
     let tokens: number | null = null;
     let lineBuffer = '';
+    let toolAccum: ToolAccumulator | null = null;
 
     function processLine(line: string) {
       const event = parseStreamLine(line);
@@ -355,6 +442,19 @@ function runClaudeStreamingProcess(
         cost = event.cost ?? cost;
         tokens = event.tokens ?? tokens;
         if (event.text) fullText = event.text;
+      } else if (event.type === 'tool_start') {
+        toolAccum = { toolName: event.toolName, partialJson: '', index: event.index };
+        void onToolEvent?.({ phase: 'start', toolName: event.toolName });
+      } else if (
+        event.type === 'tool_input_delta' &&
+        toolAccum &&
+        event.index === toolAccum.index
+      ) {
+        toolAccum.partialJson += event.partialJson;
+      } else if (event.type === 'tool_stop' && toolAccum && event.index === toolAccum.index) {
+        const keyArg = extractKeyArg(toolAccum.toolName, toolAccum.partialJson);
+        void onToolEvent?.({ phase: 'complete', toolName: toolAccum.toolName, keyArg });
+        toolAccum = null;
       }
     }
 
@@ -557,6 +657,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
       options.channelId,
       sessionId,
       options.message,
+      options.onToolEvent,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -573,6 +674,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
         options.channelId,
         sessionId,
         options.message,
+        options.onToolEvent,
       );
     }
     throw err;
@@ -738,6 +840,33 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
     return;
   }
 
+  if (event.type === 'tool_start' && entry.currentTurn) {
+    entry.currentTurn.toolAccum = { toolName: event.toolName, partialJson: '', index: event.index };
+    void entry.currentTurn.onToolEvent?.({ phase: 'start', toolName: event.toolName });
+    return;
+  }
+
+  if (
+    event.type === 'tool_input_delta' &&
+    entry.currentTurn?.toolAccum &&
+    event.index === entry.currentTurn.toolAccum.index
+  ) {
+    entry.currentTurn.toolAccum.partialJson += event.partialJson;
+    return;
+  }
+
+  if (
+    event.type === 'tool_stop' &&
+    entry.currentTurn?.toolAccum &&
+    event.index === entry.currentTurn.toolAccum.index
+  ) {
+    const { toolName, partialJson } = entry.currentTurn.toolAccum;
+    const keyArg = extractKeyArg(toolName, partialJson);
+    void entry.currentTurn.onToolEvent?.({ phase: 'complete', toolName, keyArg });
+    entry.currentTurn.toolAccum = null;
+    return;
+  }
+
   if (event.type === 'result' && entry.currentTurn) {
     entry.messageCount++;
     entry.totalCost += event.cost ?? 0;
@@ -788,9 +917,11 @@ export async function runClaudePersistentStreaming(
       resolve,
       reject,
       onTextDelta,
+      onToolEvent: options.onToolEvent,
       fullText: '',
       sessionId: entry.sessionId,
       cost: null,
+      toolAccum: null,
     };
 
     entry.proc.stdin!.write(inputLine, (err) => {

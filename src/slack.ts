@@ -19,6 +19,7 @@ import {
   killProcess,
   killAllProcesses,
   nudgeProcess,
+  type ToolEventPayload,
 } from './claude.js';
 import {
   enqueue,
@@ -173,6 +174,29 @@ function convertMarkdownText(text: string): string {
 const STREAM_UPDATE_INTERVAL_MS = 500;
 const STREAMING_INDICATOR = ' :writing_hand:';
 
+const TOOL_DISPLAY_VERBS: Record<string, string> = {
+  Read: 'Reading',
+  Write: 'Writing',
+  Edit: 'Editing',
+  MultiEdit: 'Editing',
+  Bash: 'Running',
+  Glob: 'Searching files',
+  Grep: 'Searching',
+  LS: 'Listing',
+  WebFetch: 'Fetching',
+  WebSearch: 'Searching web',
+  Agent: 'Delegating to agent',
+  Task: 'Delegating',
+};
+
+function formatToolStatus(toolName: string, keyArg: string | null): string {
+  const verb = TOOL_DISPLAY_VERBS[toolName] ?? `Using ${toolName}`;
+  if (keyArg) {
+    return `:thinking_face: _${verb} \`${keyArg}\`..._`;
+  }
+  return `:thinking_face: _${verb}..._`;
+}
+
 class StreamingResponder {
   private client: WebClient;
   private channel: string;
@@ -182,6 +206,7 @@ class StreamingResponder {
   private lastUpdateLen = 0;
   private updateTimer: ReturnType<typeof setInterval> | null = null;
   private finished = false;
+  private statusTs: string | null = null;
 
   constructor(client: WebClient, channel: string, threadTs: string) {
     this.client = client;
@@ -233,6 +258,30 @@ class StreamingResponder {
     }
   }
 
+  onToolEvent(event: ToolEventPayload): void {
+    const text = formatToolStatus(event.toolName, event.phase === 'complete' ? event.keyArg : null);
+    if (!this.statusTs) {
+      this.client.chat
+        .postMessage({
+          channel: this.channel,
+          thread_ts: this.threadTs,
+          text,
+        })
+        .then((res) => {
+          this.statusTs = res.ts ?? null;
+        })
+        .catch(() => {});
+    } else {
+      this.client.chat
+        .update({
+          channel: this.channel,
+          ts: this.statusTs,
+          text,
+        })
+        .catch(() => {});
+    }
+  }
+
   async finish(): Promise<void> {
     this.finished = true;
     if (this.updateTimer) {
@@ -242,6 +291,15 @@ class StreamingResponder {
     // Final update to remove the streaming indicator
     if (this.fullText.length > 0) {
       await this.flush();
+    }
+    // Delete the status message
+    if (this.statusTs) {
+      try {
+        await this.client.chat.delete({ channel: this.channel, ts: this.statusTs });
+      } catch {
+        // Best effort
+      }
+      this.statusTs = null;
     }
   }
 
@@ -263,8 +321,10 @@ class NativeStreamingResponder {
   private streamer: ChatStreamer | null = null;
   private fullText = '';
   private thinkingTs: string | null;
+  private statusTs: string | null = null;
   private finished = false;
   private appendChain: Promise<void> = Promise.resolve();
+  private toolEventChain: Promise<void> = Promise.resolve();
 
   constructor(
     client: WebClient,
@@ -280,6 +340,41 @@ class NativeStreamingResponder {
     this.recipientUserId = options?.recipientUserId;
   }
 
+  onToolEvent(event: ToolEventPayload): void {
+    this.toolEventChain = this.toolEventChain
+      .then(() => this.handleToolEvent(event))
+      .catch(() => {});
+  }
+
+  private async handleToolEvent(event: ToolEventPayload): Promise<void> {
+    const text = formatToolStatus(event.toolName, event.phase === 'complete' ? event.keyArg : null);
+    if (this.thinkingTs && !this.statusTs) {
+      // Reuse the existing thinking message as the status message
+      await this.client.chat.update({
+        channel: this.channel,
+        ts: this.thinkingTs,
+        text,
+      });
+      this.statusTs = this.thinkingTs;
+      this.thinkingTs = null;
+    } else if (this.statusTs) {
+      // Update existing status message
+      await this.client.chat.update({
+        channel: this.channel,
+        ts: this.statusTs,
+        text,
+      });
+    } else {
+      // Post new status message (e.g., tool use between text turns)
+      const res = await this.client.chat.postMessage({
+        channel: this.channel,
+        thread_ts: this.threadTs,
+        text,
+      });
+      this.statusTs = res.ts ?? null;
+    }
+  }
+
   onTextDelta(text: string): void {
     this.fullText += text;
     if (!this.streamer && !this.finished) {
@@ -291,8 +386,12 @@ class NativeStreamingResponder {
         ...(this.recipientTeamId ? { recipient_team_id: this.recipientTeamId } : {}),
         ...(this.recipientUserId ? { recipient_user_id: this.recipientUserId } : {}),
       });
-      // Delete the thinking preview now that the real stream has started
-      if (this.thinkingTs) {
+      // Delete the status/thinking message now that the real stream has started
+      if (this.statusTs) {
+        const ts = this.statusTs;
+        this.statusTs = null;
+        this.client.chat.delete({ channel: this.channel, ts }).catch(() => {});
+      } else if (this.thinkingTs) {
         const ts = this.thinkingTs;
         this.thinkingTs = null;
         this.client.chat.delete({ channel: this.channel, ts }).catch(() => {});
@@ -318,12 +417,13 @@ class NativeStreamingResponder {
 
   async finish(): Promise<void> {
     this.finished = true;
-    // Clean up thinking message if stream never started (empty response)
-    if (this.thinkingTs) {
-      const ts = this.thinkingTs;
-      this.thinkingTs = null;
+    // Clean up thinking/status message if stream never started (empty response)
+    const cleanupTs = this.statusTs ?? this.thinkingTs;
+    this.statusTs = null;
+    this.thinkingTs = null;
+    if (cleanupTs) {
       try {
-        await this.client.chat.delete({ channel: this.channel, ts });
+        await this.client.chat.delete({ channel: this.channel, ts: cleanupTs });
       } catch {
         // Best effort
       }
@@ -482,6 +582,7 @@ async function processStreamUpdate(
       channelId: queued.channelId,
       imagePaths: queued.imagePaths,
       onTextDelta: (text) => responder.onTextDelta(text),
+      onToolEvent: (event) => responder.onToolEvent(event),
     });
 
     await responder.finish();
@@ -577,6 +678,7 @@ async function processStreamNative(
       channelId: queued.channelId,
       imagePaths: queued.imagePaths,
       onTextDelta: (text) => responder.onTextDelta(text),
+      onToolEvent: (event) => responder.onToolEvent(event),
     });
 
     await responder.finish();
@@ -648,6 +750,7 @@ async function processPersistent(
         channelId: queued.channelId,
         imagePaths: queued.imagePaths,
         onTextDelta: (text) => responder.onTextDelta(text),
+        onToolEvent: (event) => responder.onToolEvent(event),
       });
 
       await responder.finish();
@@ -727,6 +830,7 @@ async function processPersistent(
         channelId: queued.channelId,
         imagePaths: queued.imagePaths,
         onTextDelta: (text) => responder.onTextDelta(text),
+        onToolEvent: (event) => responder.onToolEvent(event),
       });
 
       await responder.finish();
