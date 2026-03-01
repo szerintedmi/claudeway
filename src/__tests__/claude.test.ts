@@ -29,6 +29,30 @@ describe('deriveSessionId', () => {
     const id = deriveSessionId('C0AHAGEQY8Y', '/Users/tamas/dev/ktamas77/claudeway');
     expect(id).toBe('808dcec8-994d-5b57-8aa6-c6beeaf1fd39');
   });
+
+  it('without threadTs matches legacy behavior (no threadTs = same as before)', () => {
+    const withUndefined = deriveSessionId('C001', '/projects/foo', undefined);
+    const withoutArg = deriveSessionId('C001', '/projects/foo');
+    expect(withUndefined).toBe(withoutArg);
+  });
+
+  it('produces different IDs for different threadTs values', () => {
+    const a = deriveSessionId('C001', '/projects/foo', '1700000000.000100');
+    const b = deriveSessionId('C001', '/projects/foo', '1700000000.000200');
+    expect(a).not.toBe(b);
+  });
+
+  it('with threadTs differs from without threadTs', () => {
+    const withThread = deriveSessionId('C001', '/projects/foo', '1700000000.000100');
+    const withoutThread = deriveSessionId('C001', '/projects/foo');
+    expect(withThread).not.toBe(withoutThread);
+  });
+
+  it('same threadTs is deterministic', () => {
+    const a = deriveSessionId('C001', '/projects/foo', '1700000000.000100');
+    const b = deriveSessionId('C001', '/projects/foo', '1700000000.000100');
+    expect(a).toBe(b);
+  });
 });
 
 describe('sessionArtifactPaths — path encoding', () => {
