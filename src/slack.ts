@@ -1,9 +1,8 @@
 import { App } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
 import type { ChatStreamer } from '@slack/web-api';
-import { mkdirSync, writeFileSync, unlinkSync } from 'fs';
-import { join } from 'path';
-import { tmpdir } from 'os';
+import { mkdirSync, writeFileSync } from 'fs';
+import { join, resolve } from 'path';
 import {
   loadConfig,
   resolvedChannelConfig,
@@ -53,49 +52,40 @@ interface SlackMessage {
   message?: { ts?: string; text?: string };
 }
 
-const SUPPORTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
-const IMAGE_SIZE_LIMIT = 5 * 1024 * 1024; // 5MB
-const IMAGE_TEMP_DIR = join(tmpdir(), 'claudeway-images');
+const FILE_SIZE_LIMIT = 25 * 1024 * 1024; // 25MB
+export const FILE_TEMP_BASE = resolve(process.cwd(), '.files');
 
-async function downloadSlackImages(files: SlackFile[], token: string): Promise<string[]> {
-  const imageFiles = files.filter(
-    (f) =>
-      f.url_private_download && SUPPORTED_IMAGE_TYPES.has(f.mimetype) && f.size <= IMAGE_SIZE_LIMIT,
-  );
-  if (imageFiles.length === 0) return [];
+async function downloadSlackFiles(
+  files: SlackFile[],
+  token: string,
+  channelId: string,
+): Promise<string[]> {
+  const downloadable = files.filter((f) => f.url_private_download && f.size <= FILE_SIZE_LIMIT);
+  if (downloadable.length === 0) return [];
 
-  mkdirSync(IMAGE_TEMP_DIR, { recursive: true });
+  const dir = join(FILE_TEMP_BASE, channelId);
+  mkdirSync(dir, { recursive: true });
 
   const paths: string[] = [];
-  for (const file of imageFiles) {
+  for (const file of downloadable) {
     try {
       const res = await fetch(file.url_private_download!, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) {
-        console.error(`[images] Failed to download ${file.name}: HTTP ${res.status}`);
+        console.error(`[files] Failed to download ${file.name}: HTTP ${res.status}`);
         continue;
       }
       const buffer = Buffer.from(await res.arrayBuffer());
-      const localPath = join(IMAGE_TEMP_DIR, `${file.id}-${file.name}`);
+      const localPath = join(dir, `${file.id}-${file.name}`);
       writeFileSync(localPath, buffer);
       paths.push(localPath);
-      console.log(`[images] Downloaded ${file.name} (${(file.size / 1024).toFixed(1)}KB)`);
+      console.log(`[files] Downloaded ${file.name} (${(file.size / 1024).toFixed(1)}KB)`);
     } catch (err) {
-      console.error(`[images] Failed to download ${file.name}:`, err);
+      console.error(`[files] Failed to download ${file.name}:`, err);
     }
   }
   return paths;
-}
-
-function cleanupImages(paths: string[]): void {
-  for (const p of paths) {
-    try {
-      unlinkSync(p);
-    } catch {
-      // Already removed
-    }
-  }
 }
 
 /**
@@ -585,7 +575,7 @@ async function processBatch(
       timeoutMs: channelConfig.timeoutMs,
       channelId: queued.channelId,
       threadTs: queued.threadTs,
-      imagePaths: queued.imagePaths,
+      filePaths: queued.filePaths,
     });
 
     await safeReact(client, queued.channelId, queued.ts, 'ballot_box_with_check');
@@ -597,7 +587,7 @@ async function processBatch(
       console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
     }
   } finally {
-    if (queued.imagePaths) cleanupImages(queued.imagePaths);
+    // Files are kept for session resume; cleaned up by startup sweep
   }
 }
 
@@ -617,7 +607,7 @@ async function processStreamUpdate(
       timeoutMs: channelConfig.timeoutMs,
       channelId: queued.channelId,
       threadTs: queued.threadTs,
-      imagePaths: queued.imagePaths,
+      filePaths: queued.filePaths,
       onTextDelta: (text) => responder.onTextDelta(text),
       onToolEvent: (event) => responder.onToolEvent(event),
     });
@@ -677,7 +667,7 @@ async function processStreamUpdate(
       console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
     }
   } finally {
-    if (queued.imagePaths) cleanupImages(queued.imagePaths);
+    // Files are kept for session resume; cleaned up by startup sweep
   }
 }
 
@@ -714,7 +704,7 @@ async function processStreamNative(
       timeoutMs: channelConfig.timeoutMs,
       channelId: queued.channelId,
       threadTs: queued.threadTs,
-      imagePaths: queued.imagePaths,
+      filePaths: queued.filePaths,
       onTextDelta: (text) => responder.onTextDelta(text),
       onToolEvent: (event) => responder.onToolEvent(event),
     });
@@ -740,7 +730,7 @@ async function processStreamNative(
       console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
     }
   } finally {
-    if (queued.imagePaths) cleanupImages(queued.imagePaths);
+    // Files are kept for session resume; cleaned up by startup sweep
   }
 }
 
@@ -762,7 +752,7 @@ async function processPersistent(
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
         threadTs: queued.threadTs,
-        imagePaths: queued.imagePaths,
+        filePaths: queued.filePaths,
         onTextDelta: () => {},
       });
 
@@ -774,7 +764,7 @@ async function processPersistent(
         console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
       }
     } finally {
-      if (queued.imagePaths) cleanupImages(queued.imagePaths);
+      // Files are kept for session resume; cleaned up by startup sweep
     }
   } else if (mode === 'stream-update') {
     try {
@@ -788,7 +778,7 @@ async function processPersistent(
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
         threadTs: queued.threadTs,
-        imagePaths: queued.imagePaths,
+        filePaths: queued.filePaths,
         onTextDelta: (text) => responder.onTextDelta(text),
         onToolEvent: (event) => responder.onToolEvent(event),
       });
@@ -838,7 +828,7 @@ async function processPersistent(
         console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
       }
     } finally {
-      if (queued.imagePaths) cleanupImages(queued.imagePaths);
+      // Files are kept for session resume; cleaned up by startup sweep
     }
   } else {
     // stream-native
@@ -869,7 +859,7 @@ async function processPersistent(
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
         threadTs: queued.threadTs,
-        imagePaths: queued.imagePaths,
+        filePaths: queued.filePaths,
         onTextDelta: (text) => responder.onTextDelta(text),
         onToolEvent: (event) => responder.onToolEvent(event),
       });
@@ -893,7 +883,7 @@ async function processPersistent(
         console.log(`[${channelConfig.name}] Cost: $${result.cost.toFixed(4)}`);
       }
     } finally {
-      if (queued.imagePaths) cleanupImages(queued.imagePaths);
+      // Files are kept for session resume; cleaned up by startup sweep
     }
   }
 }
@@ -1355,7 +1345,7 @@ export function registerMessageHandler(app: App, botUserId: string): void {
   app.message(async ({ message, client, context }) => {
     const msg = message as SlackMessage;
 
-    // Ignore bot messages and message edits (allow file_share for image attachments)
+    // Ignore bot messages and message edits (allow file_share for file attachments)
     if (msg.bot_id) return;
     if (
       msg.subtype &&
@@ -1410,12 +1400,9 @@ export function registerMessageHandler(app: App, botUserId: string): void {
     }
 
     const hasText = !!msg.text;
-    const hasImages = !!(
-      msg.files &&
-      msg.files.some((f) => f.url_private_download && SUPPORTED_IMAGE_TYPES.has(f.mimetype))
-    );
-    // Require at least text or images
-    if (!hasText && !hasImages) return;
+    const hasFiles = !!(msg.files && msg.files.some((f) => f.url_private_download));
+    // Require at least text or files
+    if (!hasText && !hasFiles) return;
 
     // Quick config check + user authorization
     let channelAllowedUsers: string[] | undefined;
@@ -1447,7 +1434,8 @@ export function registerMessageHandler(app: App, botUserId: string): void {
     }
 
     // Trigger mode check — in 'mention' mode, ignore messages without @bot
-    if (!shouldRespond(msg.text, botUserId, triggerMode)) return;
+    // File-only messages (no text) bypass the mention requirement
+    if (!shouldRespond(msg.text, botUserId, triggerMode) && !hasFiles) return;
 
     // Reject unauthorized users
     const userId = msg.user ?? 'unknown';
@@ -1461,12 +1449,15 @@ export function registerMessageHandler(app: App, botUserId: string): void {
       return;
     }
 
-    // Download image attachments before enqueueing
-    let imagePaths: string[] = [];
-    if (hasImages && msg.files) {
+    // Download file attachments before enqueueing
+    let filePaths: string[] = [];
+    if (hasFiles && msg.files) {
       const token = context.botToken ?? process.env.SLACK_BOT_TOKEN ?? '';
-      imagePaths = await downloadSlackImages(msg.files, token);
+      filePaths = await downloadSlackFiles(msg.files, token, msg.channel);
     }
+
+    // If files were expected but all exceeded the size limit, and there's no text — abort
+    if (!msg.text && hasFiles && filePaths.length === 0) return;
 
     // Fetch thread context if this is a thread reply
     const threadTs = msg.thread_ts ?? msg.ts;
@@ -1476,7 +1467,7 @@ export function registerMessageHandler(app: App, botUserId: string): void {
       : [];
 
     // Build final prompt: strip bot mentions and prepend thread context
-    const rawText = msg.text || (imagePaths.length > 0 ? 'What is in this image?' : '');
+    const rawText = msg.text || (filePaths.length > 0 ? 'Please review the attached file(s).' : '');
     const text = buildPrompt(rawText, botUserId, threadMessages);
     const teamId = context.teamId;
 
@@ -1489,7 +1480,7 @@ export function registerMessageHandler(app: App, botUserId: string): void {
       ts: msg.ts,
       threadTs,
       queuedAt: new Date().toISOString(),
-      ...(imagePaths.length > 0 ? { imagePaths } : {}),
+      ...(filePaths.length > 0 ? { filePaths } : {}),
     });
 
     // Acknowledge receipt immediately
