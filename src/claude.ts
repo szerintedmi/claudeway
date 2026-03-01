@@ -14,6 +14,7 @@ export interface ClaudeOptions {
   systemPrompt: string;
   timeoutMs: number;
   channelId: string;
+  threadTs?: string;
   imagePaths?: string[];
 }
 
@@ -49,6 +50,11 @@ interface ActiveProcess {
 }
 
 const processRegistry = new Map<string, ActiveProcess>();
+
+/** Build a registry key from channelId and optional threadTs */
+function registryKey(channelId: string, threadTs?: string): string {
+  return threadTs ? `${channelId}:${threadTs}` : channelId;
+}
 
 // --- Persistent process registry ---
 
@@ -107,32 +113,38 @@ export function getActiveProcesses(): ActiveProcessInfo[] {
 }
 
 export function killProcess(channelId: string): boolean {
-  const entry = processRegistry.get(channelId);
-  if (entry) {
-    entry.proc.kill('SIGTERM');
-    return true;
+  let killed = false;
+  for (const [key, entry] of processRegistry) {
+    if (key === channelId || key.startsWith(`${channelId}:`)) {
+      entry.proc.kill('SIGTERM');
+      killed = true;
+    }
   }
-  const persistentEntry = persistentRegistry.get(channelId);
-  if (persistentEntry) {
-    clearTimeout(persistentEntry.idleTimer);
-    persistentEntry.proc.kill('SIGTERM');
-    return true;
+  for (const [key, entry] of persistentRegistry) {
+    if (key === channelId || key.startsWith(`${channelId}:`)) {
+      clearTimeout(entry.idleTimer);
+      entry.proc.kill('SIGTERM');
+      killed = true;
+    }
   }
-  return false;
+  return killed;
 }
 
 export function nudgeProcess(channelId: string): boolean {
-  const entry = processRegistry.get(channelId);
-  if (entry) {
-    entry.proc.kill('SIGINT');
-    return true;
+  let nudged = false;
+  for (const [key, entry] of processRegistry) {
+    if (key === channelId || key.startsWith(`${channelId}:`)) {
+      entry.proc.kill('SIGINT');
+      nudged = true;
+    }
   }
-  const persistentEntry = persistentRegistry.get(channelId);
-  if (persistentEntry) {
-    persistentEntry.proc.kill('SIGINT');
-    return true;
+  for (const [key, entry] of persistentRegistry) {
+    if (key === channelId || key.startsWith(`${channelId}:`)) {
+      entry.proc.kill('SIGINT');
+      nudged = true;
+    }
   }
-  return false;
+  return nudged;
 }
 
 export function killAllProcesses(): string[] {
@@ -153,8 +165,8 @@ export function killAllProcesses(): string[] {
  * Generate a deterministic session UUID from channel ID + folder path.
  * Same channel+folder always produces the same session ID, surviving restarts.
  */
-export function deriveSessionId(channelId: string, folder: string): string {
-  return uuidv5(`${channelId}:${folder}`, CLAUDEWAY_NAMESPACE);
+export function deriveSessionId(channelId: string, folder: string, threadTs?: string): string {
+  return uuidv5(`${channelId}:${folder}${threadTs ? `:${threadTs}` : ''}`, CLAUDEWAY_NAMESPACE);
 }
 
 // --- Stream-json line parser (pure, exported for testing) ---
@@ -315,11 +327,12 @@ function runClaudeProcess(
   channelId: string,
   sessionId: string,
   message: string,
+  regKey: string,
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
     const proc = spawnClaudeProcess(args, cwd);
 
-    processRegistry.set(channelId, {
+    processRegistry.set(regKey, {
       proc,
       channelId,
       sessionId,
@@ -362,7 +375,7 @@ function runClaudeProcess(
     }, ABSOLUTE_TIMEOUT_MS);
 
     proc.on('close', (code) => {
-      processRegistry.delete(channelId);
+      processRegistry.delete(regKey);
       clearTimeout(timer);
       clearTimeout(absoluteTimer);
 
@@ -391,7 +404,7 @@ function runClaudeProcess(
     });
 
     proc.on('error', (err) => {
-      processRegistry.delete(channelId);
+      processRegistry.delete(regKey);
       clearTimeout(timer);
       clearTimeout(absoluteTimer);
       reject(new Error(`Failed to spawn claude: ${err.message}`));
@@ -407,12 +420,13 @@ function runClaudeStreamingProcess(
   channelId: string,
   registrySessionId: string,
   message: string,
+  regKey: string,
   onToolEvent?: (event: ToolEventPayload) => void,
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
     const proc = spawnClaudeProcess(args, cwd);
 
-    processRegistry.set(channelId, {
+    processRegistry.set(regKey, {
       proc,
       channelId,
       sessionId: registrySessionId,
@@ -493,7 +507,7 @@ function runClaudeStreamingProcess(
     }, ABSOLUTE_TIMEOUT_MS);
 
     proc.on('close', (code) => {
-      processRegistry.delete(channelId);
+      processRegistry.delete(regKey);
       clearTimeout(timer);
       clearTimeout(absoluteTimer);
       // Process any remaining buffered line
@@ -515,7 +529,7 @@ function runClaudeStreamingProcess(
     });
 
     proc.on('error', (err) => {
-      processRegistry.delete(channelId);
+      processRegistry.delete(regKey);
       clearTimeout(timer);
       clearTimeout(absoluteTimer);
       reject(new Error(`Failed to spawn claude: ${err.message}`));
@@ -562,12 +576,12 @@ function buildClaudeArgs(
   options: ClaudeOptions,
   outputFormat: 'json' | 'stream-json',
 ): { args: string[]; sessionId: string; cwd: string; resuming: boolean } {
-  const { message, cwd: rawCwd, model, systemPrompt, channelId } = options;
+  const { message, cwd: rawCwd, model, systemPrompt, channelId, threadTs } = options;
   const cwd = resolve(rawCwd);
 
   const configPath = getConfigPath();
   const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
-  const sessionId = deriveSessionId(channelId, cwd);
+  const sessionId = deriveSessionId(channelId, cwd, threadTs);
 
   const { jsonl: sessionFile } = sessionArtifactPaths(sessionId, cwd);
   const resuming = existsSync(sessionFile);
@@ -609,6 +623,7 @@ function makeFreshArgs(args: string[], sessionId: string): string[] {
 
 export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
   const { args, sessionId, cwd, resuming } = buildClaudeArgs(options, 'json');
+  const regKey = registryKey(options.channelId, options.threadTs);
 
   console.log(`[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} session ${sessionId}`);
 
@@ -620,6 +635,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
       options.channelId,
       sessionId,
       options.message,
+      regKey,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -635,6 +651,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
         options.channelId,
         sessionId,
         options.message,
+        regKey,
       );
     }
     throw err;
@@ -643,6 +660,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
 
 export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promise<ClaudeResult> {
   const { args, sessionId, cwd, resuming } = buildClaudeArgs(options, 'stream-json');
+  const regKey = registryKey(options.channelId, options.threadTs);
 
   console.log(
     `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} streaming session ${sessionId}`,
@@ -657,6 +675,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
       options.channelId,
       sessionId,
       options.message,
+      regKey,
       options.onToolEvent,
     );
   } catch (err) {
@@ -674,6 +693,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
         options.channelId,
         sessionId,
         options.message,
+        regKey,
         options.onToolEvent,
       );
     }
@@ -689,12 +709,12 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
   cwd: string;
   resuming: boolean;
 } {
-  const { cwd: rawCwd, model, systemPrompt, channelId } = options;
+  const { cwd: rawCwd, model, systemPrompt, channelId, threadTs } = options;
   const cwd = resolve(rawCwd);
 
   const configPath = getConfigPath();
   const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
-  const sessionId = deriveSessionId(channelId, cwd);
+  const sessionId = deriveSessionId(channelId, cwd, threadTs);
 
   const { jsonl: sessionFile } = sessionArtifactPaths(sessionId, cwd);
   const resuming = existsSync(sessionFile);
@@ -727,6 +747,7 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
 function createPersistentProcess(
   options: ClaudeOptions,
   timeoutMs: number,
+  regKey: string,
 ): PersistentProcessEntry {
   const { args, sessionId, cwd, resuming } = buildPersistentClaudeArgs(options);
 
@@ -786,7 +807,7 @@ function createPersistentProcess(
 
   proc.on('close', (code) => {
     clearTimeout(entry.idleTimer);
-    persistentRegistry.delete(options.channelId);
+    persistentRegistry.delete(regKey);
 
     // Process remaining buffered line
     if (entry.lineBuffer.trim()) {
@@ -813,7 +834,7 @@ function createPersistentProcess(
 
   proc.on('error', (err) => {
     clearTimeout(entry.idleTimer);
-    persistentRegistry.delete(options.channelId);
+    persistentRegistry.delete(regKey);
     if (entry.currentTurn) {
       const turn = entry.currentTurn;
       entry.currentTurn = null;
@@ -821,7 +842,7 @@ function createPersistentProcess(
     }
   });
 
-  persistentRegistry.set(options.channelId, entry);
+  persistentRegistry.set(regKey, entry);
   return entry;
 }
 
@@ -886,12 +907,13 @@ export async function runClaudePersistentStreaming(
   options: ClaudeStreamingOptions,
 ): Promise<ClaudeResult> {
   const { channelId, message, timeoutMs, imagePaths, onTextDelta } = options;
+  const regKey = registryKey(channelId, options.threadTs);
 
-  let entry = persistentRegistry.get(channelId);
+  let entry = persistentRegistry.get(regKey);
 
   // Spawn or re-spawn if process is gone
   if (!entry || !entry.proc.pid || entry.proc.killed) {
-    entry = createPersistentProcess(options, timeoutMs);
+    entry = createPersistentProcess(options, timeoutMs, regKey);
   }
 
   entry.lastMessage = message.substring(0, 80);

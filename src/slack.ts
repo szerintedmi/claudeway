@@ -584,6 +584,7 @@ async function processBatch(
       systemPrompt: channelConfig.systemPrompt,
       timeoutMs: channelConfig.timeoutMs,
       channelId: queued.channelId,
+      threadTs: queued.threadTs,
       imagePaths: queued.imagePaths,
     });
 
@@ -615,6 +616,7 @@ async function processStreamUpdate(
       systemPrompt: channelConfig.systemPrompt,
       timeoutMs: channelConfig.timeoutMs,
       channelId: queued.channelId,
+      threadTs: queued.threadTs,
       imagePaths: queued.imagePaths,
       onTextDelta: (text) => responder.onTextDelta(text),
       onToolEvent: (event) => responder.onToolEvent(event),
@@ -711,6 +713,7 @@ async function processStreamNative(
       systemPrompt: channelConfig.systemPrompt,
       timeoutMs: channelConfig.timeoutMs,
       channelId: queued.channelId,
+      threadTs: queued.threadTs,
       imagePaths: queued.imagePaths,
       onTextDelta: (text) => responder.onTextDelta(text),
       onToolEvent: (event) => responder.onToolEvent(event),
@@ -758,6 +761,7 @@ async function processPersistent(
         systemPrompt: channelConfig.systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
+        threadTs: queued.threadTs,
         imagePaths: queued.imagePaths,
         onTextDelta: () => {},
       });
@@ -783,6 +787,7 @@ async function processPersistent(
         systemPrompt: channelConfig.systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
+        threadTs: queued.threadTs,
         imagePaths: queued.imagePaths,
         onTextDelta: (text) => responder.onTextDelta(text),
         onToolEvent: (event) => responder.onToolEvent(event),
@@ -863,6 +868,7 @@ async function processPersistent(
         systemPrompt: channelConfig.systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
+        threadTs: queued.threadTs,
         imagePaths: queued.imagePaths,
         onTextDelta: (text) => responder.onTextDelta(text),
         onToolEvent: (event) => responder.onToolEvent(event),
