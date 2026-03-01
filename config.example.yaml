@@ -1,12 +1,19 @@
 # Claudeway configuration (YAML alternative to config.json)
 # If both config.yaml and config.json exist, config.yaml takes priority.
 
+# Bot owner's Slack user ID — required for DM access, !config, !killall,
+# and cross-channel !kill/!nudge. Without this, global magic commands are denied.
+botOwner: "U0123456789"
+
 systemChannel: "C0123456789"
 
 channels:
   C0123456789:
     name: my-project
     folder: /path/to/your/project
+    # Optional: restrict who can use the bot and run magic commands in this channel.
+    # If omitted, all channel members can interact with the bot.
+    # allowedUsers: ["U0123456789", "U9876543210"]
 
 defaults:
   model: opus

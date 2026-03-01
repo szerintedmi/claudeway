@@ -166,6 +166,7 @@ Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutd
 | `responseMode` | How responses are delivered (see below) | from defaults |
 | `processMode` | How the Claude CLI process is managed (see below) | from defaults |
 | `triggerMode` | When to respond: `all` or `mention` (see below) | `all` |
+| `allowedUsers` | Slack user IDs allowed to interact with the bot in this channel | everyone |
 
 ### Trigger Modes
 
@@ -207,12 +208,15 @@ Control running Claude CLI processes directly from Slack with magic commands. Th
 
 | Command | Description |
 |---------|-------------|
-| `!ps` | List all active processes with channel, runtime, message count, token usage, and queue depth |
+| `!ps` | List active processes with channel, runtime, message count, token usage, and queue depth |
 | `!kill` | Kill the process running in the current channel |
 | `!kill #channel` | Kill a process in another channel by name |
 | `!killall` | Kill all running processes |
 | `!nudge` | Send SIGINT to the process in the current channel — interrupts a long tool call and prompts Claude to wrap up |
 | `!nudge #channel` | Nudge a process in another channel by name |
+| `!config` | Show channel/bot configuration |
+
+Magic commands require authorization. `botOwner` can run all commands. Channel `allowedUsers` can run `!ps`, `!kill`, and `!nudge` in their own channel. Cross-channel `!kill`/`!nudge`, `!killall`, and `!config` are `botOwner`-only.
 
 Example `!ps` output:
 ```

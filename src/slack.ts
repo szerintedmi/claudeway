@@ -8,6 +8,7 @@ import {
   loadConfig,
   resolvedChannelConfig,
   resolvedDmConfig,
+  type Config,
   type ResponseMode,
 } from './config.js';
 import {
@@ -105,6 +106,39 @@ function cleanupImages(paths: string[]): void {
 export function isUserAllowed(allowedUsers: string[] | undefined, userId: string): boolean {
   if (!allowedUsers || allowedUsers.length === 0) return true;
   return allowedUsers.includes(userId);
+}
+
+/**
+ * Check if a user is authorized to run a magic command.
+ * - 'global' scope: botOwner only (for !killall, !config, cross-channel !kill/!nudge)
+ * - 'channel' scope: botOwner or allowedUsers for the channel (DMs are botOwner-only)
+ */
+function isMagicCommandAllowed(
+  config: Config,
+  userId: string,
+  channelId: string,
+  scope: 'channel' | 'global',
+): boolean {
+  if (userId === config.botOwner) return true;
+  if (scope === 'global') return false;
+  // DMs are botOwner-only (magic commands run before the DM gate)
+  if (channelId.startsWith('D')) return false;
+  const resolved = resolvedChannelConfig(config, channelId);
+  return isUserAllowed(resolved?.allowedUsers, userId);
+}
+
+async function denyMagicCommand(
+  channelId: string,
+  messageTs: string,
+  threadTs: string,
+  client: WebClient,
+): Promise<void> {
+  await safeReact(client, channelId, messageTs, 'no_entry');
+  await client.chat.postMessage({
+    channel: channelId,
+    thread_ts: threadTs,
+    text: "Sorry, you're not authorized to run this command.",
+  });
 }
 
 const MAX_MESSAGE_LENGTH = 3900;
@@ -989,9 +1023,20 @@ export function formatDuration(startedAt: Date): string {
   return `${seconds}s`;
 }
 
-async function handlePs(channelId: string, threadTs: string, client: WebClient): Promise<void> {
-  const processes = getActiveProcesses();
-  const pending = getPending();
+async function handlePs(
+  channelId: string,
+  threadTs: string,
+  client: WebClient,
+  filterChannelId?: string,
+): Promise<void> {
+  const allProcesses = getActiveProcesses();
+  const processes = filterChannelId
+    ? allProcesses.filter((p) => p.channelId === filterChannelId)
+    : allProcesses;
+  const allPending = getPending();
+  const pending = filterChannelId
+    ? allPending.filter((p) => p.channelId === filterChannelId)
+    : allPending;
 
   let text: string;
   if (processes.length === 0) {
@@ -1000,7 +1045,7 @@ async function handlePs(channelId: string, threadTs: string, client: WebClient):
     const lines = processes.map((p) => {
       const name = getChannelName(p.channelId);
       const duration = formatDuration(p.startedAt);
-      const snippet = p.message.length >= 80 ? p.message + '...' : p.message;
+      const snippet = p.message.length > 80 ? p.message.substring(0, 80) + '...' : p.message;
       const msgs =
         p.messageCount > 0 ? ` \u2014 ${p.messageCount} msg${p.messageCount !== 1 ? 's' : ''}` : '';
       const stats =
@@ -1186,26 +1231,46 @@ async function handleMagicCommand(
   text: string,
   channelId: string,
   threadTs: string,
+  messageTs: string,
+  userId: string,
   client: WebClient,
 ): Promise<boolean> {
   const trimmed = text.trim();
+  const config = loadConfig();
 
   if (trimmed === '!config') {
+    if (!isMagicCommandAllowed(config, userId, channelId, 'global')) {
+      await denyMagicCommand(channelId, messageTs, threadTs, client);
+      return true;
+    }
     await handleConfig(channelId, threadTs, client);
     return true;
   }
 
   if (trimmed === '!ps') {
-    await handlePs(channelId, threadTs, client);
+    if (!isMagicCommandAllowed(config, userId, channelId, 'channel')) {
+      await denyMagicCommand(channelId, messageTs, threadTs, client);
+      return true;
+    }
+    const isBotOwner = userId === config.botOwner;
+    await handlePs(channelId, threadTs, client, isBotOwner ? undefined : channelId);
     return true;
   }
 
   if (trimmed === '!killall') {
+    if (!isMagicCommandAllowed(config, userId, channelId, 'global')) {
+      await denyMagicCommand(channelId, messageTs, threadTs, client);
+      return true;
+    }
     await handleKillAll(channelId, threadTs, client);
     return true;
   }
 
   if (trimmed === '!kill') {
+    if (!isMagicCommandAllowed(config, userId, channelId, 'channel')) {
+      await denyMagicCommand(channelId, messageTs, threadTs, client);
+      return true;
+    }
     await handleKill(channelId, channelId, threadTs, client);
     return true;
   }
@@ -1213,6 +1278,10 @@ async function handleMagicCommand(
   // !kill #channel, !kill channel, or !kill <#C123|channel>
   const killMatch = trimmed.match(/^!kill\s+(?:<#(\w+)(?:\|[^>]*)?>|#?(\S+))$/);
   if (killMatch) {
+    if (!isMagicCommandAllowed(config, userId, channelId, 'global')) {
+      await denyMagicCommand(channelId, messageTs, threadTs, client);
+      return true;
+    }
     const slackChannelId = killMatch[1];
     const targetName = killMatch[2];
 
@@ -1236,6 +1305,10 @@ async function handleMagicCommand(
   }
 
   if (trimmed === '!nudge') {
+    if (!isMagicCommandAllowed(config, userId, channelId, 'channel')) {
+      await denyMagicCommand(channelId, messageTs, threadTs, client);
+      return true;
+    }
     await handleNudge(channelId, channelId, threadTs, client);
     return true;
   }
@@ -1243,6 +1316,10 @@ async function handleMagicCommand(
   // !nudge #channel, !nudge channel, or !nudge <#C123|channel>
   const nudgeMatch = trimmed.match(/^!nudge\s+(?:<#(\w+)(?:\|[^>]*)?>|#?(\S+))$/);
   if (nudgeMatch) {
+    if (!isMagicCommandAllowed(config, userId, channelId, 'global')) {
+      await denyMagicCommand(channelId, messageTs, threadTs, client);
+      return true;
+    }
     const slackChannelId = nudgeMatch[1];
     const targetName = nudgeMatch[2];
 
@@ -1313,7 +1390,15 @@ export function registerMessageHandler(app: App, botUserId: string): void {
     // Handle magic commands (!ps, !kill, !killall) — bypass queue and Claude processing
     if (
       msg.text &&
-      (await handleMagicCommand(msg.text, msg.channel, msg.thread_ts ?? msg.ts, client))
+      msg.user &&
+      (await handleMagicCommand(
+        msg.text,
+        msg.channel,
+        msg.thread_ts ?? msg.ts,
+        msg.ts,
+        msg.user,
+        client,
+      ))
     ) {
       return;
     }
