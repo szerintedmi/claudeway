@@ -7,17 +7,12 @@ import {
   loadConfig,
   resolvedChannelConfig,
   resolvedDmConfig,
-  type Config,
   type ResponseMode,
 } from './config.js';
 import {
   runClaude,
   runClaudeStreaming,
   runClaudePersistentStreaming,
-  getActiveProcesses,
-  killProcess,
-  killAllProcesses,
-  nudgeProcess,
   type ToolEventPayload,
 } from './claude.js';
 import {
@@ -25,9 +20,10 @@ import {
   dequeue,
   updateQueuedText,
   getPendingForChannel,
-  getPending,
   type QueuedMessage,
 } from './queue.js';
+import { handleMagicCommand } from './commands.js';
+import { isUserAllowed, safeReact } from './slack-utils.js';
 import { shouldRespond, stripBotMention, buildPrompt } from './prompt.js';
 import { fetchThreadContext } from './thread.js';
 
@@ -88,48 +84,8 @@ async function downloadSlackFiles(
   return paths;
 }
 
-/**
- * Check if a user is allowed to use a channel.
- * Returns true if allowedUsers is not set or empty (open to everyone),
- * or if the user's Slack ID is in the list.
- */
-export function isUserAllowed(allowedUsers: string[] | undefined, userId: string): boolean {
-  if (!allowedUsers || allowedUsers.length === 0) return true;
-  return allowedUsers.includes(userId);
-}
-
-/**
- * Check if a user is authorized to run a magic command.
- * - 'global' scope: botOwner only (for !killall, !config, cross-channel !kill/!nudge)
- * - 'channel' scope: botOwner or allowedUsers for the channel (DMs are botOwner-only)
- */
-function isMagicCommandAllowed(
-  config: Config,
-  userId: string,
-  channelId: string,
-  scope: 'channel' | 'global',
-): boolean {
-  if (userId === config.botOwner) return true;
-  if (scope === 'global') return false;
-  // DMs are botOwner-only (magic commands run before the DM gate)
-  if (channelId.startsWith('D')) return false;
-  const resolved = resolvedChannelConfig(config, channelId);
-  return isUserAllowed(resolved?.allowedUsers, userId);
-}
-
-async function denyMagicCommand(
-  channelId: string,
-  messageTs: string,
-  threadTs: string,
-  client: WebClient,
-): Promise<void> {
-  await safeReact(client, channelId, messageTs, 'no_entry');
-  await client.chat.postMessage({
-    channel: channelId,
-    thread_ts: threadTs,
-    text: "Sorry, you're not authorized to run this command.",
-  });
-}
+// Re-export shared utilities for backward compatibility
+export { isUserAllowed, safeReact } from './slack-utils.js';
 
 const MAX_MESSAGE_LENGTH = 3900;
 const FILE_THRESHOLD = 12000;
@@ -476,7 +432,7 @@ const processingMessages = new Set<string>();
 const processingKey = (channelId: string, ts: string) => `${channelId}_${ts}`;
 
 // Global concurrency limit for Claude CLI processes
-const MAX_CONCURRENT_PROCESSES = 8;
+export const MAX_CONCURRENT_PROCESSES = 8;
 let activeProcesses = 0;
 const concurrencyWaiters: (() => void)[] = [];
 
@@ -540,24 +496,6 @@ async function sendResponse(
       thread_ts: threadTs,
       text: chunk,
     });
-  }
-}
-
-async function safeReact(
-  client: WebClient,
-  channel: string,
-  timestamp: string,
-  name: string,
-  action: 'add' | 'remove' = 'add',
-): Promise<void> {
-  try {
-    if (action === 'add') {
-      await client.reactions.add({ channel, timestamp, name });
-    } else {
-      await client.reactions.remove({ channel, timestamp, name });
-    }
-  } catch {
-    // Ignore reaction errors
   }
 }
 
@@ -983,362 +921,6 @@ async function drainChannel(channelId: string, client: WebClient): Promise<void>
   } finally {
     channelBusy.delete(channelId);
   }
-}
-
-// --- Magic command helpers ---
-
-function getChannelName(channelId: string): string {
-  try {
-    const config = loadConfig();
-    return config.channels[channelId]?.name ?? channelId;
-  } catch {
-    return channelId;
-  }
-}
-
-function findChannelIdByName(name: string): string | null {
-  try {
-    const config = loadConfig();
-    for (const [id, ch] of Object.entries(config.channels)) {
-      if (ch.name === name) return id;
-    }
-  } catch {
-    // Config error
-  }
-  return null;
-}
-
-export function formatDuration(startedAt: Date): string {
-  const ms = Date.now() - startedAt.getTime();
-  const totalSeconds = Math.floor(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
-}
-
-async function handlePs(
-  channelId: string,
-  threadTs: string,
-  client: WebClient,
-  filterChannelId?: string,
-): Promise<void> {
-  const allProcesses = getActiveProcesses();
-  const processes = filterChannelId
-    ? allProcesses.filter((p) => p.channelId === filterChannelId)
-    : allProcesses;
-  const allPending = getPending();
-  const pending = filterChannelId
-    ? allPending.filter((p) => p.channelId === filterChannelId)
-    : allPending;
-
-  let text: string;
-  if (processes.length === 0) {
-    text = ':gear: *No active processes*';
-  } else {
-    const lines = processes.map((p) => {
-      const name = getChannelName(p.channelId);
-      const duration = formatDuration(p.startedAt);
-      const snippet = p.message.length > 80 ? p.message.substring(0, 80) + '...' : p.message;
-      const msgs =
-        p.messageCount > 0 ? ` \u2014 ${p.messageCount} msg${p.messageCount !== 1 ? 's' : ''}` : '';
-      const stats =
-        p.totalTokens > 0
-          ? ` \u2014 ${p.totalTokens.toLocaleString()} tokens`
-          : p.totalCost > 0
-            ? ` \u2014 $${p.totalCost.toFixed(4)}`
-            : '';
-      const status = p.isActive ? ' :hourglass_flowing_sand:' : ' (idle)';
-      return `\u2022 #${name} \u2014 ${duration}${msgs}${stats} \u2014 "${snippet}"${status}`;
-    });
-    text = `:gear: *Active Processes (${processes.length}/${MAX_CONCURRENT_PROCESSES})*\n\n${lines.join('\n')}`;
-  }
-
-  if (pending.length > 0) {
-    const channelCounts = new Map<string, number>();
-    for (const msg of pending) {
-      const name = getChannelName(msg.channelId);
-      channelCounts.set(name, (channelCounts.get(name) ?? 0) + 1);
-    }
-    const breakdown = Array.from(channelCounts.entries())
-      .map(([name, count]) => `${count} ${name}`)
-      .join(', ');
-    text += `\n\nQueued: ${pending.length} message${pending.length !== 1 ? 's' : ''} (${breakdown})`;
-  }
-
-  await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text });
-}
-
-async function handleKill(
-  targetChannelId: string,
-  responseChannelId: string,
-  threadTs: string,
-  client: WebClient,
-): Promise<void> {
-  const processes = getActiveProcesses();
-  const target = processes.find((p) => p.channelId === targetChannelId);
-
-  if (!target) {
-    const name = getChannelName(targetChannelId);
-    await client.chat.postMessage({
-      channel: responseChannelId,
-      thread_ts: threadTs,
-      text: `:warning: No active process in #${name}`,
-    });
-    return;
-  }
-
-  const name = getChannelName(targetChannelId);
-  const duration = formatDuration(target.startedAt);
-  const killed = killProcess(targetChannelId);
-
-  if (killed) {
-    await client.chat.postMessage({
-      channel: responseChannelId,
-      thread_ts: threadTs,
-      text: `:stop_sign: Killed process in #${name} (was running ${duration})`,
-    });
-  } else {
-    await client.chat.postMessage({
-      channel: responseChannelId,
-      thread_ts: threadTs,
-      text: `:warning: Failed to kill process in #${name}`,
-    });
-  }
-}
-
-async function handleKillAll(
-  channelId: string,
-  threadTs: string,
-  client: WebClient,
-): Promise<void> {
-  const processes = getActiveProcesses();
-  if (processes.length === 0) {
-    await client.chat.postMessage({
-      channel: channelId,
-      thread_ts: threadTs,
-      text: ':stop_sign: No active processes to kill',
-    });
-    return;
-  }
-
-  const killed = killAllProcesses();
-  const names = killed.map((id) => `#${getChannelName(id)}`).join(', ');
-  await client.chat.postMessage({
-    channel: channelId,
-    thread_ts: threadTs,
-    text: `:stop_sign: Killed ${killed.length} process${killed.length !== 1 ? 'es' : ''}: ${names}`,
-  });
-}
-
-async function handleNudge(
-  targetChannelId: string,
-  responseChannelId: string,
-  threadTs: string,
-  client: WebClient,
-): Promise<void> {
-  const processes = getActiveProcesses();
-  const target = processes.find((p) => p.channelId === targetChannelId);
-
-  if (!target) {
-    const name = getChannelName(targetChannelId);
-    await client.chat.postMessage({
-      channel: responseChannelId,
-      thread_ts: threadTs,
-      text: `:warning: No active process in #${name}`,
-    });
-    return;
-  }
-
-  const name = getChannelName(targetChannelId);
-  const nudged = nudgeProcess(targetChannelId);
-  if (nudged) {
-    await client.chat.postMessage({
-      channel: responseChannelId,
-      thread_ts: threadTs,
-      text: `:bell: Nudged #${name} (sent SIGINT — process may wrap up or continue)`,
-    });
-  } else {
-    await client.chat.postMessage({
-      channel: responseChannelId,
-      thread_ts: threadTs,
-      text: `:warning: Failed to nudge process in #${name}`,
-    });
-  }
-}
-
-export function formatTimeout(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  if (seconds >= 3600)
-    return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-  if (seconds >= 60) return `${Math.floor(seconds / 60)}m`;
-  return `${seconds}s`;
-}
-
-export function formatChannelConfig(
-  channelId: string,
-  resolved: {
-    folder: string;
-    model: string;
-    responseMode: string;
-    processMode: string;
-    timeoutMs: number;
-    triggerMode?: string;
-  },
-): string {
-  return [
-    `<#${channelId}>`,
-    `• Folder: \`${resolved.folder}\``,
-    `• Model: \`${resolved.model}\``,
-    `• Mode: \`${resolved.responseMode}\` / \`${resolved.processMode}\``,
-    `• Trigger: \`${resolved.triggerMode ?? 'all'}\``,
-    `• Timeout: ${formatTimeout(resolved.timeoutMs)}`,
-  ].join('\n');
-}
-
-async function handleConfig(channelId: string, threadTs: string, client: WebClient): Promise<void> {
-  const config = loadConfig();
-  const resolved = resolvedChannelConfig(config, channelId);
-
-  let text: string;
-  if (resolved) {
-    // In a configured channel — show this channel's config
-    text = `:gear: *Channel Configuration*\n\n${formatChannelConfig(channelId, resolved)}`;
-  } else {
-    // System channel or non-configured channel — list all
-    const entries = Object.entries(config.channels);
-    if (entries.length === 0) {
-      text = ':gear: *No channels configured*';
-    } else {
-      const lines = entries.map(([id]) => {
-        const r = resolvedChannelConfig(config, id)!;
-        return formatChannelConfig(id, r);
-      });
-      text = `:gear: *Claudeway Configuration*\n${entries.length} channel${entries.length !== 1 ? 's' : ''} configured\n\n${lines.join('\n\n')}`;
-    }
-  }
-
-  await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text });
-}
-
-async function handleMagicCommand(
-  text: string,
-  channelId: string,
-  threadTs: string,
-  messageTs: string,
-  userId: string,
-  client: WebClient,
-): Promise<boolean> {
-  const trimmed = text.trim();
-  const config = loadConfig();
-
-  if (trimmed === '!config') {
-    if (!isMagicCommandAllowed(config, userId, channelId, 'global')) {
-      await denyMagicCommand(channelId, messageTs, threadTs, client);
-      return true;
-    }
-    await handleConfig(channelId, threadTs, client);
-    return true;
-  }
-
-  if (trimmed === '!ps') {
-    if (!isMagicCommandAllowed(config, userId, channelId, 'channel')) {
-      await denyMagicCommand(channelId, messageTs, threadTs, client);
-      return true;
-    }
-    const isBotOwner = userId === config.botOwner;
-    await handlePs(channelId, threadTs, client, isBotOwner ? undefined : channelId);
-    return true;
-  }
-
-  if (trimmed === '!killall') {
-    if (!isMagicCommandAllowed(config, userId, channelId, 'global')) {
-      await denyMagicCommand(channelId, messageTs, threadTs, client);
-      return true;
-    }
-    await handleKillAll(channelId, threadTs, client);
-    return true;
-  }
-
-  if (trimmed === '!kill') {
-    if (!isMagicCommandAllowed(config, userId, channelId, 'channel')) {
-      await denyMagicCommand(channelId, messageTs, threadTs, client);
-      return true;
-    }
-    await handleKill(channelId, channelId, threadTs, client);
-    return true;
-  }
-
-  // !kill #channel, !kill channel, or !kill <#C123|channel>
-  const killMatch = trimmed.match(/^!kill\s+(?:<#(\w+)(?:\|[^>]*)?>|#?(\S+))$/);
-  if (killMatch) {
-    if (!isMagicCommandAllowed(config, userId, channelId, 'global')) {
-      await denyMagicCommand(channelId, messageTs, threadTs, client);
-      return true;
-    }
-    const slackChannelId = killMatch[1];
-    const targetName = killMatch[2];
-
-    let resolvedId: string | null = slackChannelId ?? null;
-    if (!resolvedId && targetName) {
-      resolvedId = findChannelIdByName(targetName);
-      if (!resolvedId) {
-        await client.chat.postMessage({
-          channel: channelId,
-          thread_ts: threadTs,
-          text: `:warning: No configured channel named "${targetName}"`,
-        });
-        return true;
-      }
-    }
-
-    if (resolvedId) {
-      await handleKill(resolvedId, channelId, threadTs, client);
-    }
-    return true;
-  }
-
-  if (trimmed === '!nudge') {
-    if (!isMagicCommandAllowed(config, userId, channelId, 'channel')) {
-      await denyMagicCommand(channelId, messageTs, threadTs, client);
-      return true;
-    }
-    await handleNudge(channelId, channelId, threadTs, client);
-    return true;
-  }
-
-  // !nudge #channel, !nudge channel, or !nudge <#C123|channel>
-  const nudgeMatch = trimmed.match(/^!nudge\s+(?:<#(\w+)(?:\|[^>]*)?>|#?(\S+))$/);
-  if (nudgeMatch) {
-    if (!isMagicCommandAllowed(config, userId, channelId, 'global')) {
-      await denyMagicCommand(channelId, messageTs, threadTs, client);
-      return true;
-    }
-    const slackChannelId = nudgeMatch[1];
-    const targetName = nudgeMatch[2];
-
-    let resolvedId: string | null = slackChannelId ?? null;
-    if (!resolvedId && targetName) {
-      resolvedId = findChannelIdByName(targetName);
-      if (!resolvedId) {
-        await client.chat.postMessage({
-          channel: channelId,
-          thread_ts: threadTs,
-          text: `:warning: No configured channel named "${targetName}"`,
-        });
-        return true;
-      }
-    }
-
-    if (resolvedId) {
-      await handleNudge(resolvedId, channelId, threadTs, client);
-    }
-    return true;
-  }
-
-  return false;
 }
 
 export function registerMessageHandler(app: App, botUserId: string): void {
