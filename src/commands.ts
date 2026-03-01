@@ -2,7 +2,7 @@ import type { WebClient } from '@slack/web-api';
 import { loadConfig, resolvedChannelConfig, type Config } from './config.js';
 import { getActiveProcesses, killProcess, killAllProcesses, nudgeProcess } from './claude.js';
 import { getPending } from './queue.js';
-import { isUserAllowed, safeReact } from './slack-utils.js';
+import { isUserAllowed, safeReact, warnInThread } from './slack-utils.js';
 import { MAX_CONCURRENT_PROCESSES } from './slack.js';
 
 // --- Types ---
@@ -319,7 +319,14 @@ export async function handleMagicCommand(
   const def = commands.find((c) => c.name === cmdName);
   if (!def) return false;
 
-  const config = loadConfig();
+  let config: Config;
+  try {
+    config = loadConfig();
+  } catch (err) {
+    console.error('Failed to load config in magic command:', err);
+    await warnInThread(client, channelId, threadTs, 'Failed to load config. Check server logs.');
+    return true;
+  }
 
   // Resolve target channel for commands with channel args
   let targetChannelId = channelId;

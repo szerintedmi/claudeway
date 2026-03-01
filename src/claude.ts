@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'child_process';
-import { existsSync, unlinkSync, rmSync } from 'fs';
+import { existsSync, statSync, unlinkSync, rmSync } from 'fs';
 import { resolve } from 'path';
 import { v5 as uuidv5 } from 'uuid';
 import { getConfigPath } from './config.js';
@@ -500,7 +500,9 @@ function runClaudeStreamingProcess(
     });
 
     proc.stderr.on('data', (data: Buffer) => {
-      stderr += data.toString();
+      const chunk = data.toString();
+      stderr += chunk;
+      console.error(`[claude-stderr] ${chunk.trimEnd()}`);
       resetTimer();
     });
 
@@ -608,7 +610,7 @@ function buildClaudeArgs(
   ];
 
   const mcpConfigPath = resolve(process.cwd(), 'mcp.json');
-  if (existsSync(mcpConfigPath)) {
+  if (existsSync(mcpConfigPath) && statSync(mcpConfigPath).isFile()) {
     args.push('--mcp-config', mcpConfigPath);
   }
 
@@ -737,7 +739,7 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
   ];
 
   const mcpConfigPath = resolve(process.cwd(), 'mcp.json');
-  if (existsSync(mcpConfigPath)) {
+  if (existsSync(mcpConfigPath) && statSync(mcpConfigPath).isFile()) {
     args.push('--mcp-config', mcpConfigPath);
   }
 
