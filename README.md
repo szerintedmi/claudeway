@@ -31,7 +31,7 @@ Dedicate one Slack channel to Claudeway itself (mapped to the claudeway folder).
 - "Remove the dashboard channel"
 - "Change the model for #api to sonnet"
 
-Claude Code edits the config file directly (JSON or YAML), and changes take effect on the next message.
+Claude Code edits the config file directly, and changes take effect on the next message.
 
 ## Setup
 
@@ -71,25 +71,27 @@ SLACK_BOT_TOKEN=xoxb-your-bot-token
 SLACK_APP_TOKEN=xapp-your-app-level-token
 ```
 
-Create `config.json` or `config.yaml` (YAML is recommended for readability — see [`config.example.yaml`](config.example.yaml)). If both exist, YAML takes priority.
+Create `config.yaml` (see [`config.example.yaml`](config.example.yaml) for a full example):
 
-```json
-{
-  "botOwner": "U0123456789",
-  "channels": {
-    "C0123456789": {
-      "name": "my-project",
-      "folder": "/path/to/your/project"
-    }
-  },
-  "defaults": {
-    "model": "opus",
-    "systemPrompt": "Format all responses using Slack mrkdwn syntax (NOT standard Markdown). Key rules: *bold* (single asterisk), _italic_ (underscore), ~strikethrough~ (single tilde), `code`, ```code blocks``` (no language tag), > blockquote, <URL|label> for links (NOT [label](url)), :emoji: shortcodes. Keep responses concise. You have access to the Claudeway config at CONFIG_PATH which you can read and edit when asked to add, remove, or update channel mappings.",
-    "timeoutMs": 1800000,
-    "processMode": "oneshot",
-    "responseMode": "batch"
-  }
-}
+```yaml
+botOwner: "U0123456789"
+
+channels:
+  C0123456789:
+    name: my-project
+    folder: /path/to/your/project
+
+defaults:
+  model: opus
+  systemPrompt: >-
+    Format all responses using Slack mrkdwn syntax (NOT standard Markdown).
+    Key rules: *bold* (single asterisk), _italic_ (underscore),
+    ~strikethrough~ (single tilde), `code`, ```code blocks``` (no language tag),
+    > blockquote, <URL|label> for links (NOT [label](url)), :emoji: shortcodes.
+    Keep responses concise.
+  timeoutMs: 1800000
+  processMode: oneshot
+  responseMode: batch
 ```
 
 Optionally, create `mcp.json` to give Claude access to MCP servers (e.g. persistent memory). See `mcp.example.json`:

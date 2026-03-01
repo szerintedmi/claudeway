@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -105,19 +105,9 @@ describe('getChannelConfig', () => {
   });
 });
 
-describe('YAML config support', () => {
+describe('config file support', () => {
   let tmpDir: string;
   const originalCwd = process.cwd;
-
-  const minimalConfig = {
-    channels: { C001: { name: 'test', folder: '/test' } },
-    defaults: {
-      model: 'opus',
-      systemPrompt: 'test prompt',
-      timeoutMs: 300000,
-      responseMode: 'batch',
-    },
-  };
 
   const minimalYaml = `
 channels:
@@ -141,26 +131,13 @@ defaults:
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('loads config.json when only JSON exists', () => {
-    writeFileSync(join(tmpDir, 'config.json'), JSON.stringify(minimalConfig));
-    const config = loadConfig();
-    expect(config.channels.C001.name).toBe('test');
-  });
-
-  it('loads config.yaml when only YAML exists', () => {
+  it('loads config.yaml', () => {
     writeFileSync(join(tmpDir, 'config.yaml'), minimalYaml);
     const config = loadConfig();
     expect(config.channels.C002.name).toBe('from-yaml');
   });
 
-  it('prefers config.yaml over config.json when both exist', () => {
-    writeFileSync(join(tmpDir, 'config.yaml'), minimalYaml);
-    writeFileSync(join(tmpDir, 'config.json'), JSON.stringify(minimalConfig));
-    const config = loadConfig();
-    expect(config.channels.C002.name).toBe('from-yaml');
-  });
-
-  it('saveConfig writes YAML when config.yaml is active', () => {
+  it('saveConfig writes YAML', () => {
     writeFileSync(join(tmpDir, 'config.yaml'), minimalYaml);
     const config = loadConfig();
     config.channels.C002.name = 'updated';
@@ -168,20 +145,9 @@ defaults:
 
     const saved = readFileSync(join(tmpDir, 'config.yaml'), 'utf-8');
     expect(saved).toContain('updated');
-    expect(existsSync(join(tmpDir, 'config.json'))).toBe(false);
   });
 
-  it('saveConfig writes JSON when config.json is active', () => {
-    writeFileSync(join(tmpDir, 'config.json'), JSON.stringify(minimalConfig));
-    const config = loadConfig();
-    config.channels.C001.name = 'updated';
-    saveConfig(config);
-
-    const saved = JSON.parse(readFileSync(join(tmpDir, 'config.json'), 'utf-8'));
-    expect(saved.channels.C001.name).toBe('updated');
-  });
-
-  it('applies defaults when loading YAML config', () => {
+  it('applies defaults when loading config', () => {
     const yamlNoDefaults = `
 channels:
   C001:

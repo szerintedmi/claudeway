@@ -1,5 +1,4 @@
-# Claudeway configuration (YAML alternative to config.json)
-# If both config.yaml and config.json exist, config.yaml takes priority.
+# Claudeway configuration
 
 # Bot owner's Slack user ID — required for DM access, !config, !killall,
 # and cross-channel !kill/!nudge. Without this, global magic commands are denied.
@@ -32,4 +31,6 @@ defaults:
       You have access to the Claudeway config at CONFIG_PATH which you can read
       and edit when asked to add, remove, or update channel mappings.
   timeoutMs: 300000
-  responseMode: batch
+  processMode: oneshot # oneshot = new session per message; persistent = reuse session
+  responseMode: batch # batch | stream-update | stream-native
+  triggerMode: all # all = every message; mention = only when @mentioned

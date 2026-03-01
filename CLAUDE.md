@@ -18,7 +18,7 @@ Claudeway is a Slack-to-Claude Code CLI gateway. Messages arrive via Slack Socke
 
 ## Key Patterns
 
-- Config (`config.json`) is hot-reloaded per message — `loadConfig()` is called fresh in both `processQueuedMessage` and `registerMessageHandler`
+- Config (`config.yaml`) is hot-reloaded per message — `loadConfig()` is called fresh in both `processQueuedMessage` and `registerMessageHandler`
 - Session IDs are deterministic (derived from channel ID + folder path via UUID v5)
 - One message processed at a time per channel (serialized via `channelBusy` set)
 - Bot does NOT programmatically join Slack channels — requires manual `/invite` + config entry
