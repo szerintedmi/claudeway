@@ -587,7 +587,7 @@ async function processBatch(
       imagePaths: queued.imagePaths,
     });
 
-    await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+    await safeReact(client, queued.channelId, queued.ts, 'ballot_box_with_check');
     await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
 
     await sendResponse(client, queued.channelId, queued.threadTs, result.response);
@@ -622,7 +622,7 @@ async function processStreamUpdate(
 
     await responder.finish();
 
-    await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+    await safeReact(client, queued.channelId, queued.ts, 'ballot_box_with_check');
     await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
 
     // If final response exceeds file threshold, upload as file and delete the streamed message
@@ -718,7 +718,7 @@ async function processStreamNative(
 
     await responder.finish();
 
-    await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+    await safeReact(client, queued.channelId, queued.ts, 'ballot_box_with_check');
     await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
 
     // Native streaming handles display automatically; fall back to file upload for huge responses
@@ -762,7 +762,7 @@ async function processPersistent(
         onTextDelta: () => {},
       });
 
-      await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+      await safeReact(client, queued.channelId, queued.ts, 'ballot_box_with_check');
       await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
       await sendResponse(client, queued.channelId, queued.threadTs, result.response);
 
@@ -789,7 +789,7 @@ async function processPersistent(
       });
 
       await responder.finish();
-      await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+      await safeReact(client, queued.channelId, queued.ts, 'ballot_box_with_check');
       await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
 
       const finalText = result.response || responder.getFullText();
@@ -869,7 +869,7 @@ async function processPersistent(
       });
 
       await responder.finish();
-      await safeReact(client, queued.channelId, queued.ts, 'white_check_mark');
+      await safeReact(client, queued.channelId, queued.ts, 'ballot_box_with_check');
       await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand', 'remove');
 
       const finalText = result.response || responder.getFullText();
