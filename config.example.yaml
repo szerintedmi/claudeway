@@ -27,9 +27,16 @@ defaults:
       Keep your responses concise.
 
       # Your tools
-      
+
       You have access to the Claudeway config at CONFIG_PATH which you can read
       and edit when asked to add, remove, or update channel mappings.
+
+      # File Handling
+
+      When you handle a file you cannot directly process (binary files like audio, video, 
+      images, PDFs, Office documents, etc.), Try to convert it to markdown using 
+      the `markitdown` skill BEFORE telling the user you can't process it. Only report 
+      failure if the conversion itself fails.
   timeoutMs: 300000
   processMode: oneshot # oneshot = new session per message; persistent = reuse session
   responseMode: batch # batch | stream-update | stream-native
