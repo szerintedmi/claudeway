@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'fs';
 import { join, basename } from 'path';
 import type { WebClient } from '@slack/web-api';
+import { warnInThread } from './slack-utils.js';
 
 /**
  * Create a per-request temporary directory within the configured base temp dir.
@@ -53,6 +54,8 @@ export async function uploadAttachedFiles(
 
   console.log(`[attachments] Uploading ${filePaths.length} file(s)`);
 
+  const failed: string[] = [];
+
   for (const filePath of filePaths) {
     const filename = basename(filePath);
     try {
@@ -65,8 +68,21 @@ export async function uploadAttachedFiles(
       });
       console.log(`[attachments] Uploaded: ${filename}`);
     } catch (err) {
-      console.error(`[attachments] Failed to upload ${filename}:`, err);
+      const slackErr = err as { data?: unknown };
+      const detail = slackErr.data ? JSON.stringify(slackErr.data, null, 2) : err;
+      console.error(`[attachments] Failed to upload ${filename}:`, detail);
+      failed.push(filename);
     }
+  }
+
+  if (failed.length > 0) {
+    const fileList = failed.join(', ');
+    await warnInThread(
+      client,
+      channelId,
+      threadTs,
+      `Failed to upload ${failed.length} attachment(s): ${fileList}`,
+    );
   }
 }
 
