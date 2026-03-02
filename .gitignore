@@ -8,6 +8,7 @@ mcp.json
 *.log
 *.pid
 .queue/
+.claudeway-tmp/
 .files/
 .git-credentials
 .repos/

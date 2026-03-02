@@ -23,6 +23,10 @@ COPY CLAUDE.md ./
 COPY .claude/ ./.claude/
 COPY docs/ ./docs/
 COPY config.example.yaml ./
+COPY scripts/claudeway-attach ./scripts/
+
+# Make claudeway-attach available in PATH for Claude CLI's Bash tool
+RUN ln -s /app/scripts/claudeway-attach /usr/local/bin/claudeway-attach
 
 # Configure git to use credential store (PAT-based, file mounted at runtime)
 RUN git config --system credential.helper 'store --file=/home/claudeway/.git-credentials'

@@ -16,6 +16,8 @@ export interface ClaudeOptions {
   channelId: string;
   threadTs?: string;
   filePaths?: string[];
+  tempDir?: string;
+  tempBaseDir?: string;
 }
 
 export interface ClaudeStreamingOptions extends ClaudeOptions {
@@ -316,8 +318,8 @@ interface ToolAccumulator {
   index: number;
 }
 
-function spawnClaudeProcess(args: string[], cwd: string) {
-  const env = { ...process.env };
+function spawnClaudeProcess(args: string[], cwd: string, extraEnv?: Record<string, string>) {
+  const env = { ...process.env, ...extraEnv };
   delete env.CLAUDECODE;
   delete env.SLACK_BOT_TOKEN;
   delete env.SLACK_APP_TOKEN;
@@ -338,9 +340,10 @@ function runClaudeProcess(
   sessionId: string,
   message: string,
   regKey: string,
+  extraEnv?: Record<string, string>,
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
-    const proc = spawnClaudeProcess(args, cwd);
+    const proc = spawnClaudeProcess(args, cwd, extraEnv);
 
     processRegistry.set(regKey, {
       proc,
@@ -432,9 +435,10 @@ function runClaudeStreamingProcess(
   message: string,
   regKey: string,
   onToolEvent?: (event: ToolEventPayload) => void,
+  extraEnv?: Record<string, string>,
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
-    const proc = spawnClaudeProcess(args, cwd);
+    const proc = spawnClaudeProcess(args, cwd, extraEnv);
 
     processRegistry.set(regKey, {
       proc,
@@ -638,8 +642,17 @@ function makeFreshArgs(args: string[], sessionId: string): string[] {
   return args.map((a, i) => (a === '--resume' && args[i + 1] === sessionId ? '--session-id' : a));
 }
 
+function buildTempDirEnv(options: ClaudeOptions): Record<string, string> | undefined {
+  if (!options.tempDir) return undefined;
+  return {
+    CLAUDEWAY_TEMP_DIR: options.tempDir,
+    CLAUDEWAY_CHANNEL_ID: options.channelId,
+  };
+}
+
 export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
   const { args, sessionId, cwd, resuming } = buildClaudeArgs(options, 'json');
+  const tempDirEnv = buildTempDirEnv(options);
   const regKey = registryKey(options.channelId, options.threadTs);
 
   console.log(`[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} session ${sessionId}`);
@@ -653,6 +666,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
       sessionId,
       options.message,
       regKey,
+      tempDirEnv,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -669,6 +683,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
         sessionId,
         options.message,
         regKey,
+        tempDirEnv,
       );
     }
     throw err;
@@ -677,6 +692,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
 
 export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promise<ClaudeResult> {
   const { args, sessionId, cwd, resuming } = buildClaudeArgs(options, 'stream-json');
+  const tempDirEnv = buildTempDirEnv(options);
   const regKey = registryKey(options.channelId, options.threadTs);
 
   console.log(
@@ -694,6 +710,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
       options.message,
       regKey,
       options.onToolEvent,
+      tempDirEnv,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -712,6 +729,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
         options.message,
         regKey,
         options.onToolEvent,
+        tempDirEnv,
       );
     }
     throw err;
@@ -777,7 +795,11 @@ function createPersistentProcess(
   delete env.SLACK_BOT_TOKEN;
   delete env.SLACK_APP_TOKEN;
   if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
-
+  // Persistent mode: inject channel ID + temp base dir for pointer file lookup, and scripts PATH
+  env.CLAUDEWAY_CHANNEL_ID = options.channelId;
+  if (options.tempBaseDir) {
+    env.CLAUDEWAY_TEMP_BASE = options.tempBaseDir;
+  }
   const proc = spawn('claude', args, {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],

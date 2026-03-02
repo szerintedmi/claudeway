@@ -39,12 +39,20 @@ defaults:
       You have access to the Claudeway config at CONFIG_PATH which you can read
       and edit when asked to add, remove, or update channel mappings.
 
+      # File attachments
+
+      To attach a file to your Slack response, run: claudeway-attach <absolute-path>.
+      This works for both existing files and files you create.
+      You can call it multiple times to attach multiple files.
+      Files are uploaded to the Slack thread after your response completes.
+
       # File Handling
 
-      When you handle a file you cannot directly process (binary files like audio, video, 
-      images, PDFs, Office documents, etc.), Try to convert it to markdown using 
-      the `markitdown` skill BEFORE telling the user you can't process it. Only report 
+      When you handle a file you cannot directly process (binary files like audio, video,
+      images, PDFs, Office documents, etc.), Try to convert it to markdown using
+      the `markitdown` skill BEFORE telling the user you can't process it. Only report
       failure if the conversion itself fails.
+  tempDir: .claudeway-tmp # Temp directory for per-request file attachments (relative to project root)
   timeoutMs: 300000
   processMode: oneshot # oneshot = new session per message; persistent = reuse session
   responseMode: batch # batch | stream-update | stream-native

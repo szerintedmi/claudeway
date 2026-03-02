@@ -23,6 +23,9 @@ rm -f "$PLIST_PATH"
 echo "Cleaning up pidfile..."
 rm -f "$PROJECT_DIR/claudeway.pid"
 
+echo "Removing claudeway-attach symlink..."
+rm -f /usr/local/bin/claudeway-attach
+
 echo ""
 echo "Claudeway service removed."
 echo "Your .env, config.json, and logs are untouched."

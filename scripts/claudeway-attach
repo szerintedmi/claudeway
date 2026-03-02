@@ -1,0 +1,47 @@
+#!/bin/bash
+# claudeway-attach — Stage a file for Slack attachment
+# Called by Claude CLI via its Bash tool.
+#
+# Resolves the temp directory from:
+#   1. CLAUDEWAY_TEMP_DIR env var (oneshot mode — set per request)
+#   2. Pointer file at <tempDir>/<CLAUDEWAY_CHANNEL_ID>.current (persistent mode)
+#
+# Usage: claudeway-attach <file_path>
+#   file_path: Path to an existing file to attach to the Slack response.
+
+set -eu
+
+# Resolve request temp directory
+REQUEST_DIR="${CLAUDEWAY_TEMP_DIR:-}"
+if [ -z "$REQUEST_DIR" ] && [ -n "${CLAUDEWAY_TEMP_BASE:-}" ] && [ -n "${CLAUDEWAY_CHANNEL_ID:-}" ]; then
+  POINTER_FILE="${CLAUDEWAY_TEMP_BASE}/${CLAUDEWAY_CHANNEL_ID}.current"
+  if [ -f "$POINTER_FILE" ]; then
+    REQUEST_DIR="$(cat "$POINTER_FILE")"
+  fi
+fi
+
+if [ -z "$REQUEST_DIR" ]; then
+  echo "Error: No temp directory available. File attachment is not available in this context." >&2
+  exit 1
+fi
+
+if [ -z "${1:-}" ]; then
+  echo "Usage: claudeway-attach <file_path>" >&2
+  exit 1
+fi
+
+# Resolve to absolute path
+FILE="$(realpath "$1" 2>/dev/null || echo "$1")"
+
+if [ ! -f "$FILE" ]; then
+  echo "Error: File not found: $FILE" >&2
+  exit 1
+fi
+
+if [ ! -d "$REQUEST_DIR" ]; then
+  echo "Error: Temp directory no longer exists: $REQUEST_DIR" >&2
+  exit 1
+fi
+
+printf '%s\n' "$FILE" >> "$REQUEST_DIR/attachments.txt"
+echo "Staged for Slack attachment: $(basename "$FILE")"

@@ -26,6 +26,8 @@ import { handleMagicCommand } from './commands.js';
 import { isUserAllowed, safeReact, warnInThread } from './slack-utils.js';
 import { shouldRespond, stripBotMention, buildPrompt } from './prompt.js';
 import { fetchThreadContext } from './thread.js';
+import { resolvedTempDir } from './config.js';
+import { createRequestTempDir, uploadAttachedFiles, cleanupRequestTempDir } from './tempdir.js';
 
 interface SlackFile {
   id: string;
@@ -512,6 +514,7 @@ async function processBatch(
   queued: QueuedMessage,
   client: WebClient,
   channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
+  tempDir: string,
 ): Promise<void> {
   try {
     const result = await runClaude({
@@ -523,6 +526,7 @@ async function processBatch(
       channelId: queued.channelId,
       threadTs: queued.threadTs,
       filePaths: queued.filePaths,
+      tempDir,
     });
 
     await safeReact(client, queued.channelId, queued.ts, 'ballot_box_with_check');
@@ -542,6 +546,7 @@ async function processStreamUpdate(
   queued: QueuedMessage,
   client: WebClient,
   channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
+  tempDir: string,
 ): Promise<void> {
   try {
     const responder = new StreamingResponder(client, queued.channelId, queued.threadTs);
@@ -555,6 +560,7 @@ async function processStreamUpdate(
       channelId: queued.channelId,
       threadTs: queued.threadTs,
       filePaths: queued.filePaths,
+      tempDir,
       onTextDelta: (text) => responder.onTextDelta(text),
       onToolEvent: (event) => responder.onToolEvent(event),
     });
@@ -622,6 +628,7 @@ async function processStreamNative(
   queued: QueuedMessage,
   client: WebClient,
   channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
+  tempDir: string,
 ): Promise<void> {
   try {
     // Post a draft thinking message for immediate visual feedback while Claude processes
@@ -652,6 +659,7 @@ async function processStreamNative(
       channelId: queued.channelId,
       threadTs: queued.threadTs,
       filePaths: queued.filePaths,
+      tempDir,
       onTextDelta: (text) => responder.onTextDelta(text),
       onToolEvent: (event) => responder.onToolEvent(event),
     });
@@ -685,6 +693,8 @@ async function processPersistent(
   queued: QueuedMessage,
   client: WebClient,
   channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
+  tempDir: string,
+  tempBaseDir: string,
 ): Promise<void> {
   const mode = channelConfig.responseMode;
 
@@ -700,6 +710,8 @@ async function processPersistent(
         channelId: queued.channelId,
         threadTs: queued.threadTs,
         filePaths: queued.filePaths,
+        tempDir,
+        tempBaseDir,
         onTextDelta: () => {},
       });
 
@@ -726,6 +738,8 @@ async function processPersistent(
         channelId: queued.channelId,
         threadTs: queued.threadTs,
         filePaths: queued.filePaths,
+        tempDir,
+        tempBaseDir,
         onTextDelta: (text) => responder.onTextDelta(text),
         onToolEvent: (event) => responder.onToolEvent(event),
       });
@@ -807,6 +821,8 @@ async function processPersistent(
         channelId: queued.channelId,
         threadTs: queued.threadTs,
         filePaths: queued.filePaths,
+        tempDir,
+        tempBaseDir,
         onTextDelta: (text) => responder.onTextDelta(text),
         onToolEvent: (event) => responder.onToolEvent(event),
       });
@@ -841,6 +857,7 @@ const MODE_PROCESSORS: Record<
     queued: QueuedMessage,
     client: WebClient,
     config: ReturnType<typeof resolvedChannelConfig> & object,
+    tempDir: string,
   ) => Promise<void>
 > = {
   batch: processBatch,
@@ -894,11 +911,14 @@ async function processQueuedMessage(queued: QueuedMessage, client: WebClient): P
     `[${channelConfig.name}] Processing (${processMode}/${mode}): ${queued.text.substring(0, 80)}...`,
   );
 
+  const baseDir = resolvedTempDir(config);
+  const tempDir = createRequestTempDir(baseDir, queued.channelId);
+
   try {
     if (processMode === 'persistent') {
-      await processPersistent(queued, client, channelConfig);
+      await processPersistent(queued, client, channelConfig, tempDir, baseDir);
     } else {
-      await MODE_PROCESSORS[mode](queued, client, channelConfig);
+      await MODE_PROCESSORS[mode](queued, client, channelConfig, tempDir);
     }
   } catch (err) {
     await safeReact(client, queued.channelId, queued.ts, 'x');
@@ -916,6 +936,10 @@ async function processQueuedMessage(queued: QueuedMessage, client: WebClient): P
     } catch (replyErr) {
       console.error(`[${channelConfig.name}] Failed to send error reply:`, replyErr);
     }
+  } finally {
+    // Upload any files Claude attached, then clean up (runs on both success and error)
+    await uploadAttachedFiles(tempDir, client, queued.channelId, queued.threadTs);
+    cleanupRequestTempDir(tempDir, baseDir, queued.channelId);
   }
 
   // Remove from persistent queue after processing (success or error)

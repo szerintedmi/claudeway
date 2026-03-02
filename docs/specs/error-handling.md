@@ -2,7 +2,7 @@
 
 ## Problem
 
-Errors in subsidiary operations (file downloads, thread context, streaming updates) are logged to console but never communicated back to the Slack user. The user sees silence — no indication that something went wrong.
+Errors in subsidiary operations (file uploads, file downloads, thread context, streaming updates) are logged to console but never communicated back to the Slack user. The user sees silence — no indication that something went wrong.
 
 The main `processQueuedMessage` catch handler is the only path that posts errors to Slack. Everything else is console-only.
 
@@ -18,11 +18,12 @@ The main `processQueuedMessage` catch handler is the only path that posts errors
 
 | Component | File | Behavior |
 |---|---|---|
-| Config load failure (during processing) | `slack.ts` ~845 | Silently dequeues message, no feedback at all |
+| Config load failure (during processing) | `slack.ts` ~925 | Silently dequeues message, no feedback at all |
 | Config load failure (during routing) | `slack.ts` ~992 | Silent return, message never enqueued |
+| File attachment uploads | `tempdir.ts` ~52 | Per-file catch, logs error, continues |
 | File downloads | `slack.ts` ~80 | Per-file catch, logs error, skips file |
-| Streaming update failures | `slack.ts` ~238 | Catch in `flush()`, logs, continues |
-| Native stream append | `slack.ts` ~385 | Promise `.catch()`, logs |
+| Streaming update failures | `slack.ts` ~264 | Catch in `flush()`, logs, continues |
+| Native stream append | `slack.ts` ~415 | Promise `.catch()`, logs |
 | Thread context fetch | `thread.ts` ~76 | Returns `[]` on error, logs |
 | Queue drain errors | `slack.ts` ~1076 | `.catch()`, logs |
 | Startup drain errors | `slack.ts` ~1100 | `.catch()`, logs |
@@ -34,7 +35,7 @@ The main `processQueuedMessage` catch handler is the only path that posts errors
 | Component | Reason |
 |---|---|
 | Reactions (`safeReact`) | Non-critical UI hint |
-| Temp file cleanup (`cleanupOldTempFiles`) | Best-effort filesystem cleanup |
+| Temp dir cleanup / `cleanupOldTempFiles` | Best-effort filesystem cleanup |
 | Message deletion during streaming | Best-effort, fallback exists |
 | Tool status updates | Ephemeral progress indicators |
 | Queue file parse errors (`queue.ts`) | Gracefully skips corrupted files |
@@ -80,6 +81,11 @@ async function warnInThread(
 
 Each subsidiary operation should call `warnInThread` on failure, with a brief user-friendly message. The original `console.error` stays for ops debugging.
 
+**File attachment uploads** (`tempdir.ts`):
+```
+:warning: Failed to upload attachment "CLAUDE.md" (missing_scope). Check bot permissions.
+```
+
 **File downloads** (`slack.ts` `downloadSlackFiles`):
 ```
 :warning: Failed to download file "screenshot.png" (HTTP 403). Check bot token permissions.
@@ -105,9 +111,9 @@ Each subsidiary operation should call `warnInThread` on failure, with a brief us
 
 ### 4. Threading `client` + thread context through
 
-`downloadSlackFiles` currently receives only `files`, `token`, and `channelId`. It would need `client` and `threadTs` added to post warnings, or the caller handles warnings based on return value.
+Some functions (e.g., `uploadAttachedFiles`, `fetchThreadContext`) already receive `client`, `channelId`, and `threadTs`. The `warnInThread` call can be added directly.
 
-`fetchThreadContext` already receives `client`, `channelId`, and `threadTs` — `warnInThread` can be added directly.
+`downloadSlackFiles` currently receives only `files`, `token`, and `channelId`. It would need `client` and `threadTs` added to post warnings, or the caller handles warnings based on return value.
 
 **Option A — Pass thread context to subsidiary functions:**
 Add `client` + `threadTs` params where needed. Simple, explicit.
@@ -138,6 +144,7 @@ try {
 
 - [x] Add `warnInThread` helper to `slack-utils.ts`
 - [x] `downloadSlackFiles` — return `{paths, failedCount, totalCount}`; caller posts batch warning via `warnInThread`
+- [ ] `uploadAttachedFiles` — call `warnInThread` on per-file upload failure
 - [x] `processQueuedMessage` config load failure — call `warnInThread` before dequeuing
 - [x] `fetchThreadContext` — call `warnInThread` on fetch failure
 - [x] `handleMagicCommand` — wrap `loadConfig()` in try-catch with Slack feedback
