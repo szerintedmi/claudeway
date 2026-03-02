@@ -568,7 +568,7 @@ function runClaudeStreamingProcess(
  */
 export function sessionArtifactPaths(sessionId: string, cwd: string) {
   const home = process.env.HOME ?? `/Users/${process.env.USER ?? ''}`;
-  const encodedPath = cwd.replace(/\//g, '-');
+  const encodedPath = cwd.replace(/[/.]/g, '-');
   return {
     jsonl: resolve(home, '.claude', 'projects', encodedPath, `${sessionId}.jsonl`),
     dir: resolve(home, '.claude', 'projects', encodedPath, sessionId),

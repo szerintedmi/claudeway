@@ -166,7 +166,7 @@ const channelCount = Object.keys(config.channels).length;
 console.log('Claudeway started');
 console.log('Configured channels:');
 for (const [id, ch] of Object.entries(config.channels)) {
-  console.log(`  #${ch.name} (${id}) -> ${ch.folder}`);
+  console.log(`  #${ch.name} (${id}) -> ${ch.repo ?? ch.folder ?? '.'}`);
 }
 
 await notifyOwner(
