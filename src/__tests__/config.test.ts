@@ -6,6 +6,7 @@ import {
   getChannelConfig,
   loadConfig,
   saveConfig,
+  resolveFolder,
   type Config,
 } from '../config.js';
 
@@ -158,5 +159,134 @@ channels:
     const config = loadConfig();
     expect(config.defaults.responseMode).toBe('batch');
     expect(config.defaults.processMode).toBe('oneshot');
+  });
+
+  it('validates channel repo references repos map', () => {
+    const yaml = `
+repos:
+  my-repo:
+    url: https://github.com/org/my-repo.git
+channels:
+  C001:
+    name: test
+    repo: nonexistent-repo
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    expect(() => loadConfig()).toThrow('repo "nonexistent-repo" is not defined in repos');
+  });
+
+  it('validates channel additionalRepos references repos map', () => {
+    const yaml = `
+repos:
+  my-repo:
+    url: https://github.com/org/my-repo.git
+channels:
+  C001:
+    name: test
+    repo: my-repo
+    additionalRepos: [unknown-lib]
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    expect(() => loadConfig()).toThrow('references unknown repo "unknown-lib"');
+  });
+
+  it('loads config with valid repos map', () => {
+    const yaml = `
+repos:
+  my-repo:
+    url: https://github.com/org/my-repo.git
+    branch: main
+  other-repo:
+    url: https://github.com/org/other-repo.git
+channels:
+  C001:
+    name: test
+    repo: my-repo
+    additionalRepos: [other-repo]
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    const config = loadConfig();
+    expect(config.repos?.['my-repo']?.url).toBe('https://github.com/org/my-repo.git');
+    expect(config.repos?.['my-repo']?.branch).toBe('main');
+    expect(config.channels.C001.additionalRepos).toEqual(['other-repo']);
+  });
+
+  it('skips repo validation when repos map is absent', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /some/path
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    expect(() => loadConfig()).not.toThrow();
+  });
+});
+
+describe('resolveFolder', () => {
+  it('resolves folder name to .repos/<name> under cwd', () => {
+    const result = resolveFolder('my-repo');
+    expect(result).toBe(join(process.cwd(), '.repos', 'my-repo'));
+  });
+});
+
+describe('resolvedChannelConfig with repos', () => {
+  it('resolves repo to .repos/<name> when repos map exists', () => {
+    const config: Config = {
+      repos: {
+        'my-repo': { url: 'https://github.com/org/my-repo.git' },
+      },
+      channels: {
+        C001: { name: 'test', repo: 'my-repo' },
+      },
+      defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
+    };
+    const result = resolvedChannelConfig(config, 'C001');
+    expect(result?.folder).toBe(join(process.cwd(), '.repos', 'my-repo'));
+  });
+
+  it('falls back to folder field when repo is absent', () => {
+    const config: Config = {
+      repos: {
+        'my-repo': { url: 'https://github.com/org/my-repo.git' },
+      },
+      channels: {
+        C001: { name: 'test', folder: 'my-repo' },
+      },
+      defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
+    };
+    const result = resolvedChannelConfig(config, 'C001');
+    expect(result?.folder).toBe(join(process.cwd(), '.repos', 'my-repo'));
+  });
+
+  it('keeps folder as-is when repos map is absent', () => {
+    const config: Config = {
+      channels: {
+        C001: { name: 'test', folder: '/projects/test' },
+      },
+      defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
+    };
+    const result = resolvedChannelConfig(config, 'C001');
+    expect(result?.folder).toBe('/projects/test');
   });
 });

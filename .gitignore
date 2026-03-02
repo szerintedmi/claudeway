@@ -9,3 +9,5 @@ mcp.json
 *.pid
 .queue/
 .files/
+.git-credentials
+.repos/

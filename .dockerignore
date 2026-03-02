@@ -1,0 +1,14 @@
+.env
+config.yaml
+mcp.json
+node_modules/
+dist/
+.git/
+.claude/settings.local.json
+.queue/
+.files/
+.claudeway-tmp/
+.repos/
+*.log
+*.pid
+claudeway.log

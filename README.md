@@ -21,13 +21,13 @@ You (Slack) --> Socket Mode --> Claudeway (your machine) --> claude CLI --> resp
 5. Reactions show status: `📥` (queued/received), ⏳ (processing), ✅ (done), ❌ (error). Deleting a queued message (📥) removes it from the queue — if it's already processing (⏳), use `!kill` instead.
 6. Temp image files are cleaned up after processing
 
-Each channel maps to a project folder, so you can have `#dashboard` pointing to your dashboard repo, `#api` pointing to your API, etc. Session IDs are derived deterministically from the channel + folder pair, so conversations persist across restarts — Claude remembers what you discussed earlier in the same channel.
+Each channel maps to a repo, so you can have `#dashboard` pointing to your dashboard repo, `#api` pointing to your API, etc. Session IDs are derived deterministically from the channel + repo pair, so conversations persist across restarts — Claude remembers what you discussed earlier in the same channel.
 
 ## Self-Configuration
 
 Dedicate one Slack channel to Claudeway itself (mapped to the claudeway folder). Then you can manage config through natural language:
 
-- "Add channel C0123456789 named 'my-project' mapped to /path/to/project"
+- "Add channel C0123456789 named 'my-project' mapped to repo my-project"
 - "Remove the dashboard channel"
 - "Change the model for #api to sonnet"
 
@@ -65,21 +65,29 @@ cd claudeway
 bun install
 ```
 
-Create `.env`:
+Create `.env` (see [`.env.example`](.env.example)):
 ```
 SLACK_BOT_TOKEN=xoxb-your-bot-token
 SLACK_APP_TOKEN=xapp-your-app-level-token
+CLAUDE_CODE_OAUTH_TOKEN=<run `claude setup-token` to generate>
 ```
+
+The `CLAUDE_CODE_OAUTH_TOKEN` is required for Docker deployments and optional when running locally (where the CLI uses its own auth). Generate it with `claude setup-token` on a machine where Claude Code is already authenticated.
 
 Create `config.yaml` (see [`config.example.yaml`](config.example.yaml) for a full example):
 
 ```yaml
 botOwner: "U0123456789"
 
+repos:
+  my-project:
+    url: https://github.com/org/my-project.git
+    branch: main
+
 channels:
   C0123456789:
     name: my-project
-    folder: /path/to/your/project
+    repo: my-project
 
 defaults:
   model: opus
@@ -144,6 +152,30 @@ launchctl load -w ~/Library/LaunchAgents/com.claudeway.plist  # start again
 
 The install script auto-detects your `bun` path, project directory, and user environment. The generated plist is placed at `~/Library/LaunchAgents/com.claudeway.plist`.
 
+### 5. Run with Docker
+
+Docker provides filesystem isolation — Claude CLI can only access repos defined in `config.yaml`.
+
+1. Generate an auth token on a machine where Claude Code is authenticated:
+   ```bash
+   claude setup-token
+   ```
+   Add the token to your `.env` as `CLAUDE_CODE_OAUTH_TOKEN`.
+
+2. Define repos in `config.yaml` and map channels to them (see `config.example.yaml`). The Docker entrypoint automatically clones/pulls repos on startup.
+
+3. Mount your SSH private key for git access — edit `docker-compose.yml` to point to your key:
+   ```yaml
+   - ~/.ssh/id_ed25519:/home/claudeway/.ssh/id_ed25519:ro
+   ```
+
+4. Start the container:
+   ```bash
+   docker compose build && docker compose up -d
+   ```
+
+Session state, repos, queue, and files are persisted in named Docker volumes across restarts. Slack tokens are stripped from the environment before spawning the Claude CLI.
+
 ## Config Options
 
 ### Top-level
@@ -151,7 +183,8 @@ The install script auto-detects your `bun` path, project directory, and user env
 | Field | Description | Default |
 |-------|-------------|---------|
 | `botOwner` | Slack user ID — receives startup/shutdown DMs, can use magic commands | none (disabled) |
-| `channels` | Channel-to-folder mappings | required |
+| `repos` | Repo definitions (`url`, optional `branch`) — cloned into `.repos/` | none |
+| `channels` | Channel-to-repo mappings | required |
 | `defaults` | Default model, prompt, timeout, and response mode | required |
 
 Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutdown, and you can send magic commands (`!config`, `!ps`, etc.) in that DM as an admin console.
@@ -161,7 +194,8 @@ Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutd
 | Field | Description | Default |
 |-------|-------------|---------|
 | `name` | Display name for logs | required |
-| `folder` | Project folder path | required |
+| `repo` | Repo name from `repos` map (resolved to `.repos/<name>`) | required |
+| `additionalRepos` | Extra repo names from `repos` map (accessible via `../<name>`) | none |
 | `model` | Claude model (`opus`, `sonnet`) | from defaults |
 | `systemPrompt` | Custom system prompt | from defaults |
 | `timeoutMs` | Idle timeout in ms (resets on activity) | 1800000 (30 min) |
