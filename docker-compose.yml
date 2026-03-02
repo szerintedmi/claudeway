@@ -1,0 +1,39 @@
+services:
+  claudeway:
+    build: .
+    container_name: claudeway
+    restart: unless-stopped
+    env_file:
+      - .env  # SLACK_BOT_TOKEN, SLACK_APP_TOKEN (only for Claudeway process, stripped before Claude CLI)
+    environment:
+      - HOME=/home/claudeway
+      - USER=claudeway
+    volumes:
+      # Config (read-only)
+      - ./config.yaml:/app/config.yaml:ro
+      - ./mcp.json:/app/mcp.json:ro  # optional, remove if not used
+
+      # Claude CLI session state (created at runtime, persisted across restarts)
+      - claudeway-claude-state:/home/claudeway/.claude
+
+      # Git SSH key (read-only) — for cloning repos via SSH
+      # Mount your GitHub SSH private key here
+      - ~/.ssh/id_ed25519_hostaway:/home/claudeway/.ssh/id_ed25519:ro
+
+      # Repos — cloned/pulled by entrypoint from config.yaml repos map
+      - claudeway-repos:/app/.repos
+
+      # Runtime state (persisted across restarts)
+      - claudeway-queue:/app/.queue
+      - claudeway-files:/app/.files
+    security_opt:
+      - no-new-privileges:true
+    read_only: false  # Claude needs to write to work folders
+    tmpfs:
+      - /tmp:size=100M
+
+volumes:
+  claudeway-repos:
+  claudeway-queue:
+  claudeway-files:
+  claudeway-claude-state:

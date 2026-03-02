@@ -319,6 +319,8 @@ interface ToolAccumulator {
 function spawnClaudeProcess(args: string[], cwd: string) {
   const env = { ...process.env };
   delete env.CLAUDECODE;
+  delete env.SLACK_BOT_TOKEN;
+  delete env.SLACK_APP_TOKEN;
   if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
 
   return spawn('claude', args, {
@@ -488,8 +490,11 @@ function runClaudeStreamingProcess(
       }, timeoutMs);
     };
 
+    let rawStdout = '';
     proc.stdout.on('data', (data: Buffer) => {
-      lineBuffer += data.toString();
+      const chunk = data.toString();
+      rawStdout += chunk;
+      lineBuffer += chunk;
       const lines = lineBuffer.split('\n');
       // Keep the last (possibly incomplete) line in the buffer
       lineBuffer = lines.pop() ?? '';
@@ -527,6 +532,16 @@ function runClaudeStreamingProcess(
 
       if (code !== 0) {
         reject(new Error(`Claude exited with code ${code}: ${stderr.trim()}`));
+        return;
+      }
+
+      if (!fullText) {
+        const details: string[] = [];
+        if (stderr) details.push(`stderr: ${stderr.trimEnd().slice(-500)}`);
+        if (rawStdout) details.push(`stdout(last 500): ${rawStdout.trimEnd().slice(-500)}`);
+        const detail = details.length > 0 ? ` ${details.join(' | ')}` : '';
+        console.error(`[claude] Process produced no response (exit 0).${detail}`);
+        reject(new Error('Claude process produced no response.'));
         return;
       }
 
@@ -759,6 +774,8 @@ function createPersistentProcess(
 
   const env = { ...process.env };
   delete env.CLAUDECODE;
+  delete env.SLACK_BOT_TOKEN;
+  delete env.SLACK_APP_TOKEN;
   if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
 
   const proc = spawn('claude', args, {

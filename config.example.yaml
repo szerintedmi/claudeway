@@ -6,10 +6,18 @@ botOwner: "U0123456789"
 
 systemChannel: "C0123456789"
 
+# Repo definitions — used by Docker entrypoint to clone/pull on startup.
+# Locally, clone or symlink repos into .repos/ manually.
+repos:
+  my-project:
+    url: https://github.com/org/my-project.git
+    branch: main  # optional, defaults to repo default branch
+
 channels:
   C0123456789:
     name: my-project
-    folder: /path/to/your/project
+    repo: my-project  # repo name from repos map, resolved to .repos/my-project
+    # additionalRepos: [other-repo]  # optional: extra repos accessible via ../other-repo
     # Optional: restrict who can use the bot and run magic commands in this channel.
     # If omitted, all channel members can interact with the bot.
     # allowedUsers: ["U0123456789", "U9876543210"]
