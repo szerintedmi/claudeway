@@ -80,6 +80,14 @@ cat > "$PLIST_PATH" << EOF
 </plist>
 EOF
 
+# Symlink claudeway-attach into PATH so Claude CLI's Bash tool can find it
+ATTACH_SRC="$SCRIPT_DIR/claudeway-attach"
+ATTACH_DEST="/usr/local/bin/claudeway-attach"
+if [ -x "$ATTACH_SRC" ]; then
+  echo "Symlinking claudeway-attach → $ATTACH_DEST"
+  ln -sf "$ATTACH_SRC" "$ATTACH_DEST"
+fi
+
 launchctl load -w "$PLIST_PATH"
 sleep 3
 

@@ -647,7 +647,6 @@ function buildTempDirEnv(options: ClaudeOptions): Record<string, string> | undef
   return {
     CLAUDEWAY_TEMP_DIR: options.tempDir,
     CLAUDEWAY_CHANNEL_ID: options.channelId,
-    PATH: `${resolve(process.cwd(), 'scripts')}:${process.env.PATH ?? ''}`,
   };
 }
 
@@ -801,8 +800,6 @@ function createPersistentProcess(
   if (options.tempBaseDir) {
     env.CLAUDEWAY_TEMP_BASE = options.tempBaseDir;
   }
-  env.PATH = `${resolve(process.cwd(), 'scripts')}:${env.PATH ?? ''}`;
-
   const proc = spawn('claude', args, {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
