@@ -144,7 +144,7 @@ try {
 
 - [x] Add `warnInThread` helper to `slack-utils.ts`
 - [x] `downloadSlackFiles` — return `{paths, failedCount, totalCount}`; caller posts batch warning via `warnInThread`
-- [ ] `uploadAttachedFiles` — call `warnInThread` on per-file upload failure
+- [x] `uploadAttachedFiles` — call `warnInThread` on per-file upload failure
 - [x] `processQueuedMessage` config load failure — call `warnInThread` before dequeuing
 - [x] `fetchThreadContext` — call `warnInThread` on fetch failure
 - [x] `handleMagicCommand` — wrap `loadConfig()` in try-catch with Slack feedback
