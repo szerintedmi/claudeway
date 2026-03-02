@@ -9,3 +9,6 @@ mcp.json
 *.pid
 .queue/
 .claudeway-tmp/
+.files/
+.git-credentials
+.repos/

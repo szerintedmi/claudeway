@@ -1,10 +1,38 @@
-import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
+import { writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync, statSync } from 'fs';
 import { execSync } from 'child_process';
-import { resolve } from 'path';
+import { resolve, join } from 'path';
 import { App } from '@slack/bolt';
 import { loadConfig } from './config.js';
-import { registerMessageHandler, drainAllPending } from './slack.js';
+import { registerMessageHandler, drainAllPending, FILE_TEMP_BASE } from './slack.js';
 import { ensureQueueDir } from './queue.js';
+
+// Clean up temp files older than 24 hours from per-channel download directories
+function cleanupOldTempFiles(): void {
+  if (!existsSync(FILE_TEMP_BASE)) return;
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  try {
+    for (const channelDir of readdirSync(FILE_TEMP_BASE)) {
+      const channelPath = join(FILE_TEMP_BASE, channelDir);
+      try {
+        for (const name of readdirSync(channelPath)) {
+          const filepath = join(channelPath, name);
+          try {
+            if (statSync(filepath).mtimeMs < cutoff) {
+              unlinkSync(filepath);
+              console.log(`[cleanup] Removed old temp file: ${channelDir}/${name}`);
+            }
+          } catch {
+            // ignore per-file errors
+          }
+        }
+      } catch {
+        // not a directory or read failed, skip
+      }
+    }
+  } catch {
+    // base dir read failed, ignore
+  }
+}
 
 // Pidfile lock — ensure only one gateway runs at a time
 const PIDFILE = resolve(process.cwd(), 'claudeway.pid');
@@ -89,6 +117,7 @@ function shutdown(): void {
 
 acquireLock();
 killOrphanProcesses();
+cleanupOldTempFiles();
 process.on('exit', releaseLock);
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
@@ -137,7 +166,7 @@ const channelCount = Object.keys(config.channels).length;
 console.log('Claudeway started');
 console.log('Configured channels:');
 for (const [id, ch] of Object.entries(config.channels)) {
-  console.log(`  #${ch.name} (${id}) -> ${ch.folder}`);
+  console.log(`  #${ch.name} (${id}) -> ${ch.repo ?? ch.folder ?? '.'}`);
 }
 
 await notifyOwner(

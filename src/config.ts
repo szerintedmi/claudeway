@@ -6,9 +6,16 @@ export type ResponseMode = 'batch' | 'stream-update' | 'stream-native';
 export type ProcessMode = 'oneshot' | 'persistent';
 export type TriggerMode = 'all' | 'mention';
 
+export interface RepoConfig {
+  url: string;
+  branch?: string;
+}
+
 export interface ChannelConfig {
   name: string;
-  folder: string;
+  repo?: string;
+  folder?: string;
+  additionalRepos?: string[];
   model?: string;
   systemPrompt?: string;
   timeoutMs?: number;
@@ -29,6 +36,7 @@ export interface Defaults {
 }
 
 export interface Config {
+  repos?: Record<string, RepoConfig>;
   channels: Record<string, ChannelConfig>;
   defaults: Defaults;
   botOwner?: string;
@@ -42,6 +50,10 @@ const DEFAULT_TEMP_DIR = '.claudeway-tmp';
 
 export function resolvedTempDir(config: Config): string {
   return resolve(process.cwd(), config.defaults.tempDir ?? DEFAULT_TEMP_DIR);
+}
+
+export function resolveFolder(folder: string): string {
+  return resolve(process.cwd(), '.repos', folder);
 }
 
 export function loadConfig(): Config {
@@ -66,6 +78,30 @@ export function loadConfig(): Config {
   }
   if (!config.defaults.processMode) {
     config.defaults.processMode = 'oneshot';
+  }
+
+  // Validate repo references
+  if (config.repos) {
+    for (const [channelId, ch] of Object.entries(config.channels)) {
+      const repoName = ch.repo ?? ch.folder;
+      if (!repoName) {
+        throw new Error(`${configPath}: channel ${channelId} must have a "repo" field`);
+      }
+      if (!(repoName in config.repos)) {
+        throw new Error(
+          `${configPath}: channel ${channelId} repo "${repoName}" is not defined in repos`,
+        );
+      }
+      if (ch.additionalRepos) {
+        for (const name of ch.additionalRepos) {
+          if (!(name in config.repos)) {
+            throw new Error(
+              `${configPath}: channel ${channelId} references unknown repo "${name}"`,
+            );
+          }
+        }
+      }
+    }
   }
 
   return config;
@@ -106,23 +142,27 @@ export function getChannelConfig(config: Config, channelId: string): ChannelConf
   return config.channels[channelId] ?? null;
 }
 
+export interface ResolvedChannelConfig extends ChannelConfig {
+  folder: string;
+  model: string;
+  systemPrompt: string;
+  timeoutMs: number;
+  responseMode: ResponseMode;
+  processMode: ProcessMode;
+  triggerMode: TriggerMode;
+}
+
 export function resolvedChannelConfig(
   config: Config,
   channelId: string,
-):
-  | (ChannelConfig & {
-      model: string;
-      systemPrompt: string;
-      timeoutMs: number;
-      responseMode: ResponseMode;
-      processMode: ProcessMode;
-      triggerMode: TriggerMode;
-    })
-  | null {
+): ResolvedChannelConfig | null {
   const ch = config.channels[channelId];
   if (!ch) return null;
+  const repoOrFolder = ch.repo ?? ch.folder ?? '.';
+  const folder = config.repos ? resolveFolder(repoOrFolder) : repoOrFolder;
   return {
     ...ch,
+    folder,
     model: ch.model ?? config.defaults.model,
     systemPrompt: ch.systemPrompt ?? config.defaults.systemPrompt,
     timeoutMs: ch.timeoutMs ?? config.defaults.timeoutMs,

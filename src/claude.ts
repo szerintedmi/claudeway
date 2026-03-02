@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'child_process';
-import { existsSync, unlinkSync, rmSync } from 'fs';
+import { existsSync, statSync, unlinkSync, rmSync } from 'fs';
 import { resolve } from 'path';
 import { v5 as uuidv5 } from 'uuid';
 import { getConfigPath } from './config.js';
@@ -15,7 +15,7 @@ export interface ClaudeOptions {
   timeoutMs: number;
   channelId: string;
   threadTs?: string;
-  imagePaths?: string[];
+  filePaths?: string[];
   tempDir?: string;
   tempBaseDir?: string;
 }
@@ -34,6 +34,14 @@ export interface ClaudeResult {
 
 // Claudeway namespace UUID for deterministic session IDs
 const CLAUDEWAY_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+
+/** Append file path references to a message so Claude reads them via its Read tool */
+function buildMessageWithFiles(message: string, filePaths: string[] | undefined): string {
+  if (filePaths && filePaths.length > 0) {
+    return `${message}\n\n[Attached files — use your Read tool to view them]\n${filePaths.join('\n')}`;
+  }
+  return message;
+}
 
 // Absolute maximum runtime — safety net regardless of activity
 const ABSOLUTE_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
@@ -313,6 +321,8 @@ interface ToolAccumulator {
 function spawnClaudeProcess(args: string[], cwd: string, extraEnv?: Record<string, string>) {
   const env = { ...process.env, ...extraEnv };
   delete env.CLAUDECODE;
+  delete env.SLACK_BOT_TOKEN;
+  delete env.SLACK_APP_TOKEN;
   if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
 
   return spawn('claude', args, {
@@ -484,8 +494,11 @@ function runClaudeStreamingProcess(
       }, timeoutMs);
     };
 
+    let rawStdout = '';
     proc.stdout.on('data', (data: Buffer) => {
-      lineBuffer += data.toString();
+      const chunk = data.toString();
+      rawStdout += chunk;
+      lineBuffer += chunk;
       const lines = lineBuffer.split('\n');
       // Keep the last (possibly incomplete) line in the buffer
       lineBuffer = lines.pop() ?? '';
@@ -496,7 +509,9 @@ function runClaudeStreamingProcess(
     });
 
     proc.stderr.on('data', (data: Buffer) => {
-      stderr += data.toString();
+      const chunk = data.toString();
+      stderr += chunk;
+      console.error(`[claude-stderr] ${chunk.trimEnd()}`);
       resetTimer();
     });
 
@@ -524,6 +539,16 @@ function runClaudeStreamingProcess(
         return;
       }
 
+      if (!fullText) {
+        const details: string[] = [];
+        if (stderr) details.push(`stderr: ${stderr.trimEnd().slice(-500)}`);
+        if (rawStdout) details.push(`stdout(last 500): ${rawStdout.trimEnd().slice(-500)}`);
+        const detail = details.length > 0 ? ` ${details.join(' | ')}` : '';
+        console.error(`[claude] Process produced no response (exit 0).${detail}`);
+        reject(new Error('Claude process produced no response.'));
+        return;
+      }
+
       resolve({
         response: fullText,
         sessionId,
@@ -547,7 +572,7 @@ function runClaudeStreamingProcess(
  */
 export function sessionArtifactPaths(sessionId: string, cwd: string) {
   const home = process.env.HOME ?? `/Users/${process.env.USER ?? ''}`;
-  const encodedPath = cwd.replace(/\//g, '-');
+  const encodedPath = cwd.replace(/[/.]/g, '-');
   return {
     jsonl: resolve(home, '.claude', 'projects', encodedPath, `${sessionId}.jsonl`),
     dir: resolve(home, '.claude', 'projects', encodedPath, sessionId),
@@ -604,19 +629,11 @@ function buildClaudeArgs(
   ];
 
   const mcpConfigPath = resolve(process.cwd(), 'mcp.json');
-  if (existsSync(mcpConfigPath)) {
+  if (existsSync(mcpConfigPath) && statSync(mcpConfigPath).isFile()) {
     args.push('--mcp-config', mcpConfigPath);
   }
 
-  // If images are attached, append file path references so Claude reads them
-  if (options.imagePaths && options.imagePaths.length > 0) {
-    const imageRefs = options.imagePaths.join('\n');
-    args.push(
-      message + '\n\n[Attached image files — use your Read tool to view them]\n' + imageRefs,
-    );
-  } else {
-    args.push(message);
-  }
+  args.push(buildMessageWithFiles(message, options.filePaths));
 
   return { args, sessionId, cwd, resuming };
 }
@@ -756,7 +773,7 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
   ];
 
   const mcpConfigPath = resolve(process.cwd(), 'mcp.json');
-  if (existsSync(mcpConfigPath)) {
+  if (existsSync(mcpConfigPath) && statSync(mcpConfigPath).isFile()) {
     args.push('--mcp-config', mcpConfigPath);
   }
 
@@ -776,6 +793,8 @@ function createPersistentProcess(
 
   const env = { ...process.env };
   delete env.CLAUDECODE;
+  delete env.SLACK_BOT_TOKEN;
+  delete env.SLACK_APP_TOKEN;
   if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
   // Persistent mode: inject channel ID + temp base dir for pointer file lookup, and scripts PATH
   env.CLAUDEWAY_CHANNEL_ID = options.channelId;
@@ -931,7 +950,7 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
 export async function runClaudePersistentStreaming(
   options: ClaudeStreamingOptions,
 ): Promise<ClaudeResult> {
-  const { channelId, message, timeoutMs, imagePaths, onTextDelta } = options;
+  const { channelId, message, timeoutMs, filePaths, onTextDelta } = options;
   const regKey = registryKey(channelId, options.threadTs);
 
   let entry = persistentRegistry.get(regKey);
@@ -943,13 +962,7 @@ export async function runClaudePersistentStreaming(
 
   entry.lastMessage = message.substring(0, 80);
 
-  // Build message content (include image refs if any)
-  let content = message;
-  if (imagePaths && imagePaths.length > 0) {
-    const imageRefs = imagePaths.join('\n');
-    content =
-      message + '\n\n[Attached image files — use your Read tool to view them]\n' + imageRefs;
-  }
+  const content = buildMessageWithFiles(message, filePaths);
 
   // Write the user message to stdin as NDJSON
   const inputLine = JSON.stringify({ type: 'user', message: { role: 'user', content } }) + '\n';

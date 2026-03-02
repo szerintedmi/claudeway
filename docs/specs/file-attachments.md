@@ -13,6 +13,7 @@ Today, only image attachments (PNG, JPEG, GIF, WebP) are downloaded and passed t
 ### R1: Download any file type
 
 - Remove the `SUPPORTED_IMAGE_TYPES` MIME type filter. Any Slack file with a `url_private_download` URL is eligible for download.
+- Update the `hasImages` gate in the message handler (`registerMessageHandler`) to `hasFiles` — check for any file with `url_private_download` without a MIME type filter. Without this, text-free messages containing non-image files (e.g., a PDF dropped without comment) would be silently ignored.
 - Increase the per-file size limit from 5MB to 25MB. This covers virtually all text-based files and typical document exports while preventing runaway temp disk usage from large binary attachments.
 
 ### R2: Generalize naming

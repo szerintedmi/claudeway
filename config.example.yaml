@@ -6,10 +6,18 @@ botOwner: "U0123456789"
 
 systemChannel: "C0123456789"
 
+# Repo definitions — used by Docker entrypoint to clone/pull on startup.
+# Locally, clone or symlink repos into .repos/ manually.
+repos:
+  my-project:
+    url: https://github.com/org/my-project.git
+    branch: main  # optional, defaults to repo default branch
+
 channels:
   C0123456789:
     name: my-project
-    folder: /path/to/your/project
+    repo: my-project  # repo name from repos map, resolved to .repos/my-project
+    # additionalRepos: [other-repo]  # optional: extra repos accessible via ../other-repo
     # Optional: restrict who can use the bot and run magic commands in this channel.
     # If omitted, all channel members can interact with the bot.
     # allowedUsers: ["U0123456789", "U9876543210"]
@@ -27,7 +35,7 @@ defaults:
       Keep your responses concise.
 
       # Your tools
-      
+
       You have access to the Claudeway config at CONFIG_PATH which you can read
       and edit when asked to add, remove, or update channel mappings.
 
@@ -37,6 +45,13 @@ defaults:
       This works for both existing files and files you create.
       You can call it multiple times to attach multiple files.
       Files are uploaded to the Slack thread after your response completes.
+
+      # File Handling
+
+      When you handle a file you cannot directly process (binary files like audio, video,
+      images, PDFs, Office documents, etc.), Try to convert it to markdown using
+      the `markitdown` skill BEFORE telling the user you can't process it. Only report
+      failure if the conversion itself fails.
   tempDir: .claudeway-tmp # Temp directory for per-request file attachments (relative to project root)
   timeoutMs: 300000
   processMode: oneshot # oneshot = new session per message; persistent = reuse session
