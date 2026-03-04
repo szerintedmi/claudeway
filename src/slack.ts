@@ -7,6 +7,7 @@ import {
   loadConfig,
   resolvedChannelConfig,
   resolvedDmConfig,
+  DATA_DIR,
   type ResponseMode,
 } from './config.js';
 import {
@@ -51,7 +52,7 @@ interface SlackMessage {
 }
 
 const FILE_SIZE_LIMIT = 25 * 1024 * 1024; // 25MB
-export const FILE_TEMP_BASE = resolve(process.cwd(), '.files');
+export const FILE_TEMP_BASE = resolve(DATA_DIR, 'files');
 
 interface DownloadResult {
   paths: string[];

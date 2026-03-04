@@ -39,7 +39,7 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Create runtime directories
-RUN mkdir -p .queue .files .claudeway-tmp .repos && \
+RUN mkdir -p .docker/queue .docker/files .docker/repos .claudeway-tmp && \
     chown -R claudeway:claudeway /app
 
 # Create Claude CLI debug directory — the CLI writes error logs here and crashes

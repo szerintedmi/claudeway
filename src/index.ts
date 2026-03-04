@@ -5,6 +5,7 @@ import { App } from '@slack/bolt';
 import { loadConfig } from './config.js';
 import { registerMessageHandler, drainAllPending, FILE_TEMP_BASE } from './slack.js';
 import { ensureQueueDir } from './queue.js';
+import { syncRepos } from './sync-repos.js';
 
 // Clean up temp files older than 24 hours from per-channel download directories
 function cleanupOldTempFiles(): void {
@@ -138,6 +139,7 @@ if (!SLACK_BOT_TOKEN || !SLACK_APP_TOKEN) {
 }
 
 ensureQueueDir();
+syncRepos();
 const config = loadConfig();
 
 const app = new App({

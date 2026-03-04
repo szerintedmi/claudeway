@@ -15,9 +15,11 @@ Claudeway is a Slack-to-Claude Code CLI gateway. Messages arrive via Slack Socke
 - `src/claude.ts` — Claude CLI orchestration (batch and streaming process runners)
 - `src/config.ts` — Config loading/saving, channel resolution with defaults
 - `src/queue.ts` — Persistent file-based message queue
+- `src/sync-repos.ts` — Git clone/pull for configured repos on startup
 
 ## Key Patterns
 
+- Repos are cloned/pulled on every startup (`syncRepos()` in `src/sync-repos.ts`), shared by both `bun start` and Docker
 - Config (`config.yaml`) is hot-reloaded per message — `loadConfig()` is called fresh in both `processQueuedMessage` and `registerMessageHandler`
 - Session IDs are deterministic (derived from channel ID + folder path via UUID v5)
 - One message processed at a time per channel (serialized via `channelBusy` set)
@@ -42,4 +44,5 @@ bun run typecheck # Type check only
 bun run lint     # ESLint
 bun run format   # Prettier
 bun test         # Run tests
+bun run sync-repos # Clone/pull configured repos
 ```

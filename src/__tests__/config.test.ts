@@ -7,6 +7,7 @@ import {
   loadConfig,
   saveConfig,
   resolveFolder,
+  DATA_DIR,
   type Config,
 } from '../config.js';
 
@@ -246,7 +247,7 @@ defaults:
 describe('resolveFolder', () => {
   it('resolves folder name to .repos/<name> under cwd', () => {
     const result = resolveFolder('my-repo');
-    expect(result).toBe(join(process.cwd(), '.repos', 'my-repo'));
+    expect(result).toBe(join(DATA_DIR, 'repos', 'my-repo'));
   });
 });
 
@@ -262,7 +263,7 @@ describe('resolvedChannelConfig with repos', () => {
       defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
     };
     const result = resolvedChannelConfig(config, 'C001');
-    expect(result?.folder).toBe(join(process.cwd(), '.repos', 'my-repo'));
+    expect(result?.folder).toBe(join(DATA_DIR, 'repos', 'my-repo'));
   });
 
   it('falls back to folder field when repo is absent', () => {
@@ -276,7 +277,7 @@ describe('resolvedChannelConfig with repos', () => {
       defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
     };
     const result = resolvedChannelConfig(config, 'C001');
-    expect(result?.folder).toBe(join(process.cwd(), '.repos', 'my-repo'));
+    expect(result?.folder).toBe(join(DATA_DIR, 'repos', 'my-repo'));
   });
 
   it('keeps folder as-is when repos map is absent', () => {
