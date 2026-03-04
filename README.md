@@ -197,7 +197,6 @@ Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutd
 |-------|-------------|---------|
 | `name` | Display name for logs | required |
 | `repo` | Repo name from `repos` map (resolved to `.docker/repos/<name>`) | required |
-| `additionalRepos` | Extra repo names from `repos` map (accessible via `../<name>`) | none |
 | `model` | Claude model (`opus`, `sonnet`) | from defaults |
 | `systemPrompt` | Custom system prompt | from defaults |
 | `timeoutMs` | Idle timeout in ms (resets on activity) | 1800000 (30 min) |
