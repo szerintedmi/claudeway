@@ -51,12 +51,11 @@ channels:
   C0123456789:
     name: my-project
     repo: copilot-spike              # primary repo, used as cwd
-    additionalRepos: [other-repo]    # optional: extra repos, cloned alongside
 ```
 
-**Resolution:** `repo` is a key from the `repos` map, resolved to `.repos/<name>` via `resolveFolder()`. The Claude agent's cwd is `.repos/<primary>/`; additional repos are accessible via `../<name>`.
+**Resolution:** `repo` is a key from the `repos` map, resolved to `.repos/<name>` via `resolveFolder()`. The Claude agent's cwd is `.repos/<primary>/`.
 
-**Validation:** `loadConfig()` validates that each channel's `repo` and `additionalRepos` entries reference keys in the `repos` map.
+**Validation:** `loadConfig()` validates that each channel's `repo` references a key in the `repos` map.
 
 **Directory structure:**
 ```

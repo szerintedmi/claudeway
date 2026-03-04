@@ -18,7 +18,6 @@ export interface ChannelConfig {
   name: string;
   repo?: string;
   folder?: string;
-  additionalRepos?: string[];
   model?: string;
   systemPrompt?: string;
   timeoutMs?: number;
@@ -94,15 +93,6 @@ export function loadConfig(): Config {
         throw new Error(
           `${configPath}: channel ${channelId} repo "${repoName}" is not defined in repos`,
         );
-      }
-      if (ch.additionalRepos) {
-        for (const name of ch.additionalRepos) {
-          if (!(name in config.repos)) {
-            throw new Error(
-              `${configPath}: channel ${channelId} references unknown repo "${name}"`,
-            );
-          }
-        }
       }
     }
   }

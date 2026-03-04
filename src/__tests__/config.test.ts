@@ -181,26 +181,6 @@ defaults:
     expect(() => loadConfig()).toThrow('repo "nonexistent-repo" is not defined in repos');
   });
 
-  it('validates channel additionalRepos references repos map', () => {
-    const yaml = `
-repos:
-  my-repo:
-    url: https://github.com/org/my-repo.git
-channels:
-  C001:
-    name: test
-    repo: my-repo
-    additionalRepos: [unknown-lib]
-defaults:
-  model: opus
-  systemPrompt: test
-  timeoutMs: 300000
-  responseMode: batch
-`;
-    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
-    expect(() => loadConfig()).toThrow('references unknown repo "unknown-lib"');
-  });
-
   it('loads config with valid repos map', () => {
     const yaml = `
 repos:
@@ -213,7 +193,6 @@ channels:
   C001:
     name: test
     repo: my-repo
-    additionalRepos: [other-repo]
 defaults:
   model: opus
   systemPrompt: test
@@ -224,7 +203,6 @@ defaults:
     const config = loadConfig();
     expect(config.repos?.['my-repo']?.url).toBe('https://github.com/org/my-repo.git');
     expect(config.repos?.['my-repo']?.branch).toBe('main');
-    expect(config.channels.C001.additionalRepos).toEqual(['other-repo']);
   });
 
   it('skips repo validation when repos map is absent', () => {

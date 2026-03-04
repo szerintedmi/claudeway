@@ -16,7 +16,6 @@ channels:
   C0123456789:
     name: my-project
     repo: my-project  # repo name from repos map, resolved to .docker/repos/my-project
-    # additionalRepos: [other-repo]  # optional: extra repos accessible via ../other-repo
     # Optional: restrict who can use the bot and run magic commands in this channel.
     # If omitted, all channel members can interact with the bot.
     # allowedUsers: ["U0123456789", "U9876543210"]
