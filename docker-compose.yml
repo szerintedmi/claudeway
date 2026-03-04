@@ -20,12 +20,8 @@ services:
       # Mount your GitHub SSH private key here
       - ~/.ssh/id_ed25519_hostaway:/home/claudeway/.ssh/id_ed25519:ro
 
-      # Repos — cloned/pulled by entrypoint from config.yaml repos map
-      - claudeway-repos:/app/.repos
-
-      # Runtime state (persisted across restarts)
-      - claudeway-queue:/app/.queue
-      - claudeway-files:/app/.files
+      # Persistent state (repos, queue, files) — shared with host
+      - ./.docker:/app/.docker
     security_opt:
       - no-new-privileges:true
     read_only: false  # Claude needs to write to work folders
@@ -33,7 +29,4 @@ services:
       - /tmp:size=100M
 
 volumes:
-  claudeway-repos:
-  claudeway-queue:
-  claudeway-files:
   claudeway-claude-state:

@@ -2,6 +2,9 @@ import { readFileSync, writeFileSync, renameSync } from 'fs';
 import { resolve } from 'path';
 import { stringify as yamlStringify, parse as yamlParse } from 'yaml';
 
+/** Root directory for persistent state (repos, queue, files). */
+export const DATA_DIR = resolve(process.cwd(), '.docker');
+
 export type ResponseMode = 'batch' | 'stream-update' | 'stream-native';
 export type ProcessMode = 'oneshot' | 'persistent';
 export type TriggerMode = 'all' | 'mention';
@@ -53,7 +56,7 @@ export function resolvedTempDir(config: Config): string {
 }
 
 export function resolveFolder(folder: string): string {
-  return resolve(process.cwd(), '.repos', folder);
+  return resolve(DATA_DIR, 'repos', folder);
 }
 
 export function loadConfig(): Config {

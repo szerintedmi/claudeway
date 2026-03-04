@@ -163,7 +163,7 @@ Docker provides filesystem isolation — Claude CLI can only access repos define
    ```
    Add the token to your `.env` as `CLAUDE_CODE_OAUTH_TOKEN`.
 
-2. Define repos in `config.yaml` and map channels to them (see `config.example.yaml`). The Docker entrypoint automatically clones/pulls repos on startup.
+2. Define repos in `config.yaml` and map channels to them (see `config.example.yaml`). Repos are automatically cloned/pulled on every startup (both `bun start` and Docker).
 
 3. Mount your SSH private key for git access — edit `docker-compose.yml` to point to your key:
    ```yaml
@@ -184,7 +184,7 @@ Session state, repos, queue, and files are persisted in named Docker volumes acr
 | Field | Description | Default |
 |-------|-------------|---------|
 | `botOwner` | Slack user ID — receives startup/shutdown DMs, can use magic commands | none (disabled) |
-| `repos` | Repo definitions (`url`, optional `branch`) — cloned into `.repos/` | none |
+| `repos` | Repo definitions (`url`, optional `branch`) — cloned into `.docker/repos/` | none |
 | `channels` | Channel-to-repo mappings | required |
 | `defaults` | Default model, prompt, timeout, and response mode | required |
 | `defaults.tempDir` | Temp directory for per-request file attachments (relative to project root) | `.claudeway-tmp` |
@@ -196,7 +196,7 @@ Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutd
 | Field | Description | Default |
 |-------|-------------|---------|
 | `name` | Display name for logs | required |
-| `repo` | Repo name from `repos` map (resolved to `.repos/<name>`) | required |
+| `repo` | Repo name from `repos` map (resolved to `.docker/repos/<name>`) | required |
 | `additionalRepos` | Extra repo names from `repos` map (accessible via `../<name>`) | none |
 | `model` | Claude model (`opus`, `sonnet`) | from defaults |
 | `systemPrompt` | Custom system prompt | from defaults |

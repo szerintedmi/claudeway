@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, readdirSync, existsSync } from 'fs';
-import { resolve, join } from 'path';
+import { join } from 'path';
 
 export interface QueuedMessage {
   channelId: string;
@@ -12,7 +12,9 @@ export interface QueuedMessage {
   filePaths?: string[];
 }
 
-const QUEUE_DIR = resolve(process.cwd(), '.queue');
+import { DATA_DIR } from './config.js';
+
+const QUEUE_DIR = join(DATA_DIR, 'queue');
 
 export function ensureQueueDir(): void {
   mkdirSync(QUEUE_DIR, { recursive: true });

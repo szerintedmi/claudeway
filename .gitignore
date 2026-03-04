@@ -7,8 +7,6 @@ mcp.json
 *.tsbuildinfo
 *.log
 *.pid
-.queue/
 .claudeway-tmp/
-.files/
 .git-credentials
-.repos/
+.docker/
