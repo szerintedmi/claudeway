@@ -46,3 +46,13 @@ bun run format   # Prettier
 bun test         # Run tests
 bun run sync-repos # Clone/pull configured repos
 ```
+
+## Docker Skills
+
+Claude CLI skills (e.g., qmd, markitdown) live in `~/.claude/` as the global source of truth. To include them in the Docker image:
+
+1. `cp docker-skills.conf.example docker-skills.conf`
+2. Add paths to your global skills (one per line)
+3. `bash scripts/docker-build.sh` (syncs skills into Docker image via `--build-context`)
+
+`docker-skills.conf` is gitignored — each developer maintains their own.

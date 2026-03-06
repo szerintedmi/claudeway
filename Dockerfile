@@ -24,6 +24,7 @@ COPY src/ ./src/
 COPY tsconfig.json ./
 COPY CLAUDE.md ./
 COPY .claude/ ./.claude/
+COPY --from=skills . ./.claude/skills/
 COPY docs/ ./docs/
 COPY config.example.yaml ./
 COPY scripts/claudeway-attach ./scripts/
