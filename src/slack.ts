@@ -1064,8 +1064,7 @@ export function registerMessageHandler(app: App, botUserId: string): void {
     }
 
     // Trigger mode check — in 'mention' mode, ignore messages without @bot
-    // File-only messages (no text) bypass the mention requirement
-    if (!shouldRespond(msg.text, botUserId, triggerMode) && !hasFiles) return;
+    if (!shouldRespond(msg.text, botUserId, triggerMode)) return;
 
     // Reject unauthorized users
     const userId = msg.user ?? 'unknown';
