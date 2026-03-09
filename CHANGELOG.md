@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.19.0] - 2026-03-09
+
+### Added
+- **Docker skills injection**: `docker-skills.conf` lists global `~/.claude/` skill paths to sync into the Docker image via `--build-context`, keeping skills out of the repo
+
+### Fixed
+- **Mention trigger bypass**: `triggerMode: mention` was bypassed when files were attached without a text mention
+
+## [0.18.0] - 2026-03-04
+
+### Changed
+- **Consolidated Docker state**: Persistent state (sessions, queue, repos) moved under `.docker/` directory
+- **Repos sync on startup**: Configured repos are cloned/pulled every startup for both local and Docker
+
+### Removed
+- **`additionalRepos` channel config**: Unused option removed
+
+## [0.17.0] - 2026-03-02
+
+### Added
+- **Docker containerization**: Full Docker support with `Dockerfile`, repo management, and persistent volume mounts
+- **File attachments in Claude responses**: Claude can generate and upload files back to Slack threads
+- **Upload failure warnings**: Slack thread warnings when file uploads fail
+
+### Changed
+- **Pinned Node.js 24** locally and in Docker
+- **Session path encoding fix**: Corrected session artifact path display at startup
+
+## [0.16.0] - 2026-03-01
+
+### Added
+- **Mention-only trigger mode**: `triggerMode: mention` — bot only responds when `@mentioned`, with full thread context injection so it understands the conversation
+- **All file type attachments**: Generalized from images-only to support any file type (PDF, text, etc.)
+- **Markitdown skill**: Built-in skill for converting documents to Markdown before sending to Claude
+- **User-facing error warnings**: Silent failures now post warnings in Slack threads (e.g. failed thread history, file downloads)
+- **Magic command authorization**: `botOwner` required for global commands, `allowedUsers` for channel-scoped ones
+
+### Changed
+- **Improved system prompt**: Added Slack mrkdwn formatting guide so Claude produces properly formatted responses
+- **Completion reaction**: Changed from `:white_check_mark:` to `:ballot_box_with_check:`
+- **Thread isolation fix**: Separate Claude sessions per thread within the same channel
+- **Magic commands refactored** into a registry-based system
+
+## [0.15.0] - 2026-02-28
+
+### Added
+- **Tool status streaming**: Shows which tools Claude is using in real-time during Slack message updates
+
+### Changed
+- **Migrated to Bun**: Replaced npm/tsx/jest with Bun runtime, bundler, and test runner
+
+### Fixed
+- **Stream-native mode**: Fixed duplicate chunks and failures in non-DM channels
+
+## [0.14.0] - 2026-02-26
+
+### Added
+- **Per-channel `allowedUsers`**: Restrict which Slack users can interact with the bot per channel
+- **YAML config**: Added `config.yaml` support, later standardized as the only config format (JSON dropped)
+- **`!config` command**: View current channel configuration directly from Slack
+- **DM support**: Bot responds to direct messages from `botOwner`
+
 ## [0.12.0] - 2026-02-23
 
 ### Added

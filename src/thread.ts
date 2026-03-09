@@ -27,7 +27,11 @@ export async function resolveUserName(client: WebClient, userId: string): Promis
       userId;
     userNameCache.set(userId, name);
     return name;
-  } catch {
+  } catch (err) {
+    console.warn(
+      `[thread] Failed to resolve user name for ${userId}:`,
+      err instanceof Error ? err.message : err,
+    );
     userNameCache.set(userId, userId);
     return userId;
   }
@@ -39,6 +43,7 @@ export async function fetchThreadContext(
   threadTs: string,
   triggerTs: string,
   botUserId: string,
+  canResolveUsers = true,
 ): Promise<ThreadMessage[]> {
   try {
     const allMessages: Array<{
@@ -68,7 +73,11 @@ export async function fetchThreadContext(
     const resolved: ThreadMessage[] = [];
     for (const m of prior) {
       const isBot = !!m.bot_id || m.user === botUserId;
-      const authorName = isBot ? 'Claude' : await resolveUserName(client, m.user ?? 'unknown');
+      const authorName = isBot
+        ? canResolveUsers
+          ? await resolveUserName(client, botUserId)
+          : 'Claude'
+        : await resolveUserName(client, m.user ?? 'unknown');
       const text = (m.text ?? '').trim();
       if (!text) continue;
       resolved.push({ authorName, isBot, text });

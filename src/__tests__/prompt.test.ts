@@ -1,33 +1,15 @@
-import { stripBotMention, shouldRespond, formatThreadContext, buildPrompt } from '../prompt.js';
+import {
+  shouldRespond,
+  formatThreadContext,
+  buildPrompt,
+  extractMentionedUserIds,
+  formatUserDirectory,
+  resolveUserDirectory,
+} from '../prompt.js';
 import type { ThreadMessage } from '../thread.js';
+import type { WebClient } from '@slack/web-api';
 
 const BOT_ID = 'U_BOT';
-
-describe('stripBotMention', () => {
-  it('removes a leading mention', () => {
-    expect(stripBotMention(`<@${BOT_ID}> hello`, BOT_ID)).toBe('hello');
-  });
-
-  it('removes mid-text mentions', () => {
-    expect(stripBotMention(`hey <@${BOT_ID}> help`, BOT_ID)).toBe('hey help');
-  });
-
-  it('leaves text unchanged when no mention present', () => {
-    expect(stripBotMention('just a message', BOT_ID)).toBe('just a message');
-  });
-
-  it('handles multiple mentions', () => {
-    expect(stripBotMention(`<@${BOT_ID}> foo <@${BOT_ID}>`, BOT_ID)).toBe('foo');
-  });
-
-  it('returns empty string for mention-only message', () => {
-    expect(stripBotMention(`<@${BOT_ID}>`, BOT_ID)).toBe('');
-  });
-
-  it('does not strip mentions of other users', () => {
-    expect(stripBotMention('<@U_OTHER> hello', BOT_ID)).toBe('<@U_OTHER> hello');
-  });
-});
 
 describe('shouldRespond', () => {
   it('returns true in "all" mode regardless of mention', () => {
@@ -81,22 +63,129 @@ describe('formatThreadContext', () => {
   });
 });
 
+describe('extractMentionedUserIds', () => {
+  it('extracts a single mention', () => {
+    expect(extractMentionedUserIds('hey <@U123>')).toEqual(['U123']);
+  });
+
+  it('extracts multiple unique mentions across texts', () => {
+    const ids = extractMentionedUserIds('<@U123> hello', '<@U456> world');
+    expect(ids).toContain('U123');
+    expect(ids).toContain('U456');
+    expect(ids).toHaveLength(2);
+  });
+
+  it('deduplicates mentions', () => {
+    expect(extractMentionedUserIds('<@U123> and <@U123>')).toEqual(['U123']);
+  });
+
+  it('returns empty array when no mentions', () => {
+    expect(extractMentionedUserIds('no mentions')).toEqual([]);
+  });
+});
+
+describe('formatUserDirectory', () => {
+  it('returns empty string for no entries', () => {
+    expect(formatUserDirectory([])).toBe('');
+  });
+
+  it('formats entries as a lookup table', () => {
+    const result = formatUserDirectory([
+      { id: 'U123', name: 'Alice' },
+      { id: 'U456', name: 'Bob' },
+    ]);
+    expect(result).toContain('[Slack user reference]');
+    expect(result).toContain('<@U123> = Alice');
+    expect(result).toContain('<@U456> = Bob');
+  });
+
+  it('annotates the bot entry with (you)', () => {
+    const result = formatUserDirectory(
+      [
+        { id: 'U123', name: 'Alice' },
+        { id: 'UBOT', name: 'CopilotBrain' },
+      ],
+      'UBOT',
+    );
+    expect(result).toContain('<@UBOT> = CopilotBrain (you)');
+    expect(result).toContain('<@U123> = Alice');
+    expect(result).not.toContain('Alice (you)');
+  });
+});
+
+describe('resolveUserDirectory', () => {
+  function mockClient(nameMap: Record<string, string>): WebClient {
+    return {
+      users: {
+        info: async ({ user }: { user: string }) => ({
+          user: { profile: { display_name_normalized: nameMap[user] ?? user } },
+        }),
+      },
+    } as unknown as WebClient;
+  }
+
+  it('resolves mentions to directory entries', async () => {
+    const client = mockClient({ U123: 'Alice', U456: 'Bob' });
+    const entries = await resolveUserDirectory(client, [], '<@U123> and <@U456>');
+    expect(entries).toEqual([
+      { id: 'U123', name: 'Alice' },
+      { id: 'U456', name: 'Bob' },
+    ]);
+  });
+
+  it('always includes alwaysInclude IDs', async () => {
+    const client = mockClient({ UBOT: 'CopilotBrain', USENDER: 'Alice' });
+    const entries = await resolveUserDirectory(client, ['UBOT', 'USENDER'], 'no mentions');
+    expect(entries).toEqual([
+      { id: 'UBOT', name: 'CopilotBrain' },
+      { id: 'USENDER', name: 'Alice' },
+    ]);
+  });
+
+  it('deduplicates alwaysInclude with mentioned IDs', async () => {
+    let callCount = 0;
+    const client = {
+      users: {
+        info: async () => {
+          callCount++;
+          return { user: { profile: { display_name_normalized: 'Alice' } } };
+        },
+      },
+    } as unknown as WebClient;
+    const entries = await resolveUserDirectory(client, ['U123'], '<@U123> hi');
+    expect(entries).toHaveLength(1);
+    expect(callCount).toBeLessThanOrEqual(1);
+  });
+
+  it('returns empty array when no IDs at all', async () => {
+    const client = mockClient({});
+    expect(await resolveUserDirectory(client, [], 'no mentions')).toEqual([]);
+  });
+});
+
 describe('buildPrompt', () => {
-  it('returns stripped text when no thread context', () => {
-    expect(buildPrompt(`<@${BOT_ID}> hello`, BOT_ID, [])).toBe('hello');
+  it('returns text as-is when no thread context or directory', () => {
+    expect(buildPrompt('hello', [])).toBe('hello');
   });
 
   it('prepends thread context before the user message', () => {
     const msgs: ThreadMessage[] = [{ authorName: 'Alice', isBot: false, text: 'prior' }];
-    const result = buildPrompt('follow up', BOT_ID, msgs);
+    const result = buildPrompt('follow up', msgs);
     expect(result.indexOf('Thread context')).toBeLessThan(result.indexOf('follow up'));
   });
 
-  it('strips mention and prepends context together', () => {
+  it('includes user directory before thread context', () => {
     const msgs: ThreadMessage[] = [{ authorName: 'Alice', isBot: false, text: 'first' }];
-    const result = buildPrompt(`<@${BOT_ID}> second`, BOT_ID, msgs);
-    expect(result).toContain('[Alice]: first');
-    expect(result).toContain('second');
-    expect(result).not.toContain(`<@${BOT_ID}>`);
+    const dir = [{ id: 'U123', name: 'Alice' }];
+    const result = buildPrompt('<@U123> second', msgs, dir);
+    expect(result).toContain('[Slack user reference]');
+    expect(result).toContain('<@U123> = Alice');
+    expect(result.indexOf('Slack user reference')).toBeLessThan(result.indexOf('Thread context'));
+    expect(result).toContain('<@U123> second');
+  });
+
+  it('keeps raw mentions in text unchanged', () => {
+    const result = buildPrompt('<@U123> help me', []);
+    expect(result).toContain('<@U123>');
   });
 });

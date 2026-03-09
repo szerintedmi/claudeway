@@ -162,7 +162,19 @@ if (!botUserId) {
   process.exit(1);
 }
 
-registerMessageHandler(app, botUserId);
+// Check if we have users:read scope (needed for mention resolution)
+let canResolveUsers = false;
+try {
+  await app.client.users.info({ user: botUserId });
+  canResolveUsers = true;
+} catch (err) {
+  console.warn(
+    '[startup] Cannot call users.info — missing users:read scope? Mentions will pass through as raw <@U...> IDs.',
+    err instanceof Error ? err.message : err,
+  );
+}
+
+registerMessageHandler(app, botUserId, canResolveUsers);
 
 const channelCount = Object.keys(config.channels).length;
 console.log('Claudeway started');

@@ -25,7 +25,7 @@ import {
 } from './queue.js';
 import { handleMagicCommand } from './commands.js';
 import { isUserAllowed, safeReact, warnInThread } from './slack-utils.js';
-import { shouldRespond, stripBotMention, buildPrompt } from './prompt.js';
+import { shouldRespond, buildPrompt, resolveUserDirectory } from './prompt.js';
 import { fetchThreadContext } from './thread.js';
 import { resolvedTempDir } from './config.js';
 import { createRequestTempDir, uploadAttachedFiles, cleanupRequestTempDir } from './tempdir.js';
@@ -396,6 +396,8 @@ class NativeStreamingResponder {
         })
         .catch((err) => {
           console.error('[native-stream] Failed to append initial text:', err);
+          if (err?.data)
+            console.error('[native-stream] Response data:', JSON.stringify(err.data, null, 2));
         });
     } else if (this.streamer) {
       this.appendChain = this.appendChain
@@ -404,6 +406,8 @@ class NativeStreamingResponder {
         })
         .catch((err) => {
           console.error('[native-stream] Failed to append text:', err);
+          if (err?.data)
+            console.error('[native-stream] Response data:', JSON.stringify(err.data, null, 2));
         });
     }
   }
@@ -427,6 +431,11 @@ class NativeStreamingResponder {
         await this.streamer.stop();
       } catch (err) {
         console.error('[native-stream] Failed to stop stream:', err);
+        if ((err as Record<string, unknown>)?.data)
+          console.error(
+            '[native-stream] Response data:',
+            JSON.stringify((err as Record<string, unknown>).data, null, 2),
+          );
       }
     }
   }
@@ -963,7 +972,7 @@ async function drainChannel(channelId: string, client: WebClient): Promise<void>
   }
 }
 
-export function registerMessageHandler(app: App, botUserId: string): void {
+export function registerMessageHandler(app: App, botUserId: string, canResolveUsers = true): void {
   app.message(async ({ message, client, context }) => {
     const msg = message as SlackMessage;
 
@@ -993,11 +1002,7 @@ export function registerMessageHandler(app: App, botUserId: string): void {
     if (msg.subtype === 'message_changed' && msg.message?.ts && msg.message?.text) {
       const origTs = msg.message.ts;
       if (!processingMessages.has(processingKey(msg.channel, origTs))) {
-        const updated = updateQueuedText(
-          msg.channel,
-          origTs,
-          stripBotMention(msg.message.text, botUserId),
-        );
+        const updated = updateQueuedText(msg.channel, origTs, msg.message.text);
         if (updated) {
           console.log(`[${msg.channel}] Queued message edited — updated in queue: ${origTs}`);
         }
@@ -1102,12 +1107,25 @@ export function registerMessageHandler(app: App, botUserId: string): void {
     const threadTs = msg.thread_ts ?? msg.ts;
     const isThreadReply = !!(msg.thread_ts && msg.thread_ts !== msg.ts);
     const threadMessages = isThreadReply
-      ? await fetchThreadContext(client, msg.channel, msg.thread_ts!, msg.ts, botUserId)
+      ? await fetchThreadContext(
+          client,
+          msg.channel,
+          msg.thread_ts!,
+          msg.ts,
+          botUserId,
+          canResolveUsers,
+        )
       : [];
 
-    // Build final prompt: strip bot mentions and prepend thread context
     const rawText = msg.text || (filePaths.length > 0 ? 'Please review the attached file(s).' : '');
-    const text = buildPrompt(rawText, botUserId, threadMessages);
+
+    // Build a user directory so the bot knows who <@UXXXXXX> mentions refer to
+    // Always include the bot and the message sender, plus any mentioned users
+    const allTexts = [...threadMessages.map((m) => m.text), rawText];
+    const userDirectory = canResolveUsers
+      ? await resolveUserDirectory(client, [botUserId, userId], ...allTexts)
+      : [];
+    const text = buildPrompt(rawText, threadMessages, userDirectory, botUserId);
     const teamId = context.teamId;
 
     // Persist to queue
