@@ -104,11 +104,20 @@ describe('fetchThreadContext', () => {
     expect(result[0].text).toBe('first');
   });
 
-  it('labels bot messages as Claude', async () => {
+  it('resolves bot display name when canResolveUsers is true', async () => {
     const client = makeRepliesClient([
       { ts: '100', bot_id: 'B1', user: 'UBOT', text: 'bot reply' },
     ]);
-    const result = await fetchThreadContext(client, 'C1', '99', '200', 'UBOT');
+    const result = await fetchThreadContext(client, 'C1', '99', '200', 'UBOT', true);
+    expect(result[0].isBot).toBe(true);
+    expect(result[0].authorName).toBe('UBOT-display');
+  });
+
+  it('falls back to Claude when canResolveUsers is false', async () => {
+    const client = makeRepliesClient([
+      { ts: '100', bot_id: 'B1', user: 'UBOT', text: 'bot reply' },
+    ]);
+    const result = await fetchThreadContext(client, 'C1', '99', '200', 'UBOT', false);
     expect(result[0].isBot).toBe(true);
     expect(result[0].authorName).toBe('Claude');
   });
