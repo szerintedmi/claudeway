@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.20.0] - 2026-03-09
+
+### Added
+- **Slack mention resolution**: `<@U...>` mentions are kept intact in prompts with a name lookup header so Claude understands who's who and can mention people back. Gracefully degrades when `users:read` scope is unavailable.
+
 ## [0.19.0] - 2026-03-09
 
 ### Added
