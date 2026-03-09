@@ -10,3 +10,6 @@ mcp.json
 .claudeway-tmp/
 .git-credentials
 .docker/
+
+# Docker skill sync (scripts/docker-build.sh)
+docker-skills.conf

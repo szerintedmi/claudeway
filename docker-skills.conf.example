@@ -1,0 +1,7 @@
+# Skills to copy into Docker image (one path per line)
+# Lines starting with # are comments, blank lines ignored
+# Paths can use ~/ for home directory
+#
+# Example:
+# ~/.claude/skills/markitdown
+# ~/.claude/plugins/local-marketplace/qmd/skills/qmd

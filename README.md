@@ -170,9 +170,17 @@ Docker provides filesystem isolation — Claude CLI can only access repos define
    - ~/.ssh/id_ed25519:/home/claudeway/.ssh/id_ed25519:ro
    ```
 
-4. Start the container:
+4. (Optional) Include Claude CLI skills (e.g., markitdown, qmd) in the image:
    ```bash
-   docker compose build && docker compose up -d
+   cp docker-skills.conf.example docker-skills.conf
+   # Add paths to your global skills (one per line), then:
+   bash scripts/docker-build.sh
+   ```
+   `docker-skills.conf` is gitignored — each developer maintains their own. If you don't need skills, use `docker compose build` directly.
+
+5. Start the container:
+   ```bash
+   docker compose up -d
    ```
 
 Session state, repos, queue, and files are persisted in named Docker volumes across restarts. Slack tokens are stripped from the environment before spawning the Claude CLI.
