@@ -4,6 +4,7 @@ dist/
 .env
 config.yaml
 mcp.json
+mcp-readonly.json
 *.tsbuildinfo
 *.log
 *.pid

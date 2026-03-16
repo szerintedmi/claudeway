@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.21.0] - 2026-03-16
+
+### Added
+- **User roles & read-only default**: Per-user, per-channel permission system. Every user is read-only by default; permissions (`git`, `jiraWrite`) are additive via `allowedUsers` config
+- **Multi-layer enforcement**: System prompt injection (soft), git credential stripping (hard), MCP read-only config generation (hard), git author identity from Slack profile
+- **Per-channel scratch directory**: Persistent shared workspace at `.claudeway-tmp/scratch/<channelId>/` for read-only users to collaborate across messages
+- **Persistent process permission tracking**: Process killed and respawned with `--resume` when incoming user's permission set differs from running process
+
+### Changed
+- `allowedUsers` config format extended from plain string array to mixed entries supporting permission mappings
+- `botOwner` always has full access and can message any configured channel even without being listed in `allowedUsers`
+
 ## [0.20.0] - 2026-03-09
 
 ### Added

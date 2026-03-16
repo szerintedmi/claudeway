@@ -14,6 +14,81 @@ export interface RepoConfig {
   branch?: string;
 }
 
+export type AllowedUserEntry = string | Record<string, string[]>;
+
+export interface UserPermissions {
+  git: boolean;
+  jiraWrite: boolean;
+}
+
+export const FULL_PERMISSIONS: UserPermissions = { git: true, jiraWrite: true };
+export const READ_ONLY_PERMISSIONS: UserPermissions = { git: false, jiraWrite: false };
+
+const VALID_PERMISSIONS = new Set(['git', 'jiraWrite']);
+
+/**
+ * Parse mixed allowedUsers entries into a map of userId → permissions.
+ * Plain string entries get read-only permissions. Object entries get the listed permissions.
+ */
+export function parseAllowedUsers(entries: AllowedUserEntry[]): Map<string, UserPermissions> {
+  const map = new Map<string, UserPermissions>();
+  for (const entry of entries) {
+    if (typeof entry === 'string') {
+      map.set(entry, { ...READ_ONLY_PERMISSIONS });
+    } else {
+      for (const [userId, perms] of Object.entries(entry)) {
+        map.set(userId, {
+          git: perms.includes('git'),
+          jiraWrite: perms.includes('jiraWrite'),
+        });
+      }
+    }
+  }
+  return map;
+}
+
+/**
+ * Extract just the user IDs from mixed allowedUsers entries.
+ */
+export function extractAllowedUserIds(entries: AllowedUserEntry[]): string[] {
+  return entries.flatMap((entry) => (typeof entry === 'string' ? [entry] : Object.keys(entry)));
+}
+
+/**
+ * Resolve a user's permissions for a given channel.
+ * botOwner always gets full permissions. Users not in allowedUsers get read-only.
+ */
+export function resolveUserPermissions(
+  config: Config,
+  channelId: string,
+  userId: string,
+): UserPermissions {
+  const ch = config.channels[channelId];
+  if (!ch?.allowedUsers || ch.allowedUsers.length === 0) {
+    // No allowedUsers list — botOwner gets full, others read-only
+    return userId === config.botOwner ? { ...FULL_PERMISSIONS } : { ...READ_ONLY_PERMISSIONS };
+  }
+
+  const parsed = parseAllowedUsers(ch.allowedUsers);
+  const explicit = parsed.get(userId);
+  if (explicit !== undefined) return explicit;
+
+  // Not listed — botOwner gets full access, others read-only
+  return userId === config.botOwner ? { ...FULL_PERMISSIONS } : { ...READ_ONLY_PERMISSIONS };
+}
+
+/**
+ * Compute a stable string key from permissions for comparison.
+ * Undefined permissions are treated as full access.
+ */
+export function permissionKey(p: UserPermissions | undefined): string {
+  if (!p) return 'git,jiraWrite';
+  const parts: string[] = [];
+  if (p.git) parts.push('git');
+  if (p.jiraWrite) parts.push('jiraWrite');
+  return parts.join(',');
+}
+
 export interface ChannelConfig {
   name: string;
   repo?: string;
@@ -23,7 +98,7 @@ export interface ChannelConfig {
   timeoutMs?: number;
   responseMode?: ResponseMode;
   processMode?: ProcessMode;
-  allowedUsers?: string[];
+  allowedUsers?: AllowedUserEntry[];
   triggerMode?: TriggerMode;
 }
 
@@ -80,6 +155,25 @@ export function loadConfig(): Config {
   }
   if (!config.defaults.processMode) {
     config.defaults.processMode = 'oneshot';
+  }
+
+  // Validate permission strings in allowedUsers
+  for (const [chId, ch] of Object.entries(config.channels)) {
+    if (ch.allowedUsers) {
+      for (const entry of ch.allowedUsers) {
+        if (typeof entry === 'object') {
+          for (const [, perms] of Object.entries(entry)) {
+            for (const perm of perms) {
+              if (!VALID_PERMISSIONS.has(perm)) {
+                throw new Error(
+                  `${configPath}: channel ${chId} has unknown permission "${perm}". Valid: ${[...VALID_PERMISSIONS].join(', ')}`,
+                );
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
   // Validate repo references

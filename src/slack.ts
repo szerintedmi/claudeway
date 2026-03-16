@@ -7,6 +7,7 @@ import {
   loadConfig,
   resolvedChannelConfig,
   resolvedDmConfig,
+  resolveUserPermissions,
   DATA_DIR,
   type ResponseMode,
 } from './config.js';
@@ -25,10 +26,20 @@ import {
 } from './queue.js';
 import { handleMagicCommand } from './commands.js';
 import { isUserAllowed, safeReact, warnInThread } from './slack-utils.js';
-import { shouldRespond, buildPrompt, resolveUserDirectory } from './prompt.js';
+import {
+  shouldRespond,
+  buildPrompt,
+  resolveUserDirectory,
+  appendAccessRestrictions,
+} from './prompt.js';
 import { fetchThreadContext } from './thread.js';
 import { resolvedTempDir } from './config.js';
-import { createRequestTempDir, uploadAttachedFiles, cleanupRequestTempDir } from './tempdir.js';
+import {
+  createRequestTempDir,
+  uploadAttachedFiles,
+  cleanupRequestTempDir,
+  ensureScratchDir,
+} from './tempdir.js';
 
 interface SlackFile {
   id: string;
@@ -49,6 +60,15 @@ interface SlackMessage {
   files?: SlackFile[];
   deleted_ts?: string;
   message?: { ts?: string; text?: string };
+}
+
+import type { UserPermissions } from './config.js';
+
+interface PermissionContext {
+  userPermissions: UserPermissions;
+  userName?: string;
+  channelName: string;
+  scratchDir: string;
 }
 
 const FILE_SIZE_LIMIT = 25 * 1024 * 1024; // 25MB
@@ -525,6 +545,7 @@ async function processBatch(
   client: WebClient,
   channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
   tempDir: string,
+  permCtx: PermissionContext,
 ): Promise<void> {
   try {
     const result = await runClaude({
@@ -537,6 +558,7 @@ async function processBatch(
       threadTs: queued.threadTs,
       filePaths: queued.filePaths,
       tempDir,
+      ...permCtx,
     });
 
     await safeReact(client, queued.channelId, queued.ts, 'ballot_box_with_check');
@@ -557,6 +579,7 @@ async function processStreamUpdate(
   client: WebClient,
   channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
   tempDir: string,
+  permCtx: PermissionContext,
 ): Promise<void> {
   try {
     const responder = new StreamingResponder(client, queued.channelId, queued.threadTs);
@@ -573,6 +596,7 @@ async function processStreamUpdate(
       tempDir,
       onTextDelta: (text) => responder.onTextDelta(text),
       onToolEvent: (event) => responder.onToolEvent(event),
+      ...permCtx,
     });
 
     await responder.finish();
@@ -639,6 +663,7 @@ async function processStreamNative(
   client: WebClient,
   channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
   tempDir: string,
+  permCtx: PermissionContext,
 ): Promise<void> {
   try {
     // Post a draft thinking message for immediate visual feedback while Claude processes
@@ -672,6 +697,7 @@ async function processStreamNative(
       tempDir,
       onTextDelta: (text) => responder.onTextDelta(text),
       onToolEvent: (event) => responder.onToolEvent(event),
+      ...permCtx,
     });
 
     await responder.finish();
@@ -705,6 +731,7 @@ async function processPersistent(
   channelConfig: ReturnType<typeof resolvedChannelConfig> & object,
   tempDir: string,
   tempBaseDir: string,
+  permCtx: PermissionContext,
 ): Promise<void> {
   const mode = channelConfig.responseMode;
 
@@ -723,6 +750,7 @@ async function processPersistent(
         tempDir,
         tempBaseDir,
         onTextDelta: () => {},
+        ...permCtx,
       });
 
       await safeReact(client, queued.channelId, queued.ts, 'ballot_box_with_check');
@@ -752,6 +780,7 @@ async function processPersistent(
         tempBaseDir,
         onTextDelta: (text) => responder.onTextDelta(text),
         onToolEvent: (event) => responder.onToolEvent(event),
+        ...permCtx,
       });
 
       await responder.finish();
@@ -835,6 +864,7 @@ async function processPersistent(
         tempBaseDir,
         onTextDelta: (text) => responder.onTextDelta(text),
         onToolEvent: (event) => responder.onToolEvent(event),
+        ...permCtx,
       });
 
       await responder.finish();
@@ -868,6 +898,7 @@ const MODE_PROCESSORS: Record<
     client: WebClient,
     config: ReturnType<typeof resolvedChannelConfig> & object,
     tempDir: string,
+    permCtx: PermissionContext,
   ) => Promise<void>
 > = {
   batch: processBatch,
@@ -902,33 +933,55 @@ async function processQueuedMessage(queued: QueuedMessage, client: WebClient): P
     return;
   }
 
+  // Resolve user permissions and prepare effective config
+  const permissions = resolveUserPermissions(config, queued.channelId, queued.userId);
+  const baseDir = resolvedTempDir(config);
+  const scratchDir = ensureScratchDir(baseDir, queued.channelId);
+  const effectiveSystemPrompt = appendAccessRestrictions(
+    channelConfig.systemPrompt,
+    permissions,
+    scratchDir,
+  );
+  const effectiveConfig = { ...channelConfig, systemPrompt: effectiveSystemPrompt };
+
   processingMessages.add(processingKey(queued.channelId, queued.ts));
   await safeReact(client, queued.channelId, queued.ts, 'hourglass_flowing_sand');
   await safeReact(client, queued.channelId, queued.ts, 'inbox_tray', 'remove');
 
-  const mode = channelConfig.responseMode;
+  const mode = effectiveConfig.responseMode;
 
   // Wait for a process slot if at global concurrency limit
   if (activeProcesses >= MAX_CONCURRENT_PROCESSES) {
     console.log(
-      `[${channelConfig.name}] Waiting for process slot (${activeProcesses}/${MAX_CONCURRENT_PROCESSES} active)`,
+      `[${effectiveConfig.name}] Waiting for process slot (${activeProcesses}/${MAX_CONCURRENT_PROCESSES} active)`,
     );
   }
   await acquireProcessSlot();
 
-  const processMode = channelConfig.processMode;
+  const processMode = effectiveConfig.processMode;
+  // Strip user directory and thread context headers to show just the user's message
+  const logText = queued.text
+    .replace(/^\[Slack user reference\][\s\S]*?\n\n/, '')
+    .replace(/^\[Thread context[\s\S]*?\[Current message\]\n/, '');
   console.log(
-    `[${channelConfig.name}] Processing (${processMode}/${mode}): ${queued.text.substring(0, 80)}...`,
+    `[${effectiveConfig.name}] Processing (${processMode}/${mode}): ${logText.substring(0, 80)}...`,
   );
 
-  const baseDir = resolvedTempDir(config);
   const tempDir = createRequestTempDir(baseDir, queued.channelId);
+
+  // Permission context passed through to Claude spawn
+  const permCtx = {
+    userPermissions: permissions,
+    userName: queued.userName,
+    channelName: channelConfig.name,
+    scratchDir,
+  };
 
   try {
     if (processMode === 'persistent') {
-      await processPersistent(queued, client, channelConfig, tempDir, baseDir);
+      await processPersistent(queued, client, effectiveConfig, tempDir, baseDir, permCtx);
     } else {
-      await MODE_PROCESSORS[mode](queued, client, channelConfig, tempDir);
+      await MODE_PROCESSORS[mode](queued, client, effectiveConfig, tempDir, permCtx);
     }
   } catch (err) {
     await safeReact(client, queued.channelId, queued.ts, 'x');
@@ -1032,10 +1085,12 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
     if (!hasText && !hasFiles) return;
 
     // Quick config check + user authorization
-    let channelAllowedUsers: string[] | undefined;
+    let channelAllowedUsers: import('./config.js').AllowedUserEntry[] | undefined;
     let triggerMode: import('./config.js').TriggerMode = 'all';
+    let botOwner: string | undefined;
     try {
       const config = loadConfig();
+      botOwner = config.botOwner;
       const resolved = resolvedChannelConfig(config, msg.channel);
       if (!resolved) {
         if (msg.channel.startsWith('D')) {
@@ -1071,9 +1126,9 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
     // Trigger mode check — in 'mention' mode, ignore messages without @bot
     if (!shouldRespond(msg.text, botUserId, triggerMode)) return;
 
-    // Reject unauthorized users
+    // Reject unauthorized users (botOwner always allowed)
     const userId = msg.user ?? 'unknown';
-    if (!isUserAllowed(channelAllowedUsers, userId)) {
+    if (userId !== botOwner && !isUserAllowed(channelAllowedUsers, userId)) {
       await safeReact(client, msg.channel, msg.ts, 'no_entry');
       await client.chat.postMessage({
         channel: msg.channel,
@@ -1127,6 +1182,7 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
       : [];
     const text = buildPrompt(rawText, threadMessages, userDirectory, botUserId);
     const teamId = context.teamId;
+    const senderEntry = userDirectory.find((e) => e.id === userId);
 
     // Persist to queue
     enqueue({
@@ -1138,6 +1194,7 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
       threadTs,
       queuedAt: new Date().toISOString(),
       ...(filePaths.length > 0 ? { filePaths } : {}),
+      ...(senderEntry ? { userName: senderEntry.name } : {}),
     });
 
     // Acknowledge receipt immediately

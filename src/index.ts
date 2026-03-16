@@ -6,6 +6,7 @@ import { loadConfig } from './config.js';
 import { registerMessageHandler, drainAllPending, FILE_TEMP_BASE } from './slack.js';
 import { ensureQueueDir } from './queue.js';
 import { syncRepos } from './sync-repos.js';
+import { generateReadOnlyMcpConfig } from './mcp.js';
 
 // Clean up temp files older than 24 hours from per-channel download directories
 function cleanupOldTempFiles(): void {
@@ -140,6 +141,21 @@ if (!SLACK_BOT_TOKEN || !SLACK_APP_TOKEN) {
 
 ensureQueueDir();
 syncRepos();
+
+// Generate read-only MCP config if mcp.json exists
+const mcpPath = resolve(process.cwd(), 'mcp.json');
+if (existsSync(mcpPath) && statSync(mcpPath).isFile()) {
+  try {
+    generateReadOnlyMcpConfig(mcpPath);
+    console.log('[startup] Generated mcp-readonly.json');
+  } catch (err) {
+    console.warn(
+      '[startup] Failed to generate mcp-readonly.json:',
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
 const config = loadConfig();
 
 const app = new App({

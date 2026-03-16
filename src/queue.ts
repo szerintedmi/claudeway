@@ -10,6 +10,7 @@ export interface QueuedMessage {
   threadTs: string;
   queuedAt: string;
   filePaths?: string[];
+  userName?: string;
 }
 
 import { DATA_DIR } from './config.js';

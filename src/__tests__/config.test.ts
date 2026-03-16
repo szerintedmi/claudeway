@@ -220,6 +220,43 @@ defaults:
     writeFileSync(join(tmpDir, 'config.yaml'), yaml);
     expect(() => loadConfig()).not.toThrow();
   });
+
+  it('rejects unknown permissions in allowedUsers', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+    allowedUsers:
+      - "U001": [git, jireWrite]
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    expect(() => loadConfig()).toThrow('unknown permission "jireWrite"');
+  });
+
+  it('accepts valid permissions in allowedUsers', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+    allowedUsers:
+      - "U001": [git, jiraWrite]
+      - "U002"
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    expect(() => loadConfig()).not.toThrow();
+  });
 });
 
 describe('resolveFolder', () => {
