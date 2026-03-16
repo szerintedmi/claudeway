@@ -1,6 +1,6 @@
 import type { WebClient } from '@slack/web-api';
 
-import type { TriggerMode } from './config.js';
+import type { TriggerMode, UserPermissions } from './config.js';
 import type { ThreadMessage } from './thread.js';
 import { resolveUserName } from './thread.js';
 
@@ -79,4 +79,53 @@ export function buildPrompt(
   const directory = formatUserDirectory(userDirectory, botUserId);
   const context = formatThreadContext(threadMessages);
   return directory + context + text;
+}
+
+/**
+ * Build access restriction text to append to the system prompt.
+ * Returns '' if the user has full access (both git and jiraWrite).
+ */
+export function buildAccessRestrictions(permissions: UserPermissions, scratchDir: string): string {
+  if (permissions.git && permissions.jiraWrite) return '';
+
+  const lines: string[] = ['## Access restrictions for this user', ''];
+  lines.push('You are operating in READ-ONLY mode for this user.');
+
+  if (!permissions.git) {
+    lines.push('- Do NOT modify, create, or delete any files in the repository');
+    lines.push(
+      '- Do NOT run git commit, git push, git checkout, git stash, or any git commands that modify state',
+    );
+  }
+
+  if (!permissions.jiraWrite) {
+    lines.push('- Do NOT create, update, or delete Jira tickets or Confluence pages');
+  }
+
+  lines.push(
+    '- You MAY read files, search code, run git log/diff/show, and search Jira/Confluence',
+  );
+  lines.push(
+    `- You MAY write files to ${scratchDir} — this is a shared workspace that persists across messages in this channel`,
+  );
+  lines.push(
+    '- You MAY write temporary files to $CLAUDEWAY_TEMP_DIR for one-off outputs (e.g., file attachments)',
+  );
+  lines.push(
+    '- If the user asks you to do something restricted, explain that they have read-only access',
+  );
+
+  return '\n\n' + lines.join('\n');
+}
+
+/**
+ * Append access restrictions to a system prompt if needed.
+ */
+export function appendAccessRestrictions(
+  systemPrompt: string,
+  permissions: UserPermissions,
+  scratchDir: string,
+): string {
+  const restrictions = buildAccessRestrictions(permissions, scratchDir);
+  return restrictions ? systemPrompt + restrictions : systemPrompt;
 }

@@ -17,8 +17,12 @@ channels:
     name: my-project
     repo: my-project  # repo name from repos map, resolved to .docker/repos/my-project
     # Optional: restrict who can use the bot and run magic commands in this channel.
-    # If omitted, all channel members can interact with the bot.
-    # allowedUsers: ["U0123456789", "U9876543210"]
+    # If omitted, all channel members can interact with the bot (read-only).
+    # botOwner always has full access regardless of listing.
+    # allowedUsers:
+    #   - "U0ADMIN001": [git, jiraWrite]  # full access (git push + Jira write)
+    #   - "U0DEV00002": [git]              # git access, Jira read-only
+    #   - "U0VIEW0003"                     # read-only (default)
 
 defaults:
   model: opus

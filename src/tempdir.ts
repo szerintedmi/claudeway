@@ -4,6 +4,17 @@ import type { WebClient } from '@slack/web-api';
 import { warnInThread } from './slack-utils.js';
 
 /**
+ * Ensure a persistent per-channel scratch directory exists.
+ * Returns the path to `.claudeway-tmp/scratch/<channelId>/`.
+ * Unlike per-request temp dirs, scratch dirs persist across messages.
+ */
+export function ensureScratchDir(baseDir: string, channelId: string): string {
+  const dir = join(baseDir, 'scratch', channelId);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
  * Create a per-request temporary directory within the configured base temp dir.
  * Also writes a pointer file (<channelId>.current) so the claudeway-attach script
  * can find the current request's temp dir in persistent process mode.

@@ -1,8 +1,13 @@
 import { spawn, type ChildProcess } from 'child_process';
-import { existsSync, statSync, unlinkSync, rmSync } from 'fs';
+import { existsSync, unlinkSync, rmSync } from 'fs';
 import { resolve } from 'path';
 import { v5 as uuidv5 } from 'uuid';
-import { getConfigPath } from './config.js';
+import {
+  getConfigPath,
+  permissionKey as permissionKeyStr,
+  type UserPermissions,
+} from './config.js';
+import { getMcpConfigPath } from './mcp.js';
 
 // Re-export ProcessMode for consumers that only import from claude.ts
 export type { ProcessMode } from './config.js';
@@ -18,6 +23,10 @@ export interface ClaudeOptions {
   filePaths?: string[];
   tempDir?: string;
   tempBaseDir?: string;
+  userPermissions?: UserPermissions;
+  userName?: string;
+  channelName?: string;
+  scratchDir?: string;
 }
 
 export interface ClaudeStreamingOptions extends ClaudeOptions {
@@ -72,6 +81,7 @@ interface PersistentProcessEntry {
   proc: ChildProcess;
   channelId: string;
   sessionId: string;
+  permissionKey: string;
   startedAt: Date;
   lastMessage: string;
   messageCount: number;
@@ -316,6 +326,53 @@ interface ToolAccumulator {
   toolName: string;
   partialJson: string;
   index: number;
+}
+
+/** Env vars that disable all git authentication — hard enforcement for read-only users. */
+function buildGitReadOnlyEnv(): Record<string, string> {
+  return {
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_ASKPASS: '/bin/false',
+    GIT_SSH_COMMAND: '/bin/false',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    SSH_AUTH_SOCK: '',
+    SSH_AGENT_PID: '',
+  };
+}
+
+/** Env vars that set git author/committer identity from Slack user profile. */
+function buildGitAuthorEnv(userName: string, channelName: string): Record<string, string> {
+  const email = `${userName.toLowerCase().replace(/\s+/g, '.')}@${channelName}.slack`;
+  return {
+    GIT_AUTHOR_NAME: userName,
+    GIT_AUTHOR_EMAIL: email,
+    GIT_COMMITTER_NAME: userName,
+    GIT_COMMITTER_EMAIL: email,
+  };
+}
+
+/** Build all permission-related env vars for a Claude subprocess. */
+function buildPermissionsEnv(options: ClaudeOptions): Record<string, string> {
+  const env: Record<string, string> = {};
+
+  // Git author identity for all users with a resolved name
+  if (options.userName && options.channelName) {
+    Object.assign(env, buildGitAuthorEnv(options.userName, options.channelName));
+  }
+
+  // Git credential stripping for users without git permission
+  if (options.userPermissions && !options.userPermissions.git) {
+    Object.assign(env, buildGitReadOnlyEnv());
+  }
+
+  // Scratch directory
+  if (options.scratchDir) {
+    env.CLAUDEWAY_SCRATCH_DIR = options.scratchDir;
+  }
+
+  return env;
 }
 
 function spawnClaudeProcess(args: string[], cwd: string, extraEnv?: Record<string, string>) {
@@ -628,8 +685,8 @@ function buildClaudeArgs(
     '--dangerously-skip-permissions',
   ];
 
-  const mcpConfigPath = resolve(process.cwd(), 'mcp.json');
-  if (existsSync(mcpConfigPath) && statSync(mcpConfigPath).isFile()) {
+  const mcpConfigPath = getMcpConfigPath(options.userPermissions, process.cwd());
+  if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath);
   }
 
@@ -642,20 +699,27 @@ function makeFreshArgs(args: string[], sessionId: string): string[] {
   return args.map((a, i) => (a === '--resume' && args[i + 1] === sessionId ? '--session-id' : a));
 }
 
-function buildTempDirEnv(options: ClaudeOptions): Record<string, string> | undefined {
-  if (!options.tempDir) return undefined;
-  return {
-    CLAUDEWAY_TEMP_DIR: options.tempDir,
-    CLAUDEWAY_CHANNEL_ID: options.channelId,
-  };
+function buildExtraEnv(options: ClaudeOptions): Record<string, string> | undefined {
+  const env: Record<string, string> = {};
+
+  if (options.tempDir) {
+    env.CLAUDEWAY_TEMP_DIR = options.tempDir;
+    env.CLAUDEWAY_CHANNEL_ID = options.channelId;
+  }
+
+  Object.assign(env, buildPermissionsEnv(options));
+
+  return Object.keys(env).length > 0 ? env : undefined;
 }
 
 export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
   const { args, sessionId, cwd, resuming } = buildClaudeArgs(options, 'json');
-  const tempDirEnv = buildTempDirEnv(options);
+  const permEnv = buildExtraEnv(options);
   const regKey = registryKey(options.channelId, options.threadTs);
 
-  console.log(`[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} session ${sessionId}`);
+  console.log(
+    `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} session ${sessionId} [${permissionKeyStr(options.userPermissions) || 'read-only'}]`,
+  );
 
   try {
     return await runClaudeProcess(
@@ -666,7 +730,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
       sessionId,
       options.message,
       regKey,
-      tempDirEnv,
+      permEnv,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -683,7 +747,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
         sessionId,
         options.message,
         regKey,
-        tempDirEnv,
+        permEnv,
       );
     }
     throw err;
@@ -692,11 +756,11 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
 
 export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promise<ClaudeResult> {
   const { args, sessionId, cwd, resuming } = buildClaudeArgs(options, 'stream-json');
-  const tempDirEnv = buildTempDirEnv(options);
+  const permEnv = buildExtraEnv(options);
   const regKey = registryKey(options.channelId, options.threadTs);
 
   console.log(
-    `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} streaming session ${sessionId}`,
+    `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} streaming session ${sessionId} [${permissionKeyStr(options.userPermissions) || 'read-only'}]`,
   );
 
   try {
@@ -710,7 +774,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
       options.message,
       regKey,
       options.onToolEvent,
-      tempDirEnv,
+      permEnv,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -729,7 +793,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
         options.message,
         regKey,
         options.onToolEvent,
-        tempDirEnv,
+        permEnv,
       );
     }
     throw err;
@@ -771,8 +835,8 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
     '--dangerously-skip-permissions',
   ];
 
-  const mcpConfigPath = resolve(process.cwd(), 'mcp.json');
-  if (existsSync(mcpConfigPath) && statSync(mcpConfigPath).isFile()) {
+  const mcpConfigPath = getMcpConfigPath(options.userPermissions, process.cwd());
+  if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath);
   }
 
@@ -787,7 +851,7 @@ function createPersistentProcess(
   const { args, sessionId, cwd, resuming } = buildPersistentClaudeArgs(options);
 
   console.log(
-    `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} persistent session ${sessionId}`,
+    `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} persistent session ${sessionId} [${permissionKeyStr(options.userPermissions) || 'read-only'}]`,
   );
 
   const env = { ...process.env };
@@ -800,6 +864,9 @@ function createPersistentProcess(
   if (options.tempBaseDir) {
     env.CLAUDEWAY_TEMP_BASE = options.tempBaseDir;
   }
+  // Inject permission-related env vars (git author, credential stripping, scratch dir)
+  Object.assign(env, buildPermissionsEnv(options));
+
   const proc = spawn('claude', args, {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -810,6 +877,7 @@ function createPersistentProcess(
     proc,
     channelId: options.channelId,
     sessionId,
+    permissionKey: permissionKeyStr(options.userPermissions),
     startedAt: new Date(),
     lastMessage: '',
     messageCount: 0,
@@ -944,6 +1012,36 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
   }
 }
 
+/**
+ * Kill a persistent process and wait for it to exit.
+ * Sends SIGTERM, waits up to 5s, then escalates to SIGKILL.
+ */
+async function killAndWait(entry: PersistentProcessEntry): Promise<void> {
+  clearTimeout(entry.idleTimer);
+  return new Promise<void>((resolve) => {
+    const killTimer = setTimeout(() => {
+      try {
+        entry.proc.kill('SIGKILL');
+      } catch {
+        // Process may already be gone
+      }
+    }, 5000);
+
+    entry.proc.once('close', () => {
+      clearTimeout(killTimer);
+      resolve();
+    });
+
+    try {
+      entry.proc.kill('SIGTERM');
+    } catch {
+      // Process may already be gone
+      clearTimeout(killTimer);
+      resolve();
+    }
+  });
+}
+
 export async function runClaudePersistentStreaming(
   options: ClaudeStreamingOptions,
 ): Promise<ClaudeResult> {
@@ -951,6 +1049,29 @@ export async function runClaudePersistentStreaming(
   const regKey = registryKey(channelId, options.threadTs);
 
   let entry = persistentRegistry.get(regKey);
+
+  // Kill and respawn if user's permission set differs from the running process
+  const incomingKey = permissionKeyStr(options.userPermissions);
+  if (entry && !entry.proc.killed && entry.permissionKey !== incomingKey) {
+    console.log(
+      `[${channelId}] Permission set changed (${entry.permissionKey || 'read-only'} → ${incomingKey || 'read-only'}) — respawning persistent process`,
+    );
+    // Clear currentTurn before killing to prevent the close handler from
+    // rejecting a stale turn's promise with a spurious error
+    if (entry.currentTurn) {
+      const turn = entry.currentTurn;
+      entry.currentTurn = null;
+      turn.resolve({
+        response: turn.fullText,
+        sessionId: turn.sessionId,
+        cost: turn.cost,
+        tokens: null,
+      });
+    }
+    await killAndWait(entry);
+    persistentRegistry.delete(regKey);
+    entry = undefined;
+  }
 
   // Spawn or re-spawn if process is gone
   if (!entry || !entry.proc.pid || entry.proc.killed) {
