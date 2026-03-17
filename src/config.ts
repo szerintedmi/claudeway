@@ -112,11 +112,24 @@ export interface Defaults {
   tempDir?: string;
 }
 
+export interface GlassesTokenConfig {
+  token: string;
+  userId: string;
+  defaultChannel: string;
+}
+
+export interface GlassesServerConfig {
+  enabled: boolean;
+  port: number;
+  auth: { tokens: GlassesTokenConfig[] };
+}
+
 export interface Config {
   repos?: Record<string, RepoConfig>;
   channels: Record<string, ChannelConfig>;
   defaults: Defaults;
   botOwner?: string;
+  glassesServer?: GlassesServerConfig;
 }
 
 export function getConfigPath(): string {
@@ -257,4 +270,25 @@ export function resolvedChannelConfig(
     processMode: ch.processMode ?? config.defaults.processMode ?? 'oneshot',
     triggerMode: ch.triggerMode ?? config.defaults.triggerMode ?? 'all',
   };
+}
+
+/**
+ * Interpolate env var references like ${VAR_NAME} in a string.
+ */
+export function interpolateEnvVars(value: string): string {
+  return value.replace(/\$\{([^}]+)\}/g, (_, name) => process.env[name] ?? '');
+}
+
+/**
+ * Resolve a raw token (possibly with env var interpolation) to its GlassesTokenConfig.
+ * Returns null if no matching token is found.
+ */
+export function resolveGlassesToken(config: Config, rawToken: string): GlassesTokenConfig | null {
+  const tokens = config.glassesServer?.auth?.tokens;
+  if (!tokens) return null;
+  for (const entry of tokens) {
+    const resolved = interpolateEnvVars(entry.token);
+    if (resolved === rawToken) return entry;
+  }
+  return null;
 }

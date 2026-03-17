@@ -24,6 +24,23 @@ channels:
     #   - "U0DEV00002": [git]              # git access, Jira read-only
     #   - "U0VIEW0003"                     # read-only (default)
 
+  # Glasses channel (used by the WebSocket glasses adapter)
+  # glasses-default:
+  #   name: my-glasses
+  #   repo: my-project
+  #   allowedUsers:
+  #     - "glasses-user": [git]
+
+# Optional: WebSocket server for Meta Ray-Ban glasses (or any WS text client)
+# glassesServer:
+#   enabled: true
+#   port: 8765
+#   auth:
+#     tokens:
+#       - token: "${GLASSES_AUTH_TOKEN}"  # env var interpolation supported
+#         userId: glasses-user            # mapped to channel allowedUsers
+#         defaultChannel: glasses-default  # channel to route messages to
+
 defaults:
   model: opus
   systemPrompt: >-

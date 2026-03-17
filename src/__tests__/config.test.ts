@@ -7,6 +7,8 @@ import {
   loadConfig,
   saveConfig,
   resolveFolder,
+  resolveGlassesToken,
+  interpolateEnvVars,
   DATA_DIR,
   type Config,
 } from '../config.js';
@@ -304,5 +306,143 @@ describe('resolvedChannelConfig with repos', () => {
     };
     const result = resolvedChannelConfig(config, 'C001');
     expect(result?.folder).toBe('/projects/test');
+  });
+});
+
+describe('glassesServer config', () => {
+  let tmpDir: string;
+  const originalCwd = process.cwd;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'claudeway-glasses-config-'));
+    process.cwd = () => tmpDir;
+  });
+
+  afterEach(() => {
+    process.cwd = originalCwd;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('loads config with glassesServer section', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+glassesServer:
+  enabled: true
+  port: 8765
+  auth:
+    tokens:
+      - token: secret123
+        userId: U001
+        defaultChannel: C001
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    const config = loadConfig();
+    expect(config.glassesServer?.enabled).toBe(true);
+    expect(config.glassesServer?.port).toBe(8765);
+    expect(config.glassesServer?.auth.tokens).toHaveLength(1);
+    expect(config.glassesServer?.auth.tokens[0].userId).toBe('U001');
+  });
+
+  it('loads config without glassesServer (undefined, no error)', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    const config = loadConfig();
+    expect(config.glassesServer).toBeUndefined();
+  });
+});
+
+describe('resolveGlassesToken', () => {
+  const config: Config = {
+    channels: { C001: { name: 'test', folder: '/test' } },
+    defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
+    glassesServer: {
+      enabled: true,
+      port: 8765,
+      auth: {
+        tokens: [
+          { token: 'secret-abc', userId: 'U001', defaultChannel: 'C001' },
+          { token: 'secret-xyz', userId: 'U002', defaultChannel: 'C001' },
+        ],
+      },
+    },
+  };
+
+  it('returns matching token config', () => {
+    const result = resolveGlassesToken(config, 'secret-abc');
+    expect(result).toEqual({ token: 'secret-abc', userId: 'U001', defaultChannel: 'C001' });
+  });
+
+  it('returns null for non-matching token', () => {
+    expect(resolveGlassesToken(config, 'wrong-token')).toBeNull();
+  });
+
+  it('returns null when glassesServer is absent', () => {
+    const noGlasses: Config = {
+      channels: { C001: { name: 'test', folder: '/test' } },
+      defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
+    };
+    expect(resolveGlassesToken(noGlasses, 'anything')).toBeNull();
+  });
+});
+
+describe('interpolateEnvVars', () => {
+  it('replaces env var references', () => {
+    const orig = process.env.TEST_GLASSES_VAR;
+    process.env.TEST_GLASSES_VAR = 'my-secret';
+    try {
+      expect(interpolateEnvVars('${TEST_GLASSES_VAR}')).toBe('my-secret');
+    } finally {
+      if (orig === undefined) delete process.env.TEST_GLASSES_VAR;
+      else process.env.TEST_GLASSES_VAR = orig;
+    }
+  });
+
+  it('replaces missing env vars with empty string', () => {
+    expect(interpolateEnvVars('${NONEXISTENT_VAR_12345}')).toBe('');
+  });
+
+  it('leaves strings without env var syntax unchanged', () => {
+    expect(interpolateEnvVars('plain-token')).toBe('plain-token');
+  });
+
+  it('resolves glasses token with env var interpolation', () => {
+    const orig = process.env.TEST_GLASSES_TOKEN;
+    process.env.TEST_GLASSES_TOKEN = 'resolved-secret';
+    try {
+      const config: Config = {
+        channels: { C001: { name: 'test', folder: '/test' } },
+        defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
+        glassesServer: {
+          enabled: true,
+          port: 8765,
+          auth: {
+            tokens: [{ token: '${TEST_GLASSES_TOKEN}', userId: 'U001', defaultChannel: 'C001' }],
+          },
+        },
+      };
+      const result = resolveGlassesToken(config, 'resolved-secret');
+      expect(result?.userId).toBe('U001');
+    } finally {
+      if (orig === undefined) delete process.env.TEST_GLASSES_TOKEN;
+      else process.env.TEST_GLASSES_TOKEN = orig;
+    }
   });
 });

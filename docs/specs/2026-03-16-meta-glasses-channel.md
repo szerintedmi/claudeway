@@ -289,40 +289,29 @@ sequenceDiagram
 
 **Estimated scope**: ~15-20 files touched. While many changes are mechanical moves, the `processQueuedMessage` refactor to use `ChannelResponder` and the unified mode dispatch are non-trivial new logic.
 
-### Phase 1: WebSocket Server + Text Pipeline
+### Phase 1: WebSocket Server + Text Pipeline [COMPLETE]
 
 **Goal**: A working WebSocket endpoint that accepts text and returns text via Claude.
 
-**Changes**:
+**Status**: Complete. 357 tests pass (42 new), typecheck/lint clean.
 
-1. Create `src/adapters/glasses/protocol.ts` -- WS message type definitions
-2. Create `src/adapters/glasses/handler.ts` -- WS connection handling, auth (bearer token), message routing
-3. Create `src/adapters/glasses/responder.ts` -- `ChannelResponder` implementation that sends text over WS
-4. Create `src/adapters/glasses/index.ts` -- WS server setup (use `ws` package or Bun's native WebSocket)
-5. Create `src/adapters/glasses/test-ui/index.html` -- simple browser-based test UI (connect to WS, type text, see responses)
-6. Update `src/index.ts` to boot glasses adapter alongside Slack
-7. Update `config.yaml` schema for `glassesServer` section
+**What was built**:
+- `src/adapters/glasses/protocol.ts` -- message types, `parseClientMessage()` with validation, `serializeServerMessage()`
+- `src/adapters/glasses/handler.ts` -- per-connection session management, message routing (ping/text/cancel), queue key namespacing (`sessionId:requestId`), owner-aware drain
+- `src/adapters/glasses/responder.ts` -- `GlassesChannelResponder` + `GlassesStreamingResponder` implementing core interfaces
+- `src/adapters/glasses/index.ts` -- `Bun.serve()` WS server, token auth (query param or Bearer header), test UI serving
+- `src/adapters/glasses/test-ui/index.html` -- single-file browser test UI (connect, send text, view responses)
+- `src/index.ts` refactored -- shared startup extracted, conditional adapter boot (Slack and/or glasses)
+- `src/adapters/slack/index.ts` refactored -- exports `startSlackAdapter()` + `getSlackShutdownHook()`
+- `src/config.ts` extended -- `GlassesServerConfig`, `resolveGlassesToken()`, `interpolateEnvVars()`
 
-**Tests**:
-- `src/__tests__/glasses-protocol.test.ts` -- WS message serialization/deserialization for all message types
-- `src/__tests__/glasses-handler.test.ts` -- using Bun's built-in WebSocket test utilities:
-  - Rejects connections without valid auth token
-  - Accepts connections with valid bearer token
-  - Routes `text` messages to core engine, returns `response_text` messages
-  - Sends `error` message on invalid message format
-  - Sends `pong` in response to `ping`
-  - Handles client disconnect gracefully (no dangling state)
-- `src/__tests__/glasses-responder.test.ts` -- `ChannelResponder` implementation:
-  - `onProcessing()` sends `status: 'thinking'` over WS
-  - `sendText()` sends `response_text` with correct framing
-  - `onError()` sends `error` message
-- Manual: browser test UI for interactive testing
+**Security hardening** (post-review):
+- Test UI serves only `index.html` — no arbitrary file paths (path traversal fix)
+- Queue keys namespaced as `sessionId:requestId` — prevents cross-client collisions
+- `queueKeyToWs` map ensures drain delivers responses to the owning socket, not the drain initiator
+- `resolveResponder()` extracted and integration-tested: two concurrent sessions on the same channel route responses to correct sockets; fallback to drain initiator when owner disconnects
 
-**Test UI**: A single HTML file with:
-- WebSocket URL + auth token input
-- Text input field
-- Response display area
-- Connection status indicator
+**Tests**: 3 new test files (17 + 10 + 15 = 42 tests) + config test extensions
 
 ### Phase 2: STT Integration (Audio In)
 

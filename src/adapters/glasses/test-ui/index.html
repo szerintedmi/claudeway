@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Glasses Test UI</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+  .header { padding: 12px 16px; background: #16213e; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .header input { background: #0f3460; border: 1px solid #444; color: #e0e0e0; padding: 6px 10px; border-radius: 4px; font-size: 13px; }
+  .header input.url { flex: 1; min-width: 200px; }
+  .header input.token { width: 180px; }
+  .header button { padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 500; }
+  .btn-connect { background: #0a9396; color: white; }
+  .btn-connect:hover { background: #0b7a7d; }
+  .btn-disconnect { background: #ae2012; color: white; }
+  .btn-disconnect:hover { background: #9b1b0e; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .status-dot.connected { background: #2ecc71; }
+  .status-dot.disconnected { background: #e74c3c; }
+  .messages { flex: 1; overflow-y: auto; padding: 12px 16px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; line-height: 1.5; }
+  .msg { margin-bottom: 6px; word-break: break-word; }
+  .msg .time { color: #666; margin-right: 8px; }
+  .msg.sent { color: #74b9ff; }
+  .msg.received { color: #a8e6cf; }
+  .msg.error { color: #ff7675; }
+  .msg.system { color: #fdcb6e; }
+  .input-bar { padding: 12px 16px; background: #16213e; border-top: 1px solid #333; display: flex; gap: 8px; }
+  .input-bar input { flex: 1; background: #0f3460; border: 1px solid #444; color: #e0e0e0; padding: 8px 12px; border-radius: 4px; font-size: 14px; }
+  .input-bar button { padding: 8px 20px; background: #0a9396; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+  .input-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<div class="header">
+  <span class="status-dot disconnected" id="statusDot"></span>
+  <input class="url" id="wsUrl" value="ws://localhost:8765/ws" placeholder="WebSocket URL">
+  <input class="token" id="authToken" type="password" placeholder="Auth token">
+  <button class="btn-connect" id="connectBtn" onclick="toggleConnection()">Connect</button>
+</div>
+<div class="messages" id="messages"></div>
+<div class="input-bar">
+  <input id="textInput" placeholder="Type a message..." disabled onkeydown="if(event.key==='Enter')sendText()">
+  <button id="sendBtn" onclick="sendText()" disabled>Send</button>
+</div>
+<script>
+  let ws = null;
+  let reqCounter = 0;
+
+  function log(cls, text) {
+    const el = document.getElementById('messages');
+    const time = new Date().toLocaleTimeString();
+    const div = document.createElement('div');
+    div.className = 'msg ' + cls;
+    div.innerHTML = '<span class="time">' + time + '</span>' + escapeHtml(text);
+    el.appendChild(div);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function setConnected(connected) {
+    const dot = document.getElementById('statusDot');
+    const btn = document.getElementById('connectBtn');
+    const input = document.getElementById('textInput');
+    const send = document.getElementById('sendBtn');
+    dot.className = 'status-dot ' + (connected ? 'connected' : 'disconnected');
+    btn.textContent = connected ? 'Disconnect' : 'Connect';
+    btn.className = connected ? 'btn-disconnect' : 'btn-connect';
+    input.disabled = !connected;
+    send.disabled = !connected;
+    if (connected) input.focus();
+  }
+
+  function toggleConnection() {
+    if (ws && ws.readyState <= 1) {
+      ws.close();
+      return;
+    }
+    const url = document.getElementById('wsUrl').value;
+    const token = document.getElementById('authToken').value;
+    const fullUrl = token ? url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token) : url;
+    log('system', 'Connecting to ' + url + '...');
+    ws = new WebSocket(fullUrl);
+    ws.onopen = () => { setConnected(true); log('system', 'Connected'); };
+    ws.onclose = () => { setConnected(false); log('system', 'Disconnected'); ws = null; };
+    ws.onerror = (e) => { log('error', 'WebSocket error'); };
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'response_text') {
+          const label = msg.final ? '[final]' : '[chunk]';
+          log('received', label + ' ' + msg.text);
+        } else if (msg.type === 'error') {
+          log('error', 'Error: ' + msg.message);
+        } else {
+          log('received', JSON.stringify(msg));
+        }
+      } catch {
+        log('received', e.data);
+      }
+    };
+  }
+
+  function sendText() {
+    const input = document.getElementById('textInput');
+    const text = input.value.trim();
+    if (!text || !ws) return;
+    const requestId = 'req-' + (++reqCounter);
+    const msg = { type: 'text', requestId, text };
+    ws.send(JSON.stringify(msg));
+    log('sent', '[' + requestId + '] ' + text);
+    input.value = '';
+  }
+</script>
+</body>
+</html>
