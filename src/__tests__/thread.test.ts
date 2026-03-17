@@ -1,5 +1,9 @@
 import type { WebClient } from '@slack/web-api';
-import { resetUserNameCache, resolveUserName, fetchThreadContext } from '../thread.js';
+import {
+  resetUserNameCache,
+  resolveUserName,
+  fetchThreadContext,
+} from '../adapters/slack/thread.js';
 
 beforeEach(() => {
   resetUserNameCache();

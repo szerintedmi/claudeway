@@ -1,7 +1,5 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'fs';
-import { join, basename } from 'path';
-import type { WebClient } from '@slack/web-api';
-import { warnInThread } from './slack-utils.js';
+import { join } from 'path';
 
 /**
  * Ensure a persistent per-channel scratch directory exists.
@@ -47,53 +45,6 @@ export function readAttachmentManifest(requestDir: string): string[] {
       .filter((line) => line.length > 0 && existsSync(line));
   } catch {
     return [];
-  }
-}
-
-/**
- * Upload all files from the attachment manifest to Slack.
- * Non-critical — errors are logged but do not throw.
- */
-export async function uploadAttachedFiles(
-  requestDir: string,
-  client: WebClient,
-  channelId: string,
-  threadTs: string,
-): Promise<void> {
-  const filePaths = readAttachmentManifest(requestDir);
-  if (filePaths.length === 0) return;
-
-  console.log(`[attachments] Uploading ${filePaths.length} file(s)`);
-
-  const failed: string[] = [];
-
-  for (const filePath of filePaths) {
-    const filename = basename(filePath);
-    try {
-      await client.files.uploadV2({
-        channel_id: channelId,
-        thread_ts: threadTs,
-        file: filePath,
-        filename,
-        title: filename,
-      });
-      console.log(`[attachments] Uploaded: ${filename}`);
-    } catch (err) {
-      const slackErr = err as { data?: unknown };
-      const detail = slackErr.data ? JSON.stringify(slackErr.data, null, 2) : err;
-      console.error(`[attachments] Failed to upload ${filename}:`, detail);
-      failed.push(filename);
-    }
-  }
-
-  if (failed.length > 0) {
-    const fileList = failed.join(', ');
-    await warnInThread(
-      client,
-      channelId,
-      threadTs,
-      `Failed to upload ${failed.length} attachment(s): ${fileList}`,
-    );
   }
 }
 

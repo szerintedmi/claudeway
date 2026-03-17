@@ -4,9 +4,9 @@ import {
   buildPrompt,
   extractMentionedUserIds,
   formatUserDirectory,
-  resolveUserDirectory,
+  type ThreadMessage,
 } from '../prompt.js';
-import type { ThreadMessage } from '../thread.js';
+import { resolveUserDirectory } from '../adapters/slack/handler.js';
 import type { WebClient } from '@slack/web-api';
 
 const BOT_ID = 'U_BOT';

@@ -1,5 +1,5 @@
 import type { WebClient } from '@slack/web-api';
-import { warnInThread } from './slack-utils.js';
+import { warnInThread } from './utils.js';
 
 export interface ThreadMessage {
   authorName: string;

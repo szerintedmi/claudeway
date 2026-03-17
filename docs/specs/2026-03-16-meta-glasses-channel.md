@@ -1,0 +1,611 @@
+# Meta Ray-Ban Glasses Voice Channel
+
+**Date**: 2026-03-16
+**Status**: Draft
+**Author**: Claude + Petro
+
+## Overview
+
+Add a voice-driven channel to Claudeway using Meta Ray-Ban smart glasses. Users speak to Claude through the glasses and hear responses through the glasses speaker. This requires: (1) modularizing the existing Slack-coupled codebase into a channel-agnostic core, (2) building a voice pipeline (STT/TTS), (3) a WebSocket server adapter, and (4) an Android companion app using Meta's DAT SDK.
+
+**Voice model (MVP)**: Push-to-talk with post-stop transcription. The user taps to start, speaks, and releases/stops. Audio is buffered and transcribed after `audio_end`. This is not real-time streaming STT — it's a simpler, more reliable model for MVP. Streaming STT (transcribe while speaking) is Phase 5, after the batch path is proven end-to-end.
+
+## E2E User Journey (MVP)
+
+1. User puts on Ray-Ban Meta glasses; they auto-connect to the companion Android app via Bluetooth
+2. User **taps the touchpad** to activate listening
+3. User speaks: *"What's the status of the queue refactor in claudeway?"*
+4. Glasses mic streams **8kHz mono audio** over Bluetooth HFP to companion app
+5. Companion app streams audio over **WebSocket** to Claudeway server
+6. Server runs **STT** (Deepgram Nova-3) to transcribe speech to text
+7. Text enters the core pipeline: queue -> config/permissions -> `claude -p` -> response
+8. Claude response text -> **TTS** (Deepgram Aura-2) -> audio stream
+9. Audio streams back over WebSocket to companion app -> glasses speaker
+10. User hears Claude's response through the glasses
+
+## Architecture
+
+### Design Principles
+
+- **Voice is a core capability, not adapter-specific** -- the STT/TTS pipeline lives in `src/core/` so any future adapter (web chat, phone app) can use it
+- **Adapters are thin transport layers** -- they handle connection lifecycle and message framing, then delegate to the core engine
+- **Existing Slack behavior is unchanged** -- modularization is a pure refactor with no behavior changes
+- **1 channel = 1 repo** -- each configured glasses channel maps to a repo/folder, same as Slack channels
+
+### Module Structure (Post-Refactor)
+
+```
+src/
+  core/
+    engine.ts           # processQueuedMessage, drainChannel, concurrency pool
+    interfaces.ts       # ChannelAdapter, ChannelResponder, IStreamingResponder
+    voice.ts            # STT/TTS pipeline (provider-agnostic interface)
+    voice-deepgram.ts   # Deepgram Nova-3 (STT) + Aura-2 (TTS) implementation
+  adapters/
+    slack/
+      index.ts          # Slack Bolt app setup, entrypoint
+      handler.ts        # registerMessageHandler, message filtering
+      responder.ts      # StreamingResponder, NativeStreamingResponder, sendResponse
+      formatting.ts     # markdownToSlackMrkdwn, splitMessage
+      thread.ts         # fetchThreadContext, resolveUserName (Slack impl)
+      commands.ts       # Magic commands (!ps, !kill, etc.)
+      utils.ts          # safeReact, warnInThread
+      files.ts          # downloadSlackFiles, uploadAttachedFiles
+    glasses/
+      index.ts          # WebSocket server setup, entrypoint
+      handler.ts        # WS message routing, session management
+      responder.ts      # WS-based ChannelResponder (text + audio streaming)
+      protocol.ts       # WS message types/protocol definition
+      test-ui/          # Simple HTML/JS page for local browser testing
+  # Unchanged, already generic:
+  queue.ts
+  claude.ts
+  config.ts
+  mcp.ts
+  prompt.ts             # Minor: remove Slack-specific string from formatUserDirectory
+  sync-repos.ts
+  tempdir.ts            # Minor: extract uploadAttachedFiles to adapter
+
+android/                # Companion app (Kotlin/Gradle)
+  app/src/main/
+    kotlin/.../
+      MainActivity.kt
+      glasses/           # DAT SDK connection, device management
+      audio/             # Bluetooth HFP mic/speaker routing
+      network/           # WebSocket client to Claudeway server
+      ui/                # Minimal UI (connection status, transcript)
+```
+
+### Core Interfaces
+
+```typescript
+// src/core/interfaces.ts
+
+/** Adapter-provided responder for delivering responses back to the user */
+interface ChannelResponder {
+  /** Signal that processing has started (e.g., Slack hourglass reaction) */
+  onProcessing(): Promise<void>;
+  /** Signal completion (e.g., Slack checkmark reaction) */
+  onComplete(): Promise<void>;
+  /** Report an error to the user */
+  onError(message: string): Promise<void>;
+  /** Send a text response (may be called multiple times for chunked delivery) */
+  sendText(text: string): Promise<void>;
+  /** Send an audio response (for voice-enabled channels) */
+  sendAudio?(audioChunk: Buffer): Promise<void>;
+  /** Upload a file attachment */
+  uploadFile?(path: string, name: string): Promise<void>;
+}
+
+/** Adapter-provided factory for creating streaming responders */
+interface StreamingResponderFactory {
+  create(): IStreamingResponder;
+}
+
+/** Common streaming interface (already implicit in claude.ts callbacks) */
+interface IStreamingResponder {
+  onTextDelta(text: string): void;
+  onToolEvent(event: ToolEventPayload): void;
+  finish(): Promise<void>;
+  getFullText(): string;
+}
+
+/** Voice pipeline interface (STT + TTS) */
+interface VoiceProvider {
+  /** Batch transcription (MVP): transcribe a complete audio buffer after recording stops */
+  transcribe(audio: Buffer, format: AudioFormat): Promise<string>;
+  /** Future: streaming transcription for real-time partial transcripts */
+  transcribeStream?(audioStream: ReadableStream, format: AudioFormat): AsyncGenerator<string>;
+  synthesize(text: string): Promise<Buffer>;
+  synthesizeStream(text: string): AsyncGenerator<Buffer>;
+}
+
+interface AudioFormat {
+  sampleRate: number;   // e.g., 8000 (glasses HFP), 16000 (Whisper native)
+  channels: number;     // 1 = mono
+  encoding: 'pcm_s16le' | 'pcm_f32le' | 'mulaw';
+}
+```
+
+### WebSocket Protocol
+
+The glasses adapter exposes a WebSocket server. Messages are JSON-framed:
+
+Every request/response exchange is correlated by a `requestId` (UUID, client-generated). This enables cancellation, concurrent requests, and unambiguous response routing.
+
+```typescript
+// Client -> Server
+{ type: 'audio_start', requestId: string, format: AudioFormat }
+{ type: 'audio_chunk', requestId: string, data: '<base64 PCM>' }
+{ type: 'audio_end', requestId: string }
+{ type: 'text', requestId: string, text: 'direct text input' }
+{ type: 'cancel', requestId: string }       // Cancel an in-flight request (see cancellation semantics below)
+{ type: 'ping' }
+
+// Server -> Client
+{ type: 'status', requestId: string, status: 'transcribing' | 'thinking' | 'speaking' }
+{ type: 'transcript', requestId: string, text: 'what user said', final: boolean }
+{ type: 'response_text', requestId: string, text: 'claude response chunk', final: boolean }
+{ type: 'response_audio', requestId: string, data: '<base64 PCM>' }
+{ type: 'response_audio_end', requestId: string }
+{ type: 'error', requestId: string | null, message: '...' }  // null requestId = connection-level error
+{ type: 'pong' }
+```
+
+**Cancellation semantics**: A `cancel` message applies to a specific `requestId`. The server's behavior depends on the current state of that request:
+
+- **Queued** (not yet processing): removed from queue, server sends `error` with message `"cancelled"`.
+- **Transcribing** (STT in progress): STT request is aborted, partial transcript discarded, server sends `error` with `"cancelled"`.
+- **Thinking** (Claude processing): Claude CLI process is killed (`SIGTERM`), server sends `error` with `"cancelled"`.
+- **Speaking** (TTS streaming): TTS generation is aborted, no further `response_audio` chunks sent, server sends `response_audio_end` followed by `error` with `"cancelled"`.
+- **Unknown requestId** or already completed: server ignores the `cancel` silently (no error).
+
+### Config Extension
+
+```yaml
+# config.yaml additions
+glassesServer:
+  enabled: true
+  port: 8765
+  # Auth model: each token maps to a userId + default channel.
+  # The userId is resolved against channel allowedUsers for permissions,
+  # exactly like Slack userId resolution.
+  auth:
+    tokens:
+      - token: '${GLASSES_AUTH_TOKEN}'
+        userId: glasses-petro           # Used for permission resolution
+        defaultChannel: glasses-default  # Channel to use when client doesn't specify
+
+voice:
+  provider: deepgram
+  deepgram:
+    apiKey: '${DEEPGRAM_API_KEY}'
+    sttModel: nova-3
+    ttsModel: aura-2
+    ttsVoice: asteria
+
+# Glasses channels work the same as Slack channels
+channels:
+  glasses-default:            # Not a Slack channel ID, just an identifier
+    name: my-glasses
+    repo: claudeway
+    allowedUsers:
+      - 'glasses-petro'    # Must match the userId from glassesServer.auth.tokens
+    model: opus
+```
+
+### Voice Pipeline Detail
+
+```mermaid
+sequenceDiagram
+    actor User as User (Glasses)
+    participant App as Android Companion
+    participant WS as WS Server (Glasses Adapter)
+    participant STT as STT: Deepgram Nova-3 (core/voice)
+    participant Engine as Core Engine (claude -p)
+    participant TTS as TTS: Deepgram Aura-2 (core/voice)
+
+    User->>App: Tap touchpad to activate
+    activate App
+    App->>WS: audio_start {8kHz mono PCM}
+    activate WS
+
+    loop Voice streaming
+        User-)App: BT HFP audio
+        App-)WS: audio_chunk (WebSocket)
+    end
+
+    User->>App: Release / silence detected
+    App->>WS: audio_end
+
+    WS->>STT: Audio buffer
+    activate STT
+    STT-->>WS: transcript (text)
+    deactivate STT
+
+    WS->>Engine: Queued text message
+    activate Engine
+    Note right of Engine: queue → config/permissions → claude -p
+
+    loop Streaming response
+        Engine-)WS: response text chunk
+        WS-)TTS: Sentence buffer
+        activate TTS
+        TTS-)WS: audio chunk
+        deactivate TTS
+        WS-)App: response_audio (WebSocket)
+        App-)User: BT HFP audio (speaker)
+    end
+
+    Engine-->>WS: response complete
+    deactivate Engine
+    WS-->>App: response_audio_end
+    deactivate WS
+    deactivate App
+```
+
+**Audio resampling**: The glasses mic outputs 8kHz mono (Bluetooth HFP limitation). Deepgram Nova-3 accepts 8kHz natively (no upsample needed -- it handles it). TTS output can be generated at any sample rate; we'll request 8kHz to match the glasses speaker output path, avoiding unnecessary conversion.
+
+## Implementation Phases
+
+### Phase 0: Modularize Core (Server-Side Refactor) [COMPLETE]
+
+**Goal**: Extract reusable core from Slack-coupled code. Slack continues working identically.
+
+**Status**: Complete. All code moved, 302 tests pass, typecheck/lint clean, zero Slack imports in `src/core/`.
+
+**Changes**:
+
+1. Create `src/core/interfaces.ts` -- define `ChannelResponder`, `IStreamingResponder`
+2. Create `src/core/engine.ts` -- extract from `src/slack.ts`:
+   - `processQueuedMessage()` (generic orchestration, accepts `ChannelResponder`)
+   - `drainChannel()` (generic queue drain loop)
+   - Concurrency pool (`acquireProcessSlot` / `releaseProcessSlot`)
+   - Mode dispatch (`processBatch`, `processStreamUpdate`, etc. refactored to use `ChannelResponder`)
+3. Move Slack-specific code to `src/adapters/slack/`:
+   - `handler.ts` -- `registerMessageHandler`, message filtering, `downloadSlackFiles`
+   - `responder.ts` -- `StreamingResponder`, `NativeStreamingResponder`, `sendResponse` (implement `ChannelResponder`)
+   - `formatting.ts` -- `markdownToSlackMrkdwn`, `splitMessage`
+   - `thread.ts` -- Slack `fetchThreadContext`, `resolveUserName`
+   - `commands.ts` -- magic commands (unchanged, Slack-specific)
+   - `utils.ts` -- `safeReact`, `warnInThread`
+   - `files.ts` -- `downloadSlackFiles`, `uploadAttachedFiles`
+   - `index.ts` -- Slack Bolt app setup (current `src/index.ts`)
+4. Update `src/prompt.ts` -- parameterize `[Slack user reference]` string
+5. Update `src/tempdir.ts` -- extract `uploadAttachedFiles` to Slack adapter
+6. New top-level `src/index.ts` that boots configured adapters
+
+**Tests**:
+- All existing tests pass (imports updated for new paths)
+- `src/__tests__/engine.test.ts` -- core engine with a mock `ChannelResponder`:
+  - `processQueuedMessage()` calls responder lifecycle methods in correct order (`onProcessing` → `sendText` → `onComplete`)
+  - `processQueuedMessage()` calls `onError` on Claude CLI failure
+  - Concurrency pool limits parallel processing (`acquireProcessSlot` / `releaseProcessSlot`)
+  - `drainChannel()` processes queued messages in order
+- `src/__tests__/slack.test.ts` -- existing tests migrated to import from `src/adapters/slack/`
+- `src/__tests__/config.test.ts` -- config loading with new `glassesServer` and `voice` sections (undefined = disabled, no errors)
+
+**Scope note**: This is the riskiest phase of the project — extracting a channel-agnostic core from tightly coupled Slack code while preserving behavior. Treat as a standalone milestone with strict exit criteria: all existing tests pass, zero Slack imports in `src/core/`, typecheck and lint clean, and ideally a manual smoke test with a real Slack workspace.
+
+**Estimated scope**: ~15-20 files touched. While many changes are mechanical moves, the `processQueuedMessage` refactor to use `ChannelResponder` and the unified mode dispatch are non-trivial new logic.
+
+### Phase 1: WebSocket Server + Text Pipeline
+
+**Goal**: A working WebSocket endpoint that accepts text and returns text via Claude.
+
+**Changes**:
+
+1. Create `src/adapters/glasses/protocol.ts` -- WS message type definitions
+2. Create `src/adapters/glasses/handler.ts` -- WS connection handling, auth (bearer token), message routing
+3. Create `src/adapters/glasses/responder.ts` -- `ChannelResponder` implementation that sends text over WS
+4. Create `src/adapters/glasses/index.ts` -- WS server setup (use `ws` package or Bun's native WebSocket)
+5. Create `src/adapters/glasses/test-ui/index.html` -- simple browser-based test UI (connect to WS, type text, see responses)
+6. Update `src/index.ts` to boot glasses adapter alongside Slack
+7. Update `config.yaml` schema for `glassesServer` section
+
+**Tests**:
+- `src/__tests__/glasses-protocol.test.ts` -- WS message serialization/deserialization for all message types
+- `src/__tests__/glasses-handler.test.ts` -- using Bun's built-in WebSocket test utilities:
+  - Rejects connections without valid auth token
+  - Accepts connections with valid bearer token
+  - Routes `text` messages to core engine, returns `response_text` messages
+  - Sends `error` message on invalid message format
+  - Sends `pong` in response to `ping`
+  - Handles client disconnect gracefully (no dangling state)
+- `src/__tests__/glasses-responder.test.ts` -- `ChannelResponder` implementation:
+  - `onProcessing()` sends `status: 'thinking'` over WS
+  - `sendText()` sends `response_text` with correct framing
+  - `onError()` sends `error` message
+- Manual: browser test UI for interactive testing
+
+**Test UI**: A single HTML file with:
+- WebSocket URL + auth token input
+- Text input field
+- Response display area
+- Connection status indicator
+
+### Phase 2: STT Integration (Audio In)
+
+**Goal**: Push-to-talk audio input — user speaks, audio is buffered, transcribed after stop, then processed by Claude.
+
+**Voice model**: This is explicitly **not** real-time streaming STT. Audio chunks are accumulated server-side until `audio_end`, then the complete buffer is sent to Deepgram's batch API for transcription. This is simpler and more reliable for MVP. Streaming STT (transcribe while speaking, show partial transcripts) is covered in Phase 5 using Deepgram's real-time WebSocket API.
+
+**Changes**:
+
+1. Create `src/core/voice.ts` -- `VoiceProvider` interface, audio format types
+2. Create `src/core/voice-deepgram.ts` -- Deepgram implementation (Nova-3 batch STT + Aura-2 TTS)
+3. Update glasses handler to accept `audio_start`/`audio_chunk`/`audio_end` messages
+4. Wire: audio chunks -> accumulate until `audio_end` -> batch STT -> text -> existing Claude pipeline
+5. Update test UI: add "Record Audio" button using `AudioWorklet` + resampler to produce 16kHz mono PCM (browser `MediaRecorder` does not produce raw PCM natively — an AudioWorklet captures PCM from `getUserMedia` and a client-side resampler converts from the mic's native sample rate to 16kHz before base64-encoding and sending over WS). **Note**: the browser test path sends 16kHz audio (laptop mic native rate), while the glasses device path sends 8kHz (Bluetooth HFP limitation). The server accepts both — the `AudioFormat` in `audio_start` declares the sample rate, and Deepgram handles either natively. Do not treat the browser test UI as protocol truth for sample rate.
+6. Add `voice` config section to config.yaml
+
+**Tests**:
+- `src/__tests__/voice.test.ts` -- `VoiceProvider` interface contract tests with mock provider:
+  - `transcribe()` returns text from audio buffer (batch mode)
+  - Handles empty audio gracefully (returns empty string, not error)
+- `src/__tests__/voice-deepgram.test.ts` -- Deepgram-specific unit tests (mocked HTTP/WS):
+  - STT: sends correct audio format headers to Deepgram API
+  - STT: parses Deepgram response JSON into plain text
+  - STT: handles Deepgram API errors (auth, rate limit) with meaningful error messages
+- `src/__tests__/glasses-handler-audio.test.ts` -- audio message flow:
+  - `audio_start` → `audio_chunk` (x N) → `audio_end` triggers STT then engine
+  - Sends `status: 'transcribing'` after `audio_end`
+  - Sends `transcript` message with final text before processing
+  - Rejects `audio_chunk` without prior `audio_start`
+- Manual: browser test UI with mic recording for interactive testing
+
+**Deepgram STT integration**:
+- MVP (Phase 2): Use Deepgram's batch/pre-recorded API — simpler, one HTTP call after `audio_end`
+- Phase 5: Switch to Deepgram's real-time streaming API (WebSocket-based) for partial transcripts while speaking
+
+### Phase 3: TTS Integration (Audio Out)
+
+**Goal**: Full voice loop -- audio in, audio out.
+
+**Changes**:
+
+1. Add TTS to `src/core/voice-deepgram.ts` -- Deepgram Aura-2 streaming synthesis
+2. Update glasses responder: after Claude responds, stream TTS audio back over WS
+3. Update test UI: add audio playback (Web Audio API), play response audio chunks as they arrive
+4. Add `response_audio` / `response_audio_end` WS message handling
+5. Handle interruption: client sends `cancel` with the in-flight `requestId` before starting a new request. Server handles cancellation per the state-dependent semantics defined in the WebSocket Protocol section (queued, transcribing, thinking, or speaking).
+
+**Tests**:
+- `src/__tests__/voice-deepgram.test.ts` -- extend with TTS tests (mocked HTTP):
+  - TTS: sends correct text and voice config to Deepgram API
+  - TTS: `synthesizeStream()` yields audio chunks as they arrive
+  - TTS: handles Deepgram API errors gracefully
+- `src/__tests__/voice-tts-buffer.test.ts` -- sentence buffering logic:
+  - Buffers text until sentence boundary (`.`, `?`, `!`)
+  - Flushes partial buffer on stream end
+  - Handles edge cases: ellipsis (`...`), abbreviations (`e.g.`), code blocks
+- `src/__tests__/glasses-handler-voice.test.ts` -- full voice round-trip (mocked STT + TTS + Claude):
+  - Audio in → `status: transcribing` → `transcript` → `status: thinking` → `response_text` → `response_audio` → `response_audio_end`
+  - Interruption: `cancel` message stops in-progress TTS and Claude for that `requestId`
+  - Concurrent requests from same client are serialized
+- Manual: browser test UI with mic + speaker for full voice loop
+
+**Streaming TTS approach**:
+- Claude responses arrive as text (potentially streaming via `onTextDelta`)
+- Buffer text to sentence boundaries (period, question mark, exclamation)
+- Send each sentence to TTS immediately (sentence-level streaming)
+- Stream audio chunks back to client as they're generated
+- This gives ~1-2 second latency from Claude's first sentence to audio playback start
+
+### Phase 4: Android Companion App
+
+**Goal**: End-to-end with actual Meta Ray-Ban glasses.
+
+**Structure**:
+```
+android/
+  app/
+    build.gradle.kts
+    src/main/
+      AndroidManifest.xml
+      kotlin/com/claudeway/glasses/
+        ClaudewayApp.kt          # Application class, DAT SDK init
+        MainActivity.kt           # Single-activity app
+        glasses/
+          GlassesViewModel.kt     # DAT SDK device connection state
+          GlassesManager.kt       # Device discovery, registration, permissions
+        audio/
+          AudioRouter.kt          # Bluetooth HFP routing (mic + speaker)
+          AudioRecorder.kt        # PCM capture from glasses mic
+          AudioPlayer.kt          # PCM playback to glasses speaker
+        network/
+          ClaudewayWebSocket.kt   # WS client (OkHttp or Ktor)
+          Protocol.kt             # Message types matching server protocol
+        ui/
+          ConnectionScreen.kt     # Jetpack Compose: server URL, connection status
+          ConversationScreen.kt   # Transcript display, manual text input fallback
+      res/
+        ...
+  build.gradle.kts
+  settings.gradle.kts
+  gradle/
+    libs.versions.toml            # DAT SDK, OkHttp, Compose versions
+```
+
+**Key implementation details**:
+
+1. **DAT SDK setup**: `Wearables.initialize()` in `Application.onCreate()`, registration flow via Meta AI companion app
+2. **Audio routing**: Standard Android `AudioManager.setCommunicationDevice()` to route to Bluetooth SCO device. Must configure HFP **before** any DAT camera sessions.
+3. **Audio capture**: `AudioRecord` with Bluetooth SCO source, 8kHz mono PCM Int16
+4. **Audio playback**: `AudioTrack` routed to Bluetooth SCO device, matching format from TTS
+5. **WebSocket**: OkHttp's WS client, auto-reconnect, auth via bearer token
+6. **Activation**: Touchpad tap detected via DAT SDK gesture events, or a simple "hold to talk" UI button as fallback
+
+**DAT SDK requirements**:
+- Android 10+ (API 29+)
+- Meta AI companion app installed on phone
+- Developer Mode enabled in Meta AI app settings
+- GitHub token for pulling SDK from GitHub Packages
+- Supported: Ray-Ban Meta Gen 1 & Gen 2
+
+**Tests (Android, JUnit + MockK)**:
+- `ClaudewayWebSocketTest` -- WebSocket client:
+  - Connects with auth token, receives `pong` on `ping`
+  - Reconnects automatically on connection drop
+  - Serializes/deserializes protocol messages correctly
+- `AudioRouterTest` -- Bluetooth HFP routing:
+  - Finds SCO device from `AudioManager.availableCommunicationDevices`
+  - Sets communication device correctly
+  - Handles missing SCO device (no glasses connected) gracefully
+- `AudioRecorderTest` -- PCM capture:
+  - Produces 8kHz mono Int16 PCM buffers
+  - Stops cleanly on release
+- `ProtocolTest` -- shared protocol types:
+  - Kotlin message types match TypeScript protocol definition (snapshot test against JSON fixtures)
+- **Integration** (requires DAT MockDeviceKit, no physical glasses):
+  - `GlassesManagerTest` -- device discovery and registration flow using `MockDeviceKit`
+  - Full pipeline mock: simulated touchpad event → audio capture → WS send → mock server response → audio playback
+- **Manual E2E**: put on glasses, tap touchpad, speak, hear response
+
+### Phase 5: Streaming STT
+
+**Goal**: Replace batch transcription with real-time streaming STT for lower perceived latency. Partial transcripts appear while the user is still speaking.
+
+**Prerequisite**: Phases 0–4 complete and stable. Batch voice path working end-to-end with glasses hardware.
+
+**Changes**:
+
+1. Add `transcribeStream()` implementation in `src/core/voice-deepgram.ts` using Deepgram's real-time WebSocket API
+2. Update glasses handler: on `audio_start`, open a streaming STT session; forward `audio_chunk` directly to Deepgram WS instead of buffering
+3. Emit `transcript` messages with `final: false` as partial results arrive, `final: true` on utterance end
+4. On `audio_end`, close the Deepgram STT stream and wait for the final transcript before passing to Claude
+5. Update `cancel` handling: cancellation during streaming transcription closes the Deepgram WS session
+6. Add config flag `voice.sttMode: 'batch' | 'streaming'` (default: `batch`) — batch remains the fallback until streaming is proven stable
+
+**Tests**:
+- `src/__tests__/voice-deepgram-streaming.test.ts` -- streaming STT (mocked Deepgram WS):
+  - Opens Deepgram WS with correct model/format params
+  - Forwards audio chunks as they arrive
+  - Emits partial transcripts from Deepgram interim results
+  - Emits final transcript on utterance_end
+  - Handles Deepgram WS disconnect/reconnect gracefully
+- `src/__tests__/glasses-handler-streaming-stt.test.ts` -- integration with glasses handler:
+  - Partial `transcript` messages sent to client during recording
+  - Final transcript triggers Claude processing (same as batch path)
+  - `cancel` during streaming STT closes Deepgram session cleanly
+  - Fallback: if `sttMode: 'batch'`, handler uses existing buffer-then-transcribe path
+- Latency benchmark: first partial transcript appears within 500ms of first `audio_chunk`
+- No regression: batch path tests still pass, text-only path unaffected
+
+**Exit criteria**:
+- First partial transcript within defined latency target (~500ms)
+- Final transcript quality matches or improves on batch path
+- Cancel works during recording, transcribing, and speaking
+- No regression to text-only or batch voice path
+- Batch remains default in config until streaming passes soak testing
+
+**Design constraint**: Streaming STT adds a persistent WebSocket connection to Deepgram per active recording session. This is fine for single-user MVP but would need connection pooling for multi-user. The `VoiceProvider` interface already has the `transcribeStream()` method stubbed — this phase implements it.
+
+## Key Technical Decisions
+
+### Why Deepgram (Single Provider for STT + TTS)?
+
+| Criteria | Deepgram | Groq | OpenAI |
+|----------|----------|------|--------|
+| STT streaming | Yes (real-time WS) | No (batch only) | No |
+| TTS streaming | Yes | No | Yes |
+| STT quality | Nova-3 (excellent) | Whisper v3 (excellent) | Whisper (good) |
+| TTS quality | Aura-2 (good) | Orpheus (good, 200 char limit) | TTS-1-HD (very good) |
+| Latency | Very low | Very low (STT), unknown (TTS) | Moderate |
+| Single provider | Yes (both) | No (TTS too limited) | Yes (both, but no streaming STT) |
+
+Deepgram wins on streaming support for both directions. The `VoiceProvider` interface makes it swappable.
+
+### Why Kotlin Native (Not Cross-Platform)?
+
+The DAT SDK is a native Android library using Kotlin coroutines and `StateFlow`. Cross-platform frameworks (React Native, Flutter) would require building a native bridge module that wraps every SDK call -- adding complexity without benefit since:
+- The companion app is thin (transport + audio routing only)
+- iPad support would use a separate Swift thin client connecting to the same WebSocket server
+- The DAT SDK has no iOS equivalent API surface (iOS uses Swift's MWDATCore framework)
+
+### Why WebSocket (Not HTTP)?
+
+Real-time bidirectional audio streaming requires persistent connections. HTTP would add per-request overhead and can't push audio chunks server->client without polling. WebSocket provides:
+- Low-latency bidirectional framing
+- Natural fit for audio chunk streaming
+- Connection state management (know when client disconnects)
+- Compatible with Bun's native WebSocket support
+
+### Monorepo Layout
+
+Server (TypeScript/Bun) and Android app (Kotlin/Gradle) in one repo:
+- Shared `config.yaml` (server reads it, Android app just needs WS URL from it)
+- Atomic cross-stack changes (protocol changes update both sides in one commit)
+- Single CI pipeline
+- `docker-compose.yml` only builds/runs the server; Android builds separately via Gradle
+
+## Config Changes
+
+```yaml
+# Full config.yaml example with glasses
+repos:
+  claudeway:
+    url: https://github.com/user/claudeway.git
+
+defaults:
+  model: opus
+  systemPrompt: '...'
+  timeoutMs: 300000
+  responseMode: stream-update
+  processMode: oneshot
+
+botOwner: U12345678
+
+# NEW: Glasses WebSocket server config
+glassesServer:
+  enabled: true
+  port: 8765
+  auth:
+    tokens:
+      - token: '${GLASSES_AUTH_TOKEN}'
+        userId: glasses-petro
+        defaultChannel: glasses-default
+
+# NEW: Voice pipeline config (used by any voice-enabled adapter)
+voice:
+  provider: deepgram
+  deepgram:
+    apiKey: '${DEEPGRAM_API_KEY}'
+    sttModel: nova-3
+    ttsModel: aura-2
+    ttsVoice: asteria
+
+channels:
+  # Existing Slack channels (unchanged)
+  C12345678:
+    name: claudeway-dev
+    repo: claudeway
+    allowedUsers:
+      - U12345678
+
+  # NEW: Glasses channel (same permission model as Slack channels)
+  glasses-default:
+    name: my-glasses
+    repo: claudeway
+    model: opus
+    processMode: oneshot
+    allowedUsers:
+      - 'glasses-petro'    # Resolved from bearer token -> userId mapping
+```
+
+## Security Considerations
+
+- **Auth**: Bearer token in WS handshake (`Sec-WebSocket-Protocol` header or query param). Token maps to a `userId` + `defaultChannel` via `glassesServer.auth.tokens` config. Auth flow: bearer token -> lookup in config -> resolve `userId` -> use `userId` with `resolveUserPermissions()` against channel's `allowedUsers`. Single-user tool, so a shared secret suffices for MVP.
+- **Network**: WS server binds to `localhost` by default. For remote access (glasses on different network), use a reverse proxy with TLS or a tunnel (e.g., Tailscale).
+- **Permissions**: Glasses channels use the same `resolveUserPermissions` as Slack. The `userId` from the token mapping resolves against the channel's `allowedUsers` list, exactly like Slack user IDs.
+- **Voice data**: Audio is processed in-memory, streamed to Deepgram, not persisted to disk. Transcripts flow through the normal queue (file-based, same as Slack messages).
+
+## Out of Scope (Future)
+
+- Camera/photo input (Phase 6+)
+- iPad/iOS companion app
+- Multi-user glasses support
+- Custom voice triggers (replacing "Hey Meta")
+- Conversation history display on glasses HUD (Ray-Ban Display only)
+- Wake word detection (server-side)
+- Offline/edge STT

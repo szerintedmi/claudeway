@@ -342,7 +342,8 @@ function buildGitReadOnlyEnv(): Record<string, string> {
   };
 }
 
-/** Env vars that set git author/committer identity from Slack user profile. */
+// TODO: Parameterize email domain when adding non-Slack adapters (currently hardcoded .slack)
+/** Env vars that set git author/committer identity from user profile. */
 function buildGitAuthorEnv(userName: string, channelName: string): Record<string, string> {
   const email = `${userName.toLowerCase().replace(/\s+/g, '.')}@${channelName}.slack`;
   return {
@@ -375,6 +376,7 @@ function buildPermissionsEnv(options: ClaudeOptions): Record<string, string> {
   return env;
 }
 
+// TODO: Make secret stripping adapter-configurable when adding non-Slack adapters
 function spawnClaudeProcess(args: string[], cwd: string, extraEnv?: Record<string, string>) {
   const env = { ...process.env, ...extraEnv };
   delete env.CLAUDECODE;

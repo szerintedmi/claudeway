@@ -8,7 +8,7 @@ import {
   FULL_PERMISSIONS,
   READ_ONLY_PERMISSIONS,
 } from '../config.js';
-import { isUserAllowed } from '../slack-utils.js';
+import { isUserAllowed } from '../adapters/slack/utils.js';
 import { buildAccessRestrictions, appendAccessRestrictions } from '../prompt.js';
 
 describe('parseAllowedUsers', () => {

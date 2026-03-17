@@ -1,5 +1,6 @@
-import { markdownToSlackMrkdwn, splitMessage, isUserAllowed } from '../slack.js';
-import { formatDuration, formatTimeout, formatChannelConfig } from '../commands.js';
+import { markdownToSlackMrkdwn, splitMessage } from '../adapters/slack/formatting.js';
+import { isUserAllowed } from '../adapters/slack/utils.js';
+import { formatDuration, formatTimeout, formatChannelConfig } from '../adapters/slack/commands.js';
 
 describe('markdownToSlackMrkdwn', () => {
   describe('links', () => {

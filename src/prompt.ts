@@ -1,8 +1,10 @@
-import type { WebClient } from '@slack/web-api';
-
 import type { TriggerMode, UserPermissions } from './config.js';
-import type { ThreadMessage } from './thread.js';
-import { resolveUserName } from './thread.js';
+
+export interface ThreadMessage {
+  authorName: string;
+  isBot: boolean;
+  text: string;
+}
 
 export function shouldRespond(
   text: string | undefined,
@@ -45,29 +47,13 @@ export function extractMentionedUserIds(...texts: string[]): string[] {
 export function formatUserDirectory(
   entries: Array<{ id: string; name: string }>,
   botUserId?: string,
+  headerLabel = 'Slack user reference',
 ): string {
   if (entries.length === 0) return '';
   const lines = entries.map((e) =>
     e.id === botUserId ? `<@${e.id}> = ${e.name} (you)` : `<@${e.id}> = ${e.name}`,
   );
-  return '[Slack user reference]\n' + lines.join('\n') + '\n\n';
-}
-
-/**
- * Resolve user IDs to display names for the user directory.
- * Always includes `alwaysInclude` IDs (e.g. bot, sender) plus any
- * `<@U...>` mentions found in the given texts.
- */
-export async function resolveUserDirectory(
-  client: WebClient,
-  alwaysInclude: string[],
-  ...texts: string[]
-): Promise<Array<{ id: string; name: string }>> {
-  const mentioned = extractMentionedUserIds(...texts);
-  const allIds = [...new Set([...alwaysInclude, ...mentioned])];
-  if (allIds.length === 0) return [];
-  const names = await Promise.all(allIds.map((id) => resolveUserName(client, id)));
-  return allIds.map((id, i) => ({ id, name: names[i] }));
+  return `[${headerLabel}]\n` + lines.join('\n') + '\n\n';
 }
 
 export function buildPrompt(
