@@ -77,6 +77,48 @@
   // Track whether a tool event fired since the last text chunk for each requestId
   const toolSinceLastText = new Set();
 
+  // --- Audio playback (Web Audio API) ---
+  // Plays incoming PCM linear16 audio chunks as they arrive.
+  // Sample rate is read from each response_audio message (server sends it from config).
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  // Per-requestId playback state: { nextPlayTime, sampleRate }
+  const audioPlayback = new Map();
+
+  function playAudioChunk(requestId, b64Data, sampleRate) {
+    // Decode base64 to Int16 PCM, convert to Float32 for Web Audio API
+    const raw = atob(b64Data);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    const int16 = new Int16Array(bytes.buffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+    // Create audio buffer
+    const buffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+    buffer.getChannelData(0).set(float32);
+
+    // Schedule playback — chain chunks sequentially for gapless playback
+    let state = audioPlayback.get(requestId);
+    if (!state) {
+      state = { nextPlayTime: audioCtx.currentTime, sampleRate };
+      audioPlayback.set(requestId, state);
+    }
+    // If we've fallen behind, catch up to current time
+    if (state.nextPlayTime < audioCtx.currentTime) {
+      state.nextPlayTime = audioCtx.currentTime;
+    }
+
+    const source = audioCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioCtx.destination);
+    source.start(state.nextPlayTime);
+    state.nextPlayTime += buffer.duration;
+  }
+
+  function stopAudioPlayback(requestId) {
+    audioPlayback.delete(requestId);
+  }
+
   function log(cls, text) {
     const el = document.getElementById('messages');
     const time = new Date().toLocaleTimeString();
@@ -344,6 +386,12 @@
         const msg = JSON.parse(e.data);
         if (msg.type === 'response_text') {
           appendStreaming(msg.requestId, msg.text, msg.final);
+        } else if (msg.type === 'response_audio') {
+          // Resume audio context if suspended (browser autoplay policy)
+          if (audioCtx.state === 'suspended') audioCtx.resume();
+          playAudioChunk(msg.requestId, msg.data, msg.sampleRate);
+        } else if (msg.type === 'response_audio_end') {
+          stopAudioPlayback(msg.requestId);
         } else if (msg.type === 'transcript') {
           removeStatus(msg.requestId);
           log('transcript', 'Transcript: ' + msg.text);
@@ -351,6 +399,7 @@
           updateStatus(msg.requestId, msg);
         } else if (msg.type === 'error') {
           removeStatus(msg.requestId);
+          stopAudioPlayback(msg.requestId);
           log('error', 'Error: ' + msg.message);
         } else {
           log('received', JSON.stringify(msg));

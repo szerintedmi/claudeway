@@ -10,7 +10,7 @@ import {
   assembleBuffer,
   type AudioRecording,
 } from './audio-session.js';
-import type { VoiceProvider } from '../../core/voice.js';
+import type { VoiceProvider, TtsOptions } from '../../core/voice.js';
 import type { WsData } from './index.js';
 
 export interface GlassesSession {
@@ -23,6 +23,10 @@ export interface GlassesSession {
   queueKeyToRequestId: Map<string, string>;
   /** Active audio recordings keyed by client requestId */
   activeRecordings: Map<string, AudioRecording>;
+  /** AbortControllers for in-flight STT transcriptions, keyed by client requestId */
+  activeAbortControllers: Map<string, AbortController>;
+  /** Active responders for in-flight requests (processing/speaking), keyed by client requestId */
+  activeResponders: Map<string, GlassesChannelResponder>;
 }
 
 const sessions = new WeakMap<ServerWebSocket<WsData>, GlassesSession>();
@@ -50,12 +54,39 @@ export function initSession(
     pendingRequests: new Set(),
     queueKeyToRequestId: new Map(),
     activeRecordings: new Map(),
+    activeAbortControllers: new Map(),
+    activeResponders: new Map(),
   });
 }
 
 /** Build a server-scoped queue key that is unique across sessions */
 function queueKey(session: GlassesSession, requestId: string): string {
   return `${session.sessionId}:${requestId}`;
+}
+
+/** Cancel all active and pending work for a session (barge-in support) */
+function cancelActiveResponders(ws: ServerWebSocket<WsData>, session: GlassesSession): void {
+  // Cancel active responders (thinking or speaking)
+  for (const [reqId, responder] of session.activeResponders) {
+    responder.cancel();
+    session.activeResponders.delete(reqId);
+    sendMsg(ws, { type: 'error', requestId: reqId, message: 'cancelled' });
+  }
+  // Abort in-flight STT transcriptions
+  for (const [reqId, controller] of session.activeAbortControllers) {
+    controller.abort();
+    session.activeAbortControllers.delete(reqId);
+    sendMsg(ws, { type: 'error', requestId: reqId, message: 'cancelled' });
+  }
+  // Cancel pending queued requests (not yet picked up by engine)
+  for (const key of session.pendingRequests) {
+    const clientReqId = session.queueKeyToRequestId.get(key) ?? key;
+    session.queueKeyToRequestId.delete(key);
+    queueKeyToWs.delete(key);
+    dequeue(session.defaultChannel, key);
+    sendMsg(ws, { type: 'error', requestId: clientReqId, message: 'cancelled' });
+  }
+  session.pendingRequests.clear();
 }
 
 /**
@@ -66,6 +97,8 @@ function queueKey(session: GlassesSession, requestId: string): string {
 export function resolveResponder(
   queued: { ts: string },
   fallbackWs: ServerWebSocket<WsData>,
+  voiceProvider?: VoiceProvider,
+  ttsOptions?: TtsOptions,
 ): GlassesChannelResponder {
   const ownerWs = queueKeyToWs.get(queued.ts);
   const ownerSession = ownerWs ? sessions.get(ownerWs) : undefined;
@@ -78,7 +111,22 @@ export function resolveResponder(
   queueKeyToWs.delete(queued.ts);
 
   const targetWs = ownerWs ?? fallbackWs;
-  return new GlassesChannelResponder(targetWs, clientRequestId);
+  const responder = new GlassesChannelResponder(
+    targetWs,
+    clientRequestId,
+    voiceProvider,
+    ttsOptions,
+  );
+
+  // Track the active responder for cancellation, clean up when done
+  if (ownerSession) {
+    ownerSession.activeResponders.set(clientRequestId, responder);
+    responder.onDone(() => {
+      ownerSession.activeResponders.delete(clientRequestId);
+    });
+  }
+
+  return responder;
 }
 
 /** Shared helper: enqueue text and start drain if channel is idle */
@@ -87,6 +135,8 @@ function enqueueText(
   session: GlassesSession,
   requestId: string,
   text: string,
+  voiceProvider?: VoiceProvider,
+  ttsOptions?: TtsOptions,
 ): void {
   const channelId = session.defaultChannel;
   const key = queueKey(session, requestId);
@@ -102,13 +152,17 @@ function enqueueText(
     ts: key,
     threadTs: session.sessionId, // All requests in a session share Claude context
     queuedAt: new Date().toISOString(),
+    adapter: 'glasses',
   });
 
   if (channelBusy.has(channelId)) {
     return;
   }
 
-  drainChannel(channelId, (queued) => resolveResponder(queued, ws)).catch((err) => {
+  drainChannel(channelId, (queued) => {
+    const responder = resolveResponder(queued, ws, voiceProvider, ttsOptions);
+    return responder;
+  }).catch((err) => {
     console.error(`[glasses:${channelId}] Queue drain error:`, err);
   });
 }
@@ -131,15 +185,24 @@ async function handleAudioEnd(
   requestId: string,
   recording: AudioRecording,
   voiceProvider: VoiceProvider,
+  ttsOptions?: TtsOptions,
 ): Promise<void> {
   sendMsg(ws, { type: 'status', requestId, status: 'transcribing' });
 
+  const abortController = new AbortController();
+  session.activeAbortControllers.set(requestId, abortController);
+
   try {
     const buffer = assembleBuffer(recording);
-    const result = await voiceProvider.transcribe(buffer, recording.format);
+    const result = await voiceProvider.transcribe(buffer, recording.format, abortController.signal);
 
     // Session may have been closed during async transcription
     if (!sessions.has(ws)) return;
+
+    // Clean up abort controller
+    session.activeAbortControllers.delete(requestId);
+
+    if (abortController.signal.aborted) return;
 
     if (!result.transcript) {
       sendMsg(ws, { type: 'error', requestId, message: 'No speech detected' });
@@ -147,8 +210,15 @@ async function handleAudioEnd(
     }
 
     sendMsg(ws, { type: 'transcript', requestId, text: result.transcript, final: true });
-    enqueueText(ws, session, requestId, result.transcript);
+    enqueueText(ws, session, requestId, result.transcript, voiceProvider, ttsOptions);
   } catch (err) {
+    session.activeAbortControllers.delete(requestId);
+
+    if (abortController.signal.aborted) {
+      // Cancelled — error already sent by cancel handler
+      return;
+    }
+
     const message = err instanceof Error ? err.message : 'Transcription failed';
     console.error(`[glasses] STT error for ${requestId}:`, message);
     sendMsg(ws, { type: 'error', requestId, message: `Transcription failed: ${message}` });
@@ -159,6 +229,7 @@ export function handleMessage(
   ws: ServerWebSocket<WsData>,
   raw: string | Buffer,
   voiceProvider?: VoiceProvider,
+  ttsOptions?: TtsOptions,
 ): void {
   const session = sessions.get(ws);
   if (!session) return;
@@ -195,7 +266,9 @@ export function handleMessage(
         });
         break;
       }
-      enqueueText(ws, session, requestId, msg.text);
+      // Auto-cancel any active responder (barge-in)
+      cancelActiveResponders(ws, session);
+      enqueueText(ws, session, requestId, msg.text, voiceProvider, ttsOptions);
       break;
     }
 
@@ -218,6 +291,8 @@ export function handleMessage(
         });
         break;
       }
+      // Auto-cancel any active responder (barge-in)
+      cancelActiveResponders(ws, session);
       session.activeRecordings.set(requestId, createRecording(requestId, format));
       break;
     }
@@ -268,7 +343,7 @@ export function handleMessage(
         break;
       }
 
-      handleAudioEnd(ws, session, requestId, recording, voiceProvider).catch((err) => {
+      handleAudioEnd(ws, session, requestId, recording, voiceProvider, ttsOptions).catch((err) => {
         console.error(`[glasses] Unexpected error in handleAudioEnd:`, err);
       });
       break;
@@ -281,6 +356,24 @@ export function handleMessage(
       // Cancel active recording if any
       if (session.activeRecordings.has(requestId)) {
         session.activeRecordings.delete(requestId);
+        sendMsg(ws, { type: 'error', requestId, message: 'cancelled' });
+        break;
+      }
+
+      // Cancel in-flight STT transcription
+      const abortController = session.activeAbortControllers.get(requestId);
+      if (abortController) {
+        abortController.abort();
+        session.activeAbortControllers.delete(requestId);
+        sendMsg(ws, { type: 'error', requestId, message: 'cancelled' });
+        break;
+      }
+
+      // Cancel active responder (thinking or speaking)
+      const responder = session.activeResponders.get(requestId);
+      if (responder) {
+        responder.cancel();
+        session.activeResponders.delete(requestId);
         sendMsg(ws, { type: 'error', requestId, message: 'cancelled' });
         break;
       }
@@ -304,6 +397,18 @@ export function handleClose(ws: ServerWebSocket<WsData>): void {
 
   // Clean up active recordings (no STT for orphaned audio)
   session.activeRecordings.clear();
+
+  // Abort any in-flight transcriptions
+  for (const controller of session.activeAbortControllers.values()) {
+    controller.abort();
+  }
+  session.activeAbortControllers.clear();
+
+  // Cancel active responders
+  for (const responder of session.activeResponders.values()) {
+    responder.cancel();
+  }
+  session.activeResponders.clear();
 
   for (const key of session.pendingRequests) {
     dequeue(session.defaultChannel, key);

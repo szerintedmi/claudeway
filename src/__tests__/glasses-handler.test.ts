@@ -199,10 +199,25 @@ describe('resolveResponder cross-session routing', () => {
 
 // --- Audio handler tests ---
 
+function makeMockTtsStream() {
+  return {
+    sendText() {},
+    flush() {},
+    async finalize() {},
+    clear() {},
+    abort() {},
+    onAudio() {},
+    onError() {},
+  };
+}
+
 function makeMockVoiceProvider(transcript = 'hello world'): VoiceProvider {
   return {
     async transcribe(): Promise<TranscriptionResult> {
       return { transcript, confidence: 0.99 };
+    },
+    createTtsStream() {
+      return makeMockTtsStream();
     },
   };
 }
@@ -211,6 +226,9 @@ function makeMockFailingVoiceProvider(errorMessage: string): VoiceProvider {
   return {
     async transcribe(): Promise<TranscriptionResult> {
       throw new Error(errorMessage);
+    },
+    createTtsStream() {
+      return makeMockTtsStream();
     },
   };
 }
@@ -460,6 +478,9 @@ describe('glasses handler audio', () => {
         await new Promise((r) => setTimeout(r, 100));
         return { transcript: 'ghost', confidence: 0.99 };
       },
+      createTtsStream() {
+        return makeMockTtsStream();
+      },
     };
 
     handleMessage(asWs(ws), audioStartMsg('req-1'), slowProvider);
@@ -528,11 +549,15 @@ describe('glasses handler audio', () => {
     expect(transcripts[1].requestId).toBe('req-2');
   });
 
-  it('cancel after audio_end is silently ignored (transcription in-flight)', async () => {
+  it('cancel after audio_end aborts in-flight transcription', async () => {
     const slowProvider: VoiceProvider = {
-      async transcribe() {
+      async transcribe(_audio, _format, signal?) {
         await new Promise((r) => setTimeout(r, 100));
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
         return { transcript: 'hello', confidence: 0.99 };
+      },
+      createTtsStream() {
+        return makeMockTtsStream();
       },
     };
 
@@ -541,22 +566,21 @@ describe('glasses handler audio', () => {
     handleMessage(asWs(ws), audioChunkMsg('req-1', b64), slowProvider);
     handleMessage(asWs(ws), audioEndMsg('req-1'), slowProvider);
 
-    // Cancel immediately — recording already deleted, transcription in-flight
+    // Cancel while transcription is in-flight
     handleMessage(asWs(ws), JSON.stringify({ type: 'cancel', requestId: 'req-1' }), slowProvider);
 
-    // No cancelled error sent (recording gone, no pending queue item yet)
+    // Cancel error sent immediately via abort controller
     const immediateMessages = sent.map(parse);
     const cancelError = immediateMessages.find(
       (m: Record<string, unknown>) => m.type === 'error' && m.message === 'cancelled',
     );
-    expect(cancelError).toBeUndefined();
+    expect(cancelError).toBeDefined();
 
-    // Transcription still completes normally
+    // Transcription does NOT complete (aborted)
     await new Promise((r) => setTimeout(r, 200));
     const allMessages = sent.map(parse);
     const transcript = allMessages.find((m: Record<string, unknown>) => m.type === 'transcript');
-    expect(transcript).toBeDefined();
-    expect(transcript!.text).toBe('hello');
+    expect(transcript).toBeUndefined();
   });
 
   it('rejects audio_start when same requestId is already pending as text', () => {

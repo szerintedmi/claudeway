@@ -58,9 +58,12 @@ describe('GlassesChannelResponder', () => {
     expect(msg.requestId).toBe('req-1');
   });
 
-  it('onComplete is a no-op', async () => {
+  it('onComplete sends no messages but calls onDone callback', async () => {
+    let doneCallCount = 0;
+    responder.onDone(() => doneCallCount++);
     await responder.onComplete();
     expect(sent).toHaveLength(0);
+    expect(doneCallCount).toBe(1);
   });
 
   it('uploadFile sends a text note with filename', async () => {

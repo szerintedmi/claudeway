@@ -68,6 +68,19 @@ export interface TranscriptMessage {
   final: boolean;
 }
 
+export interface ResponseAudioMessage {
+  type: 'response_audio';
+  requestId: string;
+  data: string; // base64-encoded audio bytes
+  encoding: string; // e.g. 'linear16'
+  sampleRate: number; // e.g. 24000
+}
+
+export interface ResponseAudioEndMessage {
+  type: 'response_audio_end';
+  requestId: string;
+}
+
 export interface ErrorMessage {
   type: 'error';
   requestId: string | null;
@@ -81,6 +94,8 @@ export interface PongMessage {
 export type GlassesServerMessage =
   | StatusMessage
   | ResponseTextMessage
+  | ResponseAudioMessage
+  | ResponseAudioEndMessage
   | TranscriptMessage
   | ErrorMessage
   | PongMessage;

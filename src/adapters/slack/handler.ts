@@ -257,9 +257,27 @@ export function drainAllPending(app: App): void {
     const pending = getPending();
     if (pending.length === 0) return;
 
-    console.log(`[startup] Found ${pending.length} queued message(s) from before restart`);
+    // Discard non-Slack messages (e.g. glasses) — the WebSocket is gone after restart
+    const discarded: string[] = [];
+    const slackPending = pending.filter((m) => {
+      if (m.adapter && m.adapter !== 'slack') {
+        dequeue(m.channelId, m.ts);
+        discarded.push(m.adapter);
+        return false;
+      }
+      return true;
+    });
+    if (discarded.length > 0) {
+      console.log(
+        `[startup] Discarded ${discarded.length} non-Slack queued message(s) (${[...new Set(discarded)].join(', ')})`,
+      );
+    }
 
-    const channels = [...new Set(pending.map((m) => m.channelId))];
+    if (slackPending.length === 0) return;
+
+    console.log(`[startup] Found ${slackPending.length} queued message(s) from before restart`);
+
+    const channels = [...new Set(slackPending.map((m) => m.channelId))];
     for (const channelId of channels) {
       if (channelBusy.has(channelId)) continue;
       const client = app.client;

@@ -8,6 +8,8 @@ export interface IStreamingResponder {
   onToolEvent(event: ToolEventPayload): void;
   finish(): Promise<void>;
   getFullText(): string;
+  /** Called after the Claude process is spawned, providing a kill function for cancellation */
+  onProcessSpawned?(kill: () => void): void;
 }
 
 /**

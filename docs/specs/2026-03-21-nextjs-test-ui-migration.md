@@ -11,18 +11,25 @@ The dashboard-v3 project uses **Streamdown** (v2.5.0), a React-only markdown ren
 - Docker support must be maintained
 - README updates needed
 
-## Approach
+## Migration Strategy: Parallel Build with Feature Parity Verification
 
-Create a Next.js app inside `src/adapters/glasses/test-ui/` that replaces the single `index.html` file. The Bun server serves the static export in production. Also add a standalone glasses entry point so it can run without Slack.
+The old `index.html` UI stays fully functional throughout the migration. The new Next.js app is built alongside it in the same directory. Both UIs are served simultaneously on different routes so they can be compared side-by-side for feature parity and behaviour testing. The old UI is only removed after the new one is verified to match or exceed it in all capabilities.
+
+**Key principles:**
+- **No breaking changes** — the old UI keeps working at its current routes until explicitly removed
+- **Side-by-side testing** — both UIs connect to the same WebSocket server, making it easy to send the same message and compare rendering, tool status, streaming behaviour, and audio
+- **Feature parity checklist** — a concrete checklist (see Phase 4) must be fully ticked before the old UI is removed
+- **Old UI as reference implementation** — during development, the old `index.html` serves as the behavioural spec for how messages, streaming, tool status, and audio should work
 
 ---
 
-## Phase 1: Scaffold Next.js App
+## Phase 1: Scaffold Next.js App (Alongside Old UI)
 
 1. **Create Next.js project** at `src/adapters/glasses/test-ui/`
    - Use `npx create-next-app@latest` with App Router, TypeScript, CSS Modules
    - No Tailwind (keep styling consistent with current dark theme)
    - Static export mode (`output: 'export'` in next.config) so Bun can serve the built files
+   - The existing `index.html` stays untouched in the same directory
 
 2. **Install dependencies:**
    - `streamdown` (^2.5.0)
@@ -85,23 +92,75 @@ test-ui/app/
 - Port table scroll-shadow technique from dashboard-v3 SCSS
 - Override Streamdown default styles to match dark theme (code blocks `#0f3460`, links `#74b9ff`, etc.)
 
-## Phase 3: Integrate with Bun Server
+## Phase 3: Serve Both UIs in Parallel
 
-Modify `src/adapters/glasses/index.ts` to serve the Next.js static export:
+Modify `src/adapters/glasses/index.ts` to serve **both** UIs simultaneously:
 
-- **Current:** Serves `test-ui/index.html` as a single file response for `/`, `/test-ui`, `/test-ui/`
-- **New:** Serve files from `test-ui/out/` directory (Next.js static export output)
-  - `/` and `/test-ui` → `test-ui/out/index.html`
+- **Old UI (unchanged):** `/legacy` and `/legacy/` → serves `test-ui/index.html`
+- **New UI:** `/` and `/test-ui` and `/test-ui/` → serves Next.js static export from `test-ui/out/`
   - Static assets (`_next/*`) → serve from `test-ui/out/_next/`
-- WebSocket endpoint (`/ws`) remains unchanged
+- **Fallback:** If `test-ui/out/` doesn't exist yet (Next.js not built), `/` falls back to serving `index.html` so the server always works
+- WebSocket endpoint (`/ws`) remains unchanged — both UIs connect to the same backend
 - No protocol changes needed — all message types stay the same
+
+### Route Summary During Migration
+| Route | Serves | Purpose |
+|-------|--------|---------|
+| `/` | Next.js `out/index.html` (fallback: `index.html`) | Default — new UI |
+| `/legacy` | `index.html` | Old UI for comparison |
+| `/ws` | WebSocket | Shared by both UIs |
 
 ### Dev Workflow
 - `cd src/adapters/glasses/test-ui && npm run dev` — Next.js dev server on a separate port
 - Point the UI's WS URL input to the Bun server (already configurable in the UI)
 - `npm run build` in test-ui → generates `out/` for production
+- Open both `/` and `/legacy` in separate browser tabs to compare behaviour side-by-side
 
-## Phase 4: Standalone Glasses Entry Point
+## Phase 4: Feature Parity Verification
+
+Before removing the old UI, every item in this checklist must pass by comparing the new Next.js UI against the old `index.html` side-by-side:
+
+### Feature Parity Checklist
+- [ ] **Connection:** Connect/disconnect via URL + auth token, green/red status dot
+- [ ] **Auth token persistence:** Token saved to and restored from `localStorage` (`glasses-auth-token`)
+- [ ] **Text messaging:** Send text, receive streaming response with requestId tracking
+- [ ] **Streaming text:** Incremental text appears character-by-character, finalizes with markdown render
+- [ ] **Markdown rendering:** Code blocks, inline code, bold, italic, links, paragraphs (at minimum matching old behaviour — new UI should render more via Streamdown: tables, headings, nested lists, etc.)
+- [ ] **Tool status spinners:** `status` messages show spinning gear with tool name + keyArg
+- [ ] **Tool completion steps:** Completed tools show green dot with `ToolName(keyArg)` label
+- [ ] **Agent nesting:** Agent tool events show spinner, sub-detail lines, completion with usage stats
+- [ ] **Sub-agent progress:** `subagent_progress` updates detail lines under active agent
+- [ ] **Sub-agent completion:** `subagent_completed` replaces spinner with dot + usage stats
+- [ ] **Tool-to-text transitions:** When tools run between text chunks, previous text block finalizes and a new one starts
+- [ ] **Error messages:** `error` type messages display in red
+- [ ] **System messages:** Connection events display in yellow
+- [ ] **Transcript messages:** Voice transcriptions display in italic
+- [ ] **Audio recording:** Mic button starts/stops recording with pulse animation
+- [ ] **Audio encoding:** Recording produces base64 webm/opus chunks sent via `audio_start`/`audio_chunk`/`audio_end`
+- [ ] **Auto-scroll:** Message area scrolls to bottom on new content
+- [ ] **Keyboard shortcut:** Enter key sends message
+- [ ] **Disabled state:** Input/send/mic disabled when disconnected
+
+### Behaviour Comparison Test Process
+1. Open old UI at `/legacy` and new UI at `/` in side-by-side browser windows
+2. Connect both to the same WebSocket server with the same auth token
+3. Send identical messages from both UIs (one at a time — they share the same session)
+4. Compare: streaming appearance, tool status rendering, final markdown output, error handling
+5. Test audio recording from both UIs
+6. Verify all checklist items above
+
+## Phase 5: Remove Old UI
+
+Only after Phase 4 checklist is fully complete:
+
+1. **Delete `src/adapters/glasses/test-ui/index.html`**
+2. **Remove legacy routes** from `src/adapters/glasses/index.ts`:
+   - Remove `/legacy` route
+   - Remove fallback-to-`index.html` logic
+   - `/` now only serves Next.js static export
+3. **Update any references** to `index.html` in tests, docs, or comments
+
+## Phase 6: Standalone Glasses Entry Point
 
 Currently both adapters start from `src/index.ts` and at least one must be configured. To run glasses independently:
 
@@ -125,7 +184,7 @@ Currently both adapters start from `src/index.ts` and at least one must be confi
    - Has its own protocol types in `src/adapters/glasses/protocol.ts`
    - Only coupling is the shared startup sequence in `src/index.ts`
 
-## Phase 5: Docker Support
+## Phase 7: Docker Support
 
 The current Docker setup (`Dockerfile`, `docker-compose.yml`) runs the main `bun start` entry point. Changes needed:
 
@@ -156,7 +215,7 @@ The current Docker setup (`Dockerfile`, `docker-compose.yml`) runs the main `bun
 
 3. **Ensure `test-ui/node_modules` is not in `.dockerignore`** — or better, add a multi-stage build where the test-ui is built in a separate stage and only `out/` is copied to the final image.
 
-## Phase 6: README & Documentation Updates
+## Phase 8: README & Documentation Updates
 
 1. **Update main `README.md`** with:
    - Glasses adapter section: what it is, how to configure it
@@ -170,7 +229,7 @@ The current Docker setup (`Dockerfile`, `docker-compose.yml`) runs the main `bun
 
 3. **Note for future:** This test UI is effectively becoming a proper glasses channel UI. Consider renaming from "test-ui" to just "ui" or "web-ui" in a future iteration once it's stable.
 
-## Phase 7: Build Scripts
+## Phase 9: Build Scripts
 
 Add to root `package.json`:
 ```json
@@ -190,14 +249,17 @@ Add to root `package.json`:
 
 1. **Build:** `cd src/adapters/glasses/test-ui && npm install && npm run build` succeeds
 2. **Standalone start:** `bun run start:glasses` starts without Slack tokens configured
-3. **Serve:** Navigate to `http://localhost:8765/` → Next.js app loads
-4. **Connect:** Enter WS URL + auth token → green status dot
-5. **Text messaging:** Send a message → streaming response renders with Streamdown (blur-in animation during stream, static render on completion)
-6. **Markdown quality:** Response with tables, code blocks, nested lists, headings all render correctly
-7. **Tool status:** Tool events show spinners, Agent nesting works, checkmarks on completion
-8. **Audio:** Mic button records → transcription → response (if voice provider configured)
-9. **Docker:** `docker compose up claudeway-glasses` starts glasses-only service, UI accessible
-10. **Existing tests pass:** `bun test` — glasses protocol/handler/responder tests unaffected
+3. **Serve both UIs:** Navigate to `http://localhost:8765/` → Next.js app loads; `/legacy` → old HTML UI loads
+4. **Connect:** Enter WS URL + auth token → green status dot (both UIs)
+5. **Text messaging:** Send a message → streaming response renders with Streamdown in new UI, regex markdown in old UI
+6. **Side-by-side comparison:** Same message produces equivalent (or better) output in new UI vs old
+7. **Markdown quality:** Response with tables, code blocks, nested lists, headings all render correctly in new UI
+8. **Tool status:** Tool events show spinners, Agent nesting works, checkmarks on completion (both UIs)
+9. **Audio:** Mic button records → transcription → response (if voice provider configured) (both UIs)
+10. **Feature parity checklist:** All items in Phase 4 checklist pass
+11. **Old UI removal:** After parity confirmed, `/legacy` route removed, old `index.html` deleted
+12. **Docker:** `docker compose up claudeway-glasses` starts glasses-only service, UI accessible
+13. **Existing tests pass:** `bun test` — glasses protocol/handler/responder tests unaffected
 
 ## Files to Create
 - `src/adapters/glasses/test-ui/package.json`
@@ -211,10 +273,13 @@ Add to root `package.json`:
 - `src/index-glasses.ts` — standalone glasses entry point
 
 ## Files to Modify
-- `src/adapters/glasses/index.ts` — serve static export instead of single HTML file
+- `src/adapters/glasses/index.ts` — serve both UIs in parallel (old at `/legacy`, new at `/`)
 - `.gitignore` — add test-ui build artifacts
 - `Dockerfile` — add test-ui build step
 - `docker-compose.yml` — add glasses-only service
 - `package.json` — add build/dev/start scripts
 - `README.md` — glasses adapter docs
 - `CLAUDE.md` — architecture and scripts updates
+
+## Files to Delete (Phase 5 only, after parity verified)
+- `src/adapters/glasses/test-ui/index.html`

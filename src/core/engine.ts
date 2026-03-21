@@ -171,6 +171,9 @@ export async function processQueuedMessage(
         ...(processMode === 'persistent' ? { tempBaseDir: baseDir } : {}),
         onTextDelta: (text: string) => sr.onTextDelta(text),
         onToolEvent: (event: import('../claude.js').ToolEventPayload) => sr.onToolEvent(event),
+        onProcessSpawned: sr.onProcessSpawned
+          ? (kill: () => void) => sr.onProcessSpawned!(kill)
+          : undefined,
         ...permCtx,
       };
 

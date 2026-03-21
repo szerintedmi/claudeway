@@ -32,6 +32,8 @@ export interface ClaudeOptions {
 export interface ClaudeStreamingOptions extends ClaudeOptions {
   onTextDelta: (text: string) => void;
   onToolEvent?: (event: ToolEventPayload) => void;
+  /** Called after the Claude process is spawned, providing a kill function (SIGTERM) */
+  onProcessSpawned?: (kill: () => void) => void;
 }
 
 export interface ClaudeResult {
@@ -540,9 +542,18 @@ function runClaudeStreamingProcess(
   regKey: string,
   onToolEvent?: (event: ToolEventPayload) => void,
   extraEnv?: Record<string, string>,
+  onProcessSpawned?: (kill: () => void) => void,
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
     const proc = spawnClaudeProcess(args, cwd, extraEnv);
+
+    onProcessSpawned?.(() => {
+      try {
+        proc.kill('SIGTERM');
+      } catch {
+        // Process may have already exited
+      }
+    });
 
     processRegistry.set(regKey, {
       proc,
@@ -835,6 +846,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
       regKey,
       options.onToolEvent,
       permEnv,
+      options.onProcessSpawned,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -854,6 +866,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
         regKey,
         options.onToolEvent,
         permEnv,
+        options.onProcessSpawned,
       );
     }
     throw err;
@@ -1180,6 +1193,15 @@ export async function runClaudePersistentStreaming(
       cost: null,
       toolAccum: null,
     };
+
+    // Provide kill callback for cancellation
+    options.onProcessSpawned?.(() => {
+      try {
+        entry!.proc.kill('SIGTERM');
+      } catch {
+        // Process may have already exited
+      }
+    });
 
     entry.proc.stdin!.write(inputLine, (err) => {
       if (err) {

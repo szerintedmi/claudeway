@@ -127,8 +127,9 @@ export interface GlassesServerConfig {
 export interface DeepgramConfig {
   apiKey: string;
   sttModel?: string; // defaults to 'nova-3'
-  ttsModel?: string; // Phase 3
-  ttsVoice?: string; // Phase 3
+  ttsModel?: string; // defaults to 'aura-2-thalia-en'
+  ttsVoice?: string; // unused for now — voice embedded in model name
+  ttsSampleRate?: number; // defaults to 24000
 }
 
 export interface VoiceConfig {

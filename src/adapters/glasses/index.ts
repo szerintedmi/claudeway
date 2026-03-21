@@ -2,7 +2,7 @@ import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { loadConfig, resolveGlassesToken, interpolateEnvVars, type Config } from '../../config.js';
 import { initSession, handleMessage, handleClose } from './handler.js';
-import type { VoiceProvider } from '../../core/voice.js';
+import type { VoiceProvider, TtsOptions } from '../../core/voice.js';
 import { DeepgramVoiceProvider } from '../../core/voice-deepgram.js';
 
 export interface WsData {
@@ -21,6 +21,17 @@ function createVoiceProvider(cfg: Config): VoiceProvider | undefined {
   return new DeepgramVoiceProvider(apiKey, sttModel);
 }
 
+/** Build TTS options from config. Returns undefined if voice not configured. */
+function buildTtsOptions(cfg: Config): TtsOptions | undefined {
+  if (!cfg.voice) return undefined;
+
+  return {
+    model: cfg.voice.deepgram.ttsModel ?? 'aura-2-thalia-en',
+    encoding: 'linear16',
+    sampleRate: cfg.voice.deepgram.ttsSampleRate ?? 24000,
+  };
+}
+
 export function startGlassesAdapter(config?: Config): void {
   const cfg = config ?? loadConfig();
   const serverConfig = cfg.glassesServer;
@@ -34,6 +45,7 @@ export function startGlassesAdapter(config?: Config): void {
     );
   }
   const voiceProvider = createVoiceProvider(cfg)!;
+  const ttsOptions = buildTtsOptions(cfg);
   const port = serverConfig.port;
 
   Bun.serve<WsData>({
@@ -106,7 +118,7 @@ export function startGlassesAdapter(config?: Config): void {
       },
 
       message(ws, raw) {
-        handleMessage(ws, raw, voiceProvider);
+        handleMessage(ws, raw, voiceProvider, ttsOptions);
       },
 
       close(ws) {
@@ -122,8 +134,10 @@ export function startGlassesAdapter(config?: Config): void {
 
   console.log(`[glasses] WebSocket server listening on port ${port}`);
   if (cfg.voice) {
+    const ttsModel = cfg.voice.deepgram.ttsModel ?? 'aura-2-thalia-en';
+    const ttsSampleRate = cfg.voice.deepgram.ttsSampleRate ?? 24000;
     console.log(
-      `[glasses] Voice provider: ${cfg.voice.provider} (${cfg.voice.deepgram.sttModel ?? 'nova-3'})`,
+      `[glasses] Voice provider: ${cfg.voice.provider} (STT: ${cfg.voice.deepgram.sttModel ?? 'nova-3'}, TTS: ${ttsModel}@${ttsSampleRate}Hz)`,
     );
   }
 }
