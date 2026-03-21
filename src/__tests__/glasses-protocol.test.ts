@@ -62,6 +62,72 @@ describe('parseClientMessage', () => {
   it('rejects cancel message without requestId', () => {
     expect(() => parseClientMessage('{"type":"cancel"}')).toThrow('Missing or empty requestId');
   });
+
+  // --- Audio message parsing ---
+
+  it('parses a valid audio_start message', () => {
+    const msg = parseClientMessage(
+      '{"type":"audio_start","requestId":"r1","format":{"mimeType":"audio/webm;codecs=opus"}}',
+    );
+    expect(msg).toEqual({
+      type: 'audio_start',
+      requestId: 'r1',
+      format: { mimeType: 'audio/webm;codecs=opus' },
+    });
+  });
+
+  it('parses audio_start with optional format fields', () => {
+    const msg = parseClientMessage(
+      JSON.stringify({
+        type: 'audio_start',
+        requestId: 'r1',
+        format: { mimeType: 'audio/l16', sampleRate: 16000, channels: 1, encoding: 'linear16' },
+      }),
+    );
+    expect(msg).toEqual({
+      type: 'audio_start',
+      requestId: 'r1',
+      format: { mimeType: 'audio/l16', sampleRate: 16000, channels: 1, encoding: 'linear16' },
+    });
+  });
+
+  it('rejects audio_start without format', () => {
+    expect(() => parseClientMessage('{"type":"audio_start","requestId":"r1"}')).toThrow(
+      'Missing format object',
+    );
+  });
+
+  it('rejects audio_start with empty mimeType', () => {
+    expect(() =>
+      parseClientMessage('{"type":"audio_start","requestId":"r1","format":{"mimeType":""}}'),
+    ).toThrow('Missing or empty format.mimeType');
+  });
+
+  it('parses a valid audio_chunk message', () => {
+    const msg = parseClientMessage('{"type":"audio_chunk","requestId":"r1","data":"AQID"}');
+    expect(msg).toEqual({ type: 'audio_chunk', requestId: 'r1', data: 'AQID' });
+  });
+
+  it('rejects audio_chunk without data', () => {
+    expect(() => parseClientMessage('{"type":"audio_chunk","requestId":"r1"}')).toThrow(
+      'Missing or empty data field',
+    );
+  });
+
+  it('rejects audio_chunk with empty data', () => {
+    expect(() => parseClientMessage('{"type":"audio_chunk","requestId":"r1","data":""}')).toThrow(
+      'Missing or empty data field',
+    );
+  });
+
+  it('parses a valid audio_end message', () => {
+    const msg = parseClientMessage('{"type":"audio_end","requestId":"r1"}');
+    expect(msg).toEqual({ type: 'audio_end', requestId: 'r1' });
+  });
+
+  it('rejects audio_end without requestId', () => {
+    expect(() => parseClientMessage('{"type":"audio_end"}')).toThrow('Missing or empty requestId');
+  });
 });
 
 describe('serializeServerMessage', () => {

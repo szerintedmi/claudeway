@@ -4,6 +4,13 @@ import { enqueue, dequeue } from '../../queue.js';
 import { drainChannel, channelBusy } from '../../core/engine.js';
 import { parseClientMessage, serializeServerMessage } from './protocol.js';
 import { GlassesChannelResponder } from './responder.js';
+import {
+  createRecording,
+  appendChunk,
+  assembleBuffer,
+  type AudioRecording,
+} from './audio-session.js';
+import type { VoiceProvider } from '../../core/voice.js';
 import type { WsData } from './index.js';
 
 export interface GlassesSession {
@@ -14,6 +21,8 @@ export interface GlassesSession {
   pendingRequests: Set<string>;
   /** Maps server-scoped queue key -> client requestId for response routing */
   queueKeyToRequestId: Map<string, string>;
+  /** Active audio recordings keyed by client requestId */
+  activeRecordings: Map<string, AudioRecording>;
 }
 
 const sessions = new WeakMap<ServerWebSocket<WsData>, GlassesSession>();
@@ -40,6 +49,7 @@ export function initSession(
     defaultChannel,
     pendingRequests: new Set(),
     queueKeyToRequestId: new Map(),
+    activeRecordings: new Map(),
   });
 }
 
@@ -71,7 +81,85 @@ export function resolveResponder(
   return new GlassesChannelResponder(targetWs, clientRequestId);
 }
 
-export function handleMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer): void {
+/** Shared helper: enqueue text and start drain if channel is idle */
+function enqueueText(
+  ws: ServerWebSocket<WsData>,
+  session: GlassesSession,
+  requestId: string,
+  text: string,
+): void {
+  const channelId = session.defaultChannel;
+  const key = queueKey(session, requestId);
+
+  session.pendingRequests.add(key);
+  session.queueKeyToRequestId.set(key, requestId);
+  queueKeyToWs.set(key, ws);
+
+  enqueue({
+    channelId,
+    userId: session.userId,
+    text,
+    ts: key,
+    threadTs: session.sessionId, // All requests in a session share Claude context
+    queuedAt: new Date().toISOString(),
+  });
+
+  if (channelBusy.has(channelId)) {
+    return;
+  }
+
+  drainChannel(channelId, (queued) => resolveResponder(queued, ws)).catch((err) => {
+    console.error(`[glasses:${channelId}] Queue drain error:`, err);
+  });
+}
+
+function sendMsg(
+  ws: ServerWebSocket<WsData>,
+  msg: Parameters<typeof serializeServerMessage>[0],
+): void {
+  try {
+    ws.send(serializeServerMessage(msg));
+  } catch {
+    // Connection may have closed
+  }
+}
+
+/** Handle audio_end: transcribe and enqueue (async, fire-and-forget) */
+async function handleAudioEnd(
+  ws: ServerWebSocket<WsData>,
+  session: GlassesSession,
+  requestId: string,
+  recording: AudioRecording,
+  voiceProvider: VoiceProvider,
+): Promise<void> {
+  sendMsg(ws, { type: 'status', requestId, status: 'transcribing' });
+
+  try {
+    const buffer = assembleBuffer(recording);
+    const result = await voiceProvider.transcribe(buffer, recording.format);
+
+    // Session may have been closed during async transcription
+    if (!sessions.has(ws)) return;
+
+    if (!result.transcript) {
+      sendMsg(ws, { type: 'error', requestId, message: 'No speech detected' });
+      return;
+    }
+
+    sendMsg(ws, { type: 'transcript', requestId, text: result.transcript, final: true });
+    enqueueText(ws, session, requestId, result.transcript);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Transcription failed';
+    console.error(`[glasses] STT error for ${requestId}:`, message);
+    sendMsg(ws, { type: 'error', requestId, message: `Transcription failed: ${message}` });
+  }
+}
+
+export function handleMessage(
+  ws: ServerWebSocket<WsData>,
+  raw: string | Buffer,
+  voiceProvider?: VoiceProvider,
+): void {
   const session = sessions.get(ws);
   if (!session) return;
 
@@ -97,29 +185,91 @@ export function handleMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer)
       break;
 
     case 'text': {
-      const { requestId, text } = msg;
-      const channelId = session.defaultChannel;
+      const { requestId } = msg;
       const key = queueKey(session, requestId);
+      if (session.pendingRequests.has(key) || session.activeRecordings.has(requestId)) {
+        sendMsg(ws, {
+          type: 'error',
+          requestId,
+          message: 'Duplicate requestId: already in-flight',
+        });
+        break;
+      }
+      enqueueText(ws, session, requestId, msg.text);
+      break;
+    }
 
-      session.pendingRequests.add(key);
-      session.queueKeyToRequestId.set(key, requestId);
-      queueKeyToWs.set(key, ws);
+    case 'audio_start': {
+      const { requestId, format } = msg;
+      const key = queueKey(session, requestId);
+      if (session.activeRecordings.has(requestId)) {
+        sendMsg(ws, {
+          type: 'error',
+          requestId,
+          message: 'Recording already in progress for this requestId',
+        });
+        break;
+      }
+      if (session.pendingRequests.has(key)) {
+        sendMsg(ws, {
+          type: 'error',
+          requestId,
+          message: 'Duplicate requestId: already in-flight',
+        });
+        break;
+      }
+      session.activeRecordings.set(requestId, createRecording(requestId, format));
+      break;
+    }
 
-      enqueue({
-        channelId,
-        userId: session.userId,
-        text,
-        ts: key,
-        threadTs: key,
-        queuedAt: new Date().toISOString(),
-      });
+    case 'audio_chunk': {
+      const { requestId, data: b64Data } = msg;
+      const recording = session.activeRecordings.get(requestId);
+      if (!recording) {
+        sendMsg(ws, {
+          type: 'error',
+          requestId,
+          message: 'audio_chunk received without audio_start',
+        });
+        break;
+      }
+      const chunk = Buffer.from(b64Data, 'base64');
+      if (!appendChunk(recording, chunk)) {
+        session.activeRecordings.delete(requestId);
+        sendMsg(ws, {
+          type: 'error',
+          requestId,
+          message: 'Audio recording too large (exceeded 120s limit)',
+        });
+      }
+      break;
+    }
 
-      if (channelBusy.has(channelId)) {
-        return;
+    case 'audio_end': {
+      const { requestId } = msg;
+      const recording = session.activeRecordings.get(requestId);
+      if (!recording) {
+        sendMsg(ws, {
+          type: 'error',
+          requestId,
+          message: 'audio_end received without audio_start',
+        });
+        break;
+      }
+      // Delete recording before async work — no more chunks possible for this requestId
+      session.activeRecordings.delete(requestId);
+
+      if (!voiceProvider) {
+        sendMsg(ws, {
+          type: 'error',
+          requestId,
+          message: 'Voice provider not configured',
+        });
+        break;
       }
 
-      drainChannel(channelId, (queued) => resolveResponder(queued, ws)).catch((err) => {
-        console.error(`[glasses:${channelId}] Queue drain error:`, err);
+      handleAudioEnd(ws, session, requestId, recording, voiceProvider).catch((err) => {
+        console.error(`[glasses] Unexpected error in handleAudioEnd:`, err);
       });
       break;
     }
@@ -127,18 +277,21 @@ export function handleMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer)
     case 'cancel': {
       const { requestId } = msg;
       const key = queueKey(session, requestId);
+
+      // Cancel active recording if any
+      if (session.activeRecordings.has(requestId)) {
+        session.activeRecordings.delete(requestId);
+        sendMsg(ws, { type: 'error', requestId, message: 'cancelled' });
+        break;
+      }
+
+      // Cancel pending queue item
       if (session.pendingRequests.has(key)) {
         session.pendingRequests.delete(key);
         session.queueKeyToRequestId.delete(key);
         queueKeyToWs.delete(key);
         dequeue(session.defaultChannel, key);
-        ws.send(
-          serializeServerMessage({
-            type: 'error',
-            requestId,
-            message: 'cancelled',
-          }),
-        );
+        sendMsg(ws, { type: 'error', requestId, message: 'cancelled' });
       }
       break;
     }
@@ -148,6 +301,9 @@ export function handleMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer)
 export function handleClose(ws: ServerWebSocket<WsData>): void {
   const session = sessions.get(ws);
   if (!session) return;
+
+  // Clean up active recordings (no STT for orphaned audio)
+  session.activeRecordings.clear();
 
   for (const key of session.pendingRequests) {
     dequeue(session.defaultChannel, key);

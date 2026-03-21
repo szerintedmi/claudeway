@@ -124,12 +124,25 @@ export interface GlassesServerConfig {
   auth: { tokens: GlassesTokenConfig[] };
 }
 
+export interface DeepgramConfig {
+  apiKey: string;
+  sttModel?: string; // defaults to 'nova-3'
+  ttsModel?: string; // Phase 3
+  ttsVoice?: string; // Phase 3
+}
+
+export interface VoiceConfig {
+  provider: 'deepgram';
+  deepgram: DeepgramConfig;
+}
+
 export interface Config {
   repos?: Record<string, RepoConfig>;
   channels: Record<string, ChannelConfig>;
   defaults: Defaults;
   botOwner?: string;
   glassesServer?: GlassesServerConfig;
+  voice?: VoiceConfig;
 }
 
 export function getConfigPath(): string {
@@ -186,6 +199,22 @@ export function loadConfig(): Config {
           }
         }
       }
+    }
+  }
+
+  // Validate voice config if present
+  if (config.voice) {
+    if (config.voice.provider !== 'deepgram') {
+      throw new Error(`${configPath}: voice.provider must be "deepgram"`);
+    }
+    if (!config.voice.deepgram?.apiKey) {
+      throw new Error(`${configPath}: voice.deepgram.apiKey is required`);
+    }
+    const resolvedKey = interpolateEnvVars(config.voice.deepgram.apiKey);
+    if (!resolvedKey) {
+      throw new Error(
+        `${configPath}: voice.deepgram.apiKey resolves to empty — set the environment variable`,
+      );
     }
   }
 

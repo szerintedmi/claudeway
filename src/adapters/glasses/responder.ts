@@ -1,5 +1,9 @@
 import type { ServerWebSocket } from 'bun';
-import type { ChannelResponder, IStreamingResponder } from '../../core/interfaces.js';
+import type {
+  ChannelResponder,
+  IStreamingResponder,
+  ToolEventPayload,
+} from '../../core/interfaces.js';
 import { serializeServerMessage, type GlassesServerMessage } from './protocol.js';
 import type { WsData } from './index.js';
 
@@ -26,8 +30,29 @@ class GlassesStreamingResponder implements IStreamingResponder {
     send(this.ws, { type: 'response_text', requestId: this.requestId, text, final: false });
   }
 
-  onToolEvent(): void {
-    send(this.ws, { type: 'status', requestId: this.requestId, status: 'thinking' });
+  onToolEvent(event: ToolEventPayload): void {
+    if (event.phase === 'subagent_progress' || event.phase === 'subagent_completed') {
+      const usage = event.phase === 'subagent_completed' ? event.usage : undefined;
+      send(this.ws, {
+        type: 'status',
+        requestId: this.requestId,
+        status: 'tool',
+        toolName: event.toolName,
+        phase: event.phase,
+        description: event.description,
+        ...(usage ? { usage } : {}),
+      });
+      return;
+    }
+    const keyArg = event.phase === 'complete' ? (event.keyArg ?? undefined) : undefined;
+    send(this.ws, {
+      type: 'status',
+      requestId: this.requestId,
+      status: 'tool',
+      toolName: event.toolName,
+      phase: event.phase,
+      ...(keyArg ? { keyArg } : {}),
+    });
   }
 
   async finish(): Promise<void> {

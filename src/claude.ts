@@ -193,7 +193,14 @@ export function deriveSessionId(channelId: string, folder: string, threadTs?: st
 
 export type ToolEventPayload =
   | { phase: 'start'; toolName: string }
-  | { phase: 'complete'; toolName: string; keyArg: string | null };
+  | { phase: 'complete'; toolName: string; keyArg: string | null }
+  | { phase: 'subagent_progress'; toolName: string; description: string }
+  | {
+      phase: 'subagent_completed';
+      toolName: string;
+      description: string;
+      usage?: { toolUses: number; tokens: number; durationMs: number };
+    };
 
 export type StreamLineEvent =
   | { type: 'text_delta'; text: string }
@@ -208,6 +215,12 @@ export type StreamLineEvent =
   | { type: 'tool_start'; toolName: string; index: number }
   | { type: 'tool_input_delta'; partialJson: string; index: number }
   | { type: 'tool_stop'; index: number }
+  | { type: 'subagent_progress'; description: string; toolName: string }
+  | {
+      type: 'subagent_completed';
+      description: string;
+      usage?: { toolUses: number; tokens: number; durationMs: number };
+    }
   | null;
 
 /**
@@ -278,6 +291,37 @@ export function parseStreamLine(line: string): StreamLineEvent {
       return { type: 'tool_stop', index: obj.event.index ?? -1 };
     }
 
+    // Sub-agent progress: system events with task_progress subtype
+    if (obj.type === 'system' && obj.subtype === 'task_progress' && obj.description) {
+      return {
+        type: 'subagent_progress',
+        description: obj.description,
+        toolName: obj.last_tool_name ?? 'unknown',
+      };
+    }
+
+    // Sub-agent completed
+    if (
+      obj.type === 'system' &&
+      obj.subtype === 'task_notification' &&
+      obj.status === 'completed'
+    ) {
+      const usage = obj.usage;
+      return {
+        type: 'subagent_completed',
+        description: obj.summary ?? obj.description ?? '',
+        ...(usage
+          ? {
+              usage: {
+                toolUses: usage.tool_uses ?? 0,
+                tokens: usage.total_tokens ?? 0,
+                durationMs: usage.duration_ms ?? 0,
+              },
+            }
+          : {}),
+      };
+    }
+
     return null;
   } catch {
     return null;
@@ -296,6 +340,7 @@ const TOOL_KEY_PARAMS: Record<string, string[]> = {
   LS: ['path'],
   WebFetch: ['url'],
   WebSearch: ['query'],
+  Agent: ['description'],
 };
 
 function extractKeyArg(toolName: string, accumulatedJson: string): string | null {
@@ -542,6 +587,19 @@ function runClaudeStreamingProcess(
         const keyArg = extractKeyArg(toolAccum.toolName, toolAccum.partialJson);
         void onToolEvent?.({ phase: 'complete', toolName: toolAccum.toolName, keyArg });
         toolAccum = null;
+      } else if (event.type === 'subagent_progress') {
+        void onToolEvent?.({
+          phase: 'subagent_progress',
+          toolName: event.toolName,
+          description: event.description,
+        });
+      } else if (event.type === 'subagent_completed') {
+        void onToolEvent?.({
+          phase: 'subagent_completed',
+          toolName: 'Agent',
+          description: event.description,
+          usage: event.usage,
+        });
       }
     }
 
@@ -996,6 +1054,25 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
     const keyArg = extractKeyArg(toolName, partialJson);
     void entry.currentTurn.onToolEvent?.({ phase: 'complete', toolName, keyArg });
     entry.currentTurn.toolAccum = null;
+    return;
+  }
+
+  if (event.type === 'subagent_progress' && entry.currentTurn) {
+    void entry.currentTurn.onToolEvent?.({
+      phase: 'subagent_progress',
+      toolName: event.toolName,
+      description: event.description,
+    });
+    return;
+  }
+
+  if (event.type === 'subagent_completed' && entry.currentTurn) {
+    void entry.currentTurn.onToolEvent?.({
+      phase: 'subagent_completed',
+      toolName: 'Agent',
+      description: event.description,
+      usage: event.usage,
+    });
     return;
   }
 

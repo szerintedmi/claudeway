@@ -41,6 +41,13 @@ channels:
 #         userId: glasses-user            # mapped to channel allowedUsers
 #         defaultChannel: glasses-default  # channel to route messages to
 
+# Optional: Voice pipeline config (STT/TTS). Required for audio input via glasses adapter.
+# voice:
+#   provider: deepgram
+#   deepgram:
+#     apiKey: "${DEEPGRAM_API_KEY}"
+#     sttModel: nova-3  # optional, defaults to nova-3
+
 defaults:
   model: opus
   systemPrompt: >-

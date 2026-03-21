@@ -115,10 +115,28 @@ describe('GlassesStreamingResponder', () => {
     expect(sr.getFullText()).toBe('ab');
   });
 
-  it('onToolEvent sends status: thinking', () => {
+  it('onToolEvent sends tool status with name', () => {
     const sr = responder.createStreamingResponder();
     sr.onToolEvent({ toolName: 'Read', phase: 'start' });
     expect(sent).toHaveLength(1);
-    expect(parse(sent[0])).toMatchObject({ type: 'status', status: 'thinking' });
+    expect(parse(sent[0])).toMatchObject({
+      type: 'status',
+      status: 'tool',
+      toolName: 'Read',
+      phase: 'start',
+    });
+  });
+
+  it('onToolEvent sends tool status with keyArg on complete', () => {
+    const sr = responder.createStreamingResponder();
+    sr.onToolEvent({ toolName: 'Read', phase: 'complete', keyArg: 'src/index.ts' });
+    expect(sent).toHaveLength(1);
+    expect(parse(sent[0])).toMatchObject({
+      type: 'status',
+      status: 'tool',
+      toolName: 'Read',
+      phase: 'complete',
+      keyArg: 'src/index.ts',
+    });
   });
 });

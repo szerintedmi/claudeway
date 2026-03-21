@@ -78,60 +78,13 @@ android/                # Companion app (Kotlin/Gradle)
 
 ### Core Interfaces
 
-```typescript
-// src/core/interfaces.ts
-
-/** Adapter-provided responder for delivering responses back to the user */
-interface ChannelResponder {
-  /** Signal that processing has started (e.g., Slack hourglass reaction) */
-  onProcessing(): Promise<void>;
-  /** Signal completion (e.g., Slack checkmark reaction) */
-  onComplete(): Promise<void>;
-  /** Report an error to the user */
-  onError(message: string): Promise<void>;
-  /** Send a text response (may be called multiple times for chunked delivery) */
-  sendText(text: string): Promise<void>;
-  /** Send an audio response (for voice-enabled channels) */
-  sendAudio?(audioChunk: Buffer): Promise<void>;
-  /** Upload a file attachment */
-  uploadFile?(path: string, name: string): Promise<void>;
-}
-
-/** Adapter-provided factory for creating streaming responders */
-interface StreamingResponderFactory {
-  create(): IStreamingResponder;
-}
-
-/** Common streaming interface (already implicit in claude.ts callbacks) */
-interface IStreamingResponder {
-  onTextDelta(text: string): void;
-  onToolEvent(event: ToolEventPayload): void;
-  finish(): Promise<void>;
-  getFullText(): string;
-}
-
-/** Voice pipeline interface (STT + TTS) */
-interface VoiceProvider {
-  /** Batch transcription (MVP): transcribe a complete audio buffer after recording stops */
-  transcribe(audio: Buffer, format: AudioFormat): Promise<string>;
-  /** Future: streaming transcription for real-time partial transcripts */
-  transcribeStream?(audioStream: ReadableStream, format: AudioFormat): AsyncGenerator<string>;
-  synthesize(text: string): Promise<Buffer>;
-  synthesizeStream(text: string): AsyncGenerator<Buffer>;
-}
-
-interface AudioFormat {
-  sampleRate: number;   // e.g., 8000 (glasses HFP), 16000 (Whisper native)
-  channels: number;     // 1 = mono
-  encoding: 'pcm_s16le' | 'pcm_f32le' | 'mulaw';
-}
-```
+Defined in `src/core/interfaces.ts` and `src/core/voice.ts`. Key types: `ChannelResponder` (adapter response delivery), `IStreamingResponder` (streaming text/tool events), `VoiceProvider` (STT/TTS pipeline), `AudioFormat`.
 
 ### WebSocket Protocol
 
 The glasses adapter exposes a WebSocket server. Messages are JSON-framed:
 
-Every request/response exchange is correlated by a `requestId` (UUID, client-generated). This enables cancellation, concurrent requests, and unambiguous response routing.
+Every request/response exchange is correlated by a `requestId` (UUID, client-generated). This enables cancellation, concurrent requests, and unambiguous response routing. A `requestId` must be unique across all in-flight state within a session — the server rejects a `requestId` that is already pending (queued text) or recording (active audio).
 
 ```typescript
 // Client -> Server
@@ -252,100 +205,36 @@ sequenceDiagram
 
 **Goal**: Extract reusable core from Slack-coupled code. Slack continues working identically.
 
-**Status**: Complete. All code moved, 302 tests pass, typecheck/lint clean, zero Slack imports in `src/core/`.
-
-**Changes**:
-
-1. Create `src/core/interfaces.ts` -- define `ChannelResponder`, `IStreamingResponder`
-2. Create `src/core/engine.ts` -- extract from `src/slack.ts`:
-   - `processQueuedMessage()` (generic orchestration, accepts `ChannelResponder`)
-   - `drainChannel()` (generic queue drain loop)
-   - Concurrency pool (`acquireProcessSlot` / `releaseProcessSlot`)
-   - Mode dispatch (`processBatch`, `processStreamUpdate`, etc. refactored to use `ChannelResponder`)
-3. Move Slack-specific code to `src/adapters/slack/`:
-   - `handler.ts` -- `registerMessageHandler`, message filtering, `downloadSlackFiles`
-   - `responder.ts` -- `StreamingResponder`, `NativeStreamingResponder`, `sendResponse` (implement `ChannelResponder`)
-   - `formatting.ts` -- `markdownToSlackMrkdwn`, `splitMessage`
-   - `thread.ts` -- Slack `fetchThreadContext`, `resolveUserName`
-   - `commands.ts` -- magic commands (unchanged, Slack-specific)
-   - `utils.ts` -- `safeReact`, `warnInThread`
-   - `files.ts` -- `downloadSlackFiles`, `uploadAttachedFiles`
-   - `index.ts` -- Slack Bolt app setup (current `src/index.ts`)
-4. Update `src/prompt.ts` -- parameterize `[Slack user reference]` string
-5. Update `src/tempdir.ts` -- extract `uploadAttachedFiles` to Slack adapter
-6. New top-level `src/index.ts` that boots configured adapters
-
-**Tests**:
-- All existing tests pass (imports updated for new paths)
-- `src/__tests__/engine.test.ts` -- core engine with a mock `ChannelResponder`:
-  - `processQueuedMessage()` calls responder lifecycle methods in correct order (`onProcessing` → `sendText` → `onComplete`)
-  - `processQueuedMessage()` calls `onError` on Claude CLI failure
-  - Concurrency pool limits parallel processing (`acquireProcessSlot` / `releaseProcessSlot`)
-  - `drainChannel()` processes queued messages in order
-- `src/__tests__/slack.test.ts` -- existing tests migrated to import from `src/adapters/slack/`
-- `src/__tests__/config.test.ts` -- config loading with new `glassesServer` and `voice` sections (undefined = disabled, no errors)
-
-**Scope note**: This is the riskiest phase of the project — extracting a channel-agnostic core from tightly coupled Slack code while preserving behavior. Treat as a standalone milestone with strict exit criteria: all existing tests pass, zero Slack imports in `src/core/`, typecheck and lint clean, and ideally a manual smoke test with a real Slack workspace.
-
-**Estimated scope**: ~15-20 files touched. While many changes are mechanical moves, the `processQueuedMessage` refactor to use `ChannelResponder` and the unified mode dispatch are non-trivial new logic.
+Extracted `src/core/engine.ts` (processQueuedMessage, drainChannel, concurrency pool) and `src/core/interfaces.ts` (ChannelResponder, IStreamingResponder) from the Slack-coupled `src/slack.ts`. Moved all Slack-specific code to `src/adapters/slack/`. New top-level `src/index.ts` boots configured adapters. Zero Slack imports in `src/core/`, all existing tests pass.
 
 ### Phase 1: WebSocket Server + Text Pipeline [COMPLETE]
 
 **Goal**: A working WebSocket endpoint that accepts text and returns text via Claude.
 
-**Status**: Complete. 357 tests pass (42 new), typecheck/lint clean.
+Built `src/adapters/glasses/` — protocol.ts (message types, parsing), handler.ts (session management, queue key namespacing as `sessionId:requestId`, owner-aware drain), responder.ts (GlassesChannelResponder + GlassesStreamingResponder), index.ts (Bun.serve WS server, token auth). Extended config.ts with `GlassesServerConfig`, `resolveGlassesToken()`, `interpolateEnvVars()`. Added single-file browser test UI. Security: path-traversal-safe test UI, cross-session response routing with `queueKeyToWs` map, fallback to drain initiator on owner disconnect.
 
-**What was built**:
-- `src/adapters/glasses/protocol.ts` -- message types, `parseClientMessage()` with validation, `serializeServerMessage()`
-- `src/adapters/glasses/handler.ts` -- per-connection session management, message routing (ping/text/cancel), queue key namespacing (`sessionId:requestId`), owner-aware drain
-- `src/adapters/glasses/responder.ts` -- `GlassesChannelResponder` + `GlassesStreamingResponder` implementing core interfaces
-- `src/adapters/glasses/index.ts` -- `Bun.serve()` WS server, token auth (query param or Bearer header), test UI serving
-- `src/adapters/glasses/test-ui/index.html` -- single-file browser test UI (connect, send text, view responses)
-- `src/index.ts` refactored -- shared startup extracted, conditional adapter boot (Slack and/or glasses)
-- `src/adapters/slack/index.ts` refactored -- exports `startSlackAdapter()` + `getSlackShutdownHook()`
-- `src/config.ts` extended -- `GlassesServerConfig`, `resolveGlassesToken()`, `interpolateEnvVars()`
-
-**Security hardening** (post-review):
-- Test UI serves only `index.html` — no arbitrary file paths (path traversal fix)
-- Queue keys namespaced as `sessionId:requestId` — prevents cross-client collisions
-- `queueKeyToWs` map ensures drain delivers responses to the owning socket, not the drain initiator
-- `resolveResponder()` extracted and integration-tested: two concurrent sessions on the same channel route responses to correct sockets; fallback to drain initiator when owner disconnects
-
-**Tests**: 3 new test files (17 + 10 + 15 = 42 tests) + config test extensions
-
-### Phase 2: STT Integration (Audio In)
+### Phase 2: STT Integration (Audio In) [COMPLETE]
 
 **Goal**: Push-to-talk audio input — user speaks, audio is buffered, transcribed after stop, then processed by Claude.
 
-**Voice model**: This is explicitly **not** real-time streaming STT. Audio chunks are accumulated server-side until `audio_end`, then the complete buffer is sent to Deepgram's batch API for transcription. This is simpler and more reliable for MVP. Streaming STT (transcribe while speaking, show partial transcripts) is covered in Phase 5 using Deepgram's real-time WebSocket API.
+**Status**: Complete. 401 tests pass, typecheck/lint clean.
 
-**Changes**:
+**What was built**:
+- `src/core/voice.ts` -- `VoiceProvider` interface, `AudioFormat` type
+- `src/core/voice-deepgram.ts` -- Deepgram Nova-3 batch STT via `@deepgram/sdk` prerecorded API (TTS deferred to Phase 3)
+- `src/adapters/glasses/audio-session.ts` -- `AudioRecording`, `createRecording()`, `appendChunk()`, `assembleBuffer()`, `MAX_AUDIO_BYTES` (120s ceiling ~3.84MB)
+- `src/adapters/glasses/handler.ts` -- audio_start/chunk/end routing, async `handleAudioEnd()`, `enqueueText()` shared by text and audio paths, duplicate requestId rejection across all in-flight state
+- `src/adapters/glasses/index.ts` -- voice config validation at startup (fails if glasses enabled without voice config), DeepgramVoiceProvider singleton
+- `src/config.ts` -- `VoiceConfig` interface, validation of voice section
+- Test UI updated with push-to-talk via `MediaRecorder` (WebM/Opus)
 
-1. Create `src/core/voice.ts` -- `VoiceProvider` interface, audio format types
-2. Create `src/core/voice-deepgram.ts` -- Deepgram implementation (Nova-3 batch STT + Aura-2 TTS)
-3. Update glasses handler to accept `audio_start`/`audio_chunk`/`audio_end` messages
-4. Wire: audio chunks -> accumulate until `audio_end` -> batch STT -> text -> existing Claude pipeline
-5. Update test UI: add "Record Audio" button using `AudioWorklet` + resampler to produce 16kHz mono PCM (browser `MediaRecorder` does not produce raw PCM natively — an AudioWorklet captures PCM from `getUserMedia` and a client-side resampler converts from the mic's native sample rate to 16kHz before base64-encoding and sending over WS). **Note**: the browser test path sends 16kHz audio (laptop mic native rate), while the glasses device path sends 8kHz (Bluetooth HFP limitation). The server accepts both — the `AudioFormat` in `audio_start` declares the sample rate, and Deepgram handles either natively. Do not treat the browser test UI as protocol truth for sample rate.
-6. Add `voice` config section to config.yaml
+**Key design decisions**:
+- **Batch STT, not streaming**: Audio chunks buffered until `audio_end`, then one HTTP call to Deepgram. Streaming STT is Phase 5.
+- **Shared conversation context**: All requests in a WS session share `threadTs` = `sessionId`, so Claude sees prior history. Queue keys (`ts`) remain unique per-request for routing/cancel.
+- **Cancellation scope**: Queue-only + active recordings. Full barge-in (abort during transcription/thinking/speaking) requires engine-level abort plumbing — prerequisite for Phase 3.
+- **Dual audio format**: Browser test path sends WebM/Opus, glasses device sends raw PCM. `format` in `audio_start` declares encoding; Deepgram handles both natively.
 
-**Tests**:
-- `src/__tests__/voice.test.ts` -- `VoiceProvider` interface contract tests with mock provider:
-  - `transcribe()` returns text from audio buffer (batch mode)
-  - Handles empty audio gracefully (returns empty string, not error)
-- `src/__tests__/voice-deepgram.test.ts` -- Deepgram-specific unit tests (mocked HTTP/WS):
-  - STT: sends correct audio format headers to Deepgram API
-  - STT: parses Deepgram response JSON into plain text
-  - STT: handles Deepgram API errors (auth, rate limit) with meaningful error messages
-- `src/__tests__/glasses-handler-audio.test.ts` -- audio message flow:
-  - `audio_start` → `audio_chunk` (x N) → `audio_end` triggers STT then engine
-  - Sends `status: 'transcribing'` after `audio_end`
-  - Sends `transcript` message with final text before processing
-  - Rejects `audio_chunk` without prior `audio_start`
-- Manual: browser test UI with mic recording for interactive testing
-
-**Deepgram STT integration**:
-- MVP (Phase 2): Use Deepgram's batch/pre-recorded API — simpler, one HTTP call after `audio_end`
-- Phase 5: Switch to Deepgram's real-time streaming API (WebSocket-based) for partial transcripts while speaking
+**Tests**: 4 test files covering audio session, Deepgram STT, handler audio flow, protocol parsing. Edge cases: late chunks after audio_end, double audio_end, session close during async transcription, overlapping recordings, size limit enforcement.
 
 ### Phase 3: TTS Integration (Audio Out)
 
@@ -527,60 +416,6 @@ Server (TypeScript/Bun) and Android app (Kotlin/Gradle) in one repo:
 - Atomic cross-stack changes (protocol changes update both sides in one commit)
 - Single CI pipeline
 - `docker-compose.yml` only builds/runs the server; Android builds separately via Gradle
-
-## Config Changes
-
-```yaml
-# Full config.yaml example with glasses
-repos:
-  claudeway:
-    url: https://github.com/user/claudeway.git
-
-defaults:
-  model: opus
-  systemPrompt: '...'
-  timeoutMs: 300000
-  responseMode: stream-update
-  processMode: oneshot
-
-botOwner: U12345678
-
-# NEW: Glasses WebSocket server config
-glassesServer:
-  enabled: true
-  port: 8765
-  auth:
-    tokens:
-      - token: '${GLASSES_AUTH_TOKEN}'
-        userId: glasses-petro
-        defaultChannel: glasses-default
-
-# NEW: Voice pipeline config (used by any voice-enabled adapter)
-voice:
-  provider: deepgram
-  deepgram:
-    apiKey: '${DEEPGRAM_API_KEY}'
-    sttModel: nova-3
-    ttsModel: aura-2
-    ttsVoice: asteria
-
-channels:
-  # Existing Slack channels (unchanged)
-  C12345678:
-    name: claudeway-dev
-    repo: claudeway
-    allowedUsers:
-      - U12345678
-
-  # NEW: Glasses channel (same permission model as Slack channels)
-  glasses-default:
-    name: my-glasses
-    repo: claudeway
-    model: opus
-    processMode: oneshot
-    allowedUsers:
-      - 'glasses-petro'    # Resolved from bearer token -> userId mapping
-```
 
 ## Security Considerations
 

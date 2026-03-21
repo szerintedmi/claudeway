@@ -240,3 +240,55 @@ describe('parseStreamLine — robustness', () => {
     expect(parseStreamLine(line)).toBeNull();
   });
 });
+
+describe('parseStreamLine — subagent events', () => {
+  it('parses task_progress system event', () => {
+    const line = JSON.stringify({
+      type: 'system',
+      subtype: 'task_progress',
+      task_id: 'abc123',
+      tool_use_id: 'toolu_xyz',
+      description: 'Running search for markdown files',
+      last_tool_name: 'Bash',
+    });
+    expect(parseStreamLine(line)).toEqual({
+      type: 'subagent_progress',
+      description: 'Running search for markdown files',
+      toolName: 'Bash',
+    });
+  });
+
+  it('parses task_notification completed system event', () => {
+    const line = JSON.stringify({
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'abc123',
+      tool_use_id: 'toolu_xyz',
+      status: 'completed',
+      summary: 'Search .md files with fd',
+    });
+    expect(parseStreamLine(line)).toEqual({
+      type: 'subagent_completed',
+      description: 'Search .md files with fd',
+    });
+  });
+
+  it('ignores non-completed task_notification', () => {
+    const line = JSON.stringify({
+      type: 'system',
+      subtype: 'task_notification',
+      status: 'started',
+      task_id: 'abc',
+    });
+    expect(parseStreamLine(line)).toBeNull();
+  });
+
+  it('ignores system events without task subtypes', () => {
+    const line = JSON.stringify({
+      type: 'system',
+      subtype: 'init',
+      cwd: '/tmp',
+    });
+    expect(parseStreamLine(line)).toBeNull();
+  });
+});
