@@ -127,9 +127,10 @@ export interface GlassesServerConfig {
 export interface DeepgramConfig {
   apiKey: string;
   sttModel?: string; // defaults to 'nova-3'
-  ttsModel?: string; // defaults to 'aura-2-thalia-en'
+  ttsModel?: string; // defaults to 'aura-2-thalia-en' (Deepgram Aura-2)
   ttsVoice?: string; // unused for now — voice embedded in model name
   ttsSampleRate?: number; // defaults to 24000
+  // Note: Deepgram's `speed` param is REST-only, not supported on WebSocket streaming
 }
 
 export interface VoiceConfig {

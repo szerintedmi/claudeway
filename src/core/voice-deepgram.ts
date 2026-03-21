@@ -99,6 +99,8 @@ class DeepgramTtsStream implements TtsStreamHandle {
   private stats = { speakCount: 0, flushCount: 0, flushedCount: 0, clearedCount: 0 };
 
   constructor(apiKey: string, options: TtsOptions) {
+    // Note: Deepgram's `speed` param is REST-only (/v1/speak POST),
+    // not supported on the WebSocket streaming endpoint.
     const params = new URLSearchParams({
       model: options.model,
       encoding: options.encoding,

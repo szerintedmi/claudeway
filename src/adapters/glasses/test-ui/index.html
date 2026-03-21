@@ -76,6 +76,8 @@
   const statusDivs = new Map();
   // Track whether a tool event fired since the last text chunk for each requestId
   const toolSinceLastText = new Set();
+  // Track requestIds currently in 'speaking' state — these should not be cleared by text chunks
+  const speakingRequests = new Set();
 
   // --- Audio playback (Web Audio API) ---
   // Plays incoming PCM linear16 audio chunks as they arrive.
@@ -219,9 +221,14 @@
 
     // Non-tool statuses (thinking, transcribing, etc.)
     if (!msg.toolName) {
+      if (msg.status === 'speaking') {
+        speakingRequests.add(requestId);
+      } else {
+        speakingRequests.delete(requestId);
+      }
       const label = msg.status === 'thinking' ? 'Processing...'
         : msg.status === 'transcribing' ? 'Transcribing...'
-        : msg.status === 'speaking' ? 'Speaking...'
+        : msg.status === 'speaking' ? 'Generating voice...'
         : msg.status + '...';
       if (!state.current) {
         state.current = createStatusDiv(label);
@@ -312,7 +319,11 @@
   function appendStreaming(requestId, text, isFinal) {
     const el = document.getElementById('messages');
     const hadTool = toolSinceLastText.has(requestId);
-    removeStatus(requestId);
+    if (speakingRequests.has(requestId)) {
+      // Keep speaking indicator — but re-position it after the text block below
+    } else {
+      removeStatus(requestId);
+    }
     toolSinceLastText.delete(requestId);
 
     let entry = streamingDivs.get(requestId);
@@ -338,6 +349,13 @@
     if (isFinal) {
       entry.content.innerHTML = renderMarkdown(entry.text);
       streamingDivs.delete(requestId);
+    }
+    // Keep speaking spinner below the growing text block
+    if (speakingRequests.has(requestId)) {
+      const state = statusDivs.get(requestId);
+      if (state && state.current) {
+        el.appendChild(state.current);
+      }
     }
     el.scrollTop = el.scrollHeight;
   }
@@ -391,6 +409,8 @@
           if (audioCtx.state === 'suspended') audioCtx.resume();
           playAudioChunk(msg.requestId, msg.data, msg.sampleRate);
         } else if (msg.type === 'response_audio_end') {
+          speakingRequests.delete(msg.requestId);
+          removeStatus(msg.requestId);
           stopAudioPlayback(msg.requestId);
         } else if (msg.type === 'transcript') {
           removeStatus(msg.requestId);
@@ -398,6 +418,7 @@
         } else if (msg.type === 'status') {
           updateStatus(msg.requestId, msg);
         } else if (msg.type === 'error') {
+          speakingRequests.delete(msg.requestId);
           removeStatus(msg.requestId);
           stopAudioPlayback(msg.requestId);
           log('error', 'Error: ' + msg.message);
