@@ -202,98 +202,29 @@ sequenceDiagram
 
 ## Implementation Phases
 
-### Phase 0: Modularize Core (Server-Side Refactor) [COMPLETE]
+### Phase 0: Modularize Core [COMPLETE]
 
-**Goal**: Extract reusable core from Slack-coupled code. Slack continues working identically.
-
-Extracted `src/core/engine.ts` (processQueuedMessage, drainChannel, concurrency pool) and `src/core/interfaces.ts` (ChannelResponder, IStreamingResponder) from the Slack-coupled `src/slack.ts`. Moved all Slack-specific code to `src/adapters/slack/`. New top-level `src/index.ts` boots configured adapters. Zero Slack imports in `src/core/`, all existing tests pass.
+Extracted `src/core/engine.ts` and `src/core/interfaces.ts` from Slack-coupled code. All Slack-specific code moved to `src/adapters/slack/`. Zero Slack imports in `src/core/`.
 
 ### Phase 1: WebSocket Server + Text Pipeline [COMPLETE]
 
-**Goal**: A working WebSocket endpoint that accepts text and returns text via Claude.
-
-Built `src/adapters/glasses/` — protocol.ts (message types, parsing), handler.ts (session management, queue key namespacing as `sessionId:requestId`, owner-aware drain), responder.ts (GlassesChannelResponder + GlassesStreamingResponder), index.ts (Bun.serve WS server, token auth). Extended config.ts with `GlassesServerConfig`, `resolveGlassesToken()`, `interpolateEnvVars()`. Added single-file browser test UI. Security: path-traversal-safe test UI, cross-session response routing with `queueKeyToWs` map, fallback to drain initiator on owner disconnect.
+Built `src/adapters/glasses/` — protocol, handler (session management, queue key namespacing), responder, WS server with token auth. Added browser test UI.
 
 ### Phase 2: STT Integration (Audio In) [COMPLETE]
 
-**Goal**: Push-to-talk audio input — user speaks, audio is buffered, transcribed after stop, then processed by Claude.
+Push-to-talk audio: chunks buffered until `audio_end`, then batch STT via Deepgram Nova-3 prerecorded API. Voice provider interface in `src/core/voice.ts`, Deepgram implementation in `src/core/voice-deepgram.ts`. Audio session management with size limits. Dual format support (WebM/Opus from browser, raw PCM from device).
 
-**Status**: Complete. 401 tests pass, typecheck/lint clean.
+### Phase 3: TTS + Full Voice Loop + Cancellation [COMPLETE]
 
-**What was built**:
-- `src/core/voice.ts` -- `VoiceProvider` interface, `AudioFormat` type
-- `src/core/voice-deepgram.ts` -- Deepgram Nova-3 batch STT via `@deepgram/sdk` prerecorded API (TTS deferred to Phase 3)
-- `src/adapters/glasses/audio-session.ts` -- `AudioRecording`, `createRecording()`, `appendChunk()`, `assembleBuffer()`, `MAX_AUDIO_BYTES` (120s ceiling ~3.84MB)
-- `src/adapters/glasses/handler.ts` -- audio_start/chunk/end routing, async `handleAudioEnd()`, `enqueueText()` shared by text and audio paths, duplicate requestId rejection across all in-flight state
-- `src/adapters/glasses/index.ts` -- voice config validation at startup (fails if glasses enabled without voice config), DeepgramVoiceProvider singleton
-- `src/config.ts` -- `VoiceConfig` interface, validation of voice section
-- Test UI updated with push-to-talk via `MediaRecorder` (WebM/Opus)
+Full voice round-trip: audio in → STT → Claude → TTS → audio out.
 
-**Key design decisions**:
-- **Batch STT, not streaming**: Audio chunks buffered until `audio_end`, then one HTTP call to Deepgram. Streaming STT is Phase 5.
-- **Shared conversation context**: All requests in a WS session share `threadTs` = `sessionId`, so Claude sees prior history. Queue keys (`ts`) remain unique per-request for routing/cancel.
-- **Cancellation scope**: Queue-only + active recordings. Full cancel across transcribing/thinking/speaking states is delivered in Phase 3 (requires engine-level abort plumbing + responder state tracking).
-- **Dual audio format**: Browser test path sends WebM/Opus, glasses device sends raw PCM. `format` in `audio_start` declares encoding; Deepgram handles both natively.
+**TTS**: Deepgram Aura-2 over native WebSocket (not the SDK — SDK's `JSON.parse()` drops binary audio frames). Prose chunker (`src/core/prose-chunker.ts`) splits streaming text at sentence boundaries for incremental TTS. Flush coalescing to stay within Deepgram's 20/60s rate limit.
 
-**Tests**: 4 test files covering audio session, Deepgram STT, handler audio flow, protocol parsing. Edge cases: late chunks after audio_end, double audio_end, session close during async transcription, overlapping recordings, size limit enforcement.
+**Cancellation** across all states: transcribing (AbortSignal), thinking (process kill via `onProcessSpawned` callback), speaking (TTS stream clear/abort). Tracked per-requestId in session.
 
-### Phase 3: TTS Integration (Audio Out) [COMPLETE]
+**Config additions**: Per-channel `effort` level (low/medium/high/max) passed as `--effort` to Claude CLI. Per-channel `model` override. Voice-optimized `systemPrompt` for glasses (plain spoken language, no markdown). Note: Deepgram `speed` param is REST-only, not available on WebSocket TTS.
 
-**Goal**: Full voice loop -- audio in, audio out.
-
-**Changes**:
-
-1. Add TTS to `src/core/voice-deepgram.ts` -- Deepgram Aura-2 **WebSocket** streaming synthesis via `deepgramClient.speak.live()` (`@deepgram/sdk` `LiveTTSEvents`)
-2. Add `src/core/sentence-buffer.ts` -- sentence boundary detection (buffers `onTextDelta` text, emits complete sentences)
-3. Extend `src/core/voice.ts` with `TtsStreamHandle` interface (`sendText`, `flush`, `finalize`, `abort`) and add `createTtsStream()` to `VoiceProvider`
-4. Update glasses responder: `GlassesStreamingResponder` feeds text into sentence buffer → sentences sent to TTS WebSocket stream → audio chunks forwarded as `response_audio` messages
-5. Add `response_audio` / `response_audio_end` server message types to protocol
-6. Update test UI: add audio playback (Web Audio API), play response audio chunks as they arrive via `AudioBufferSourceNode` queue
-7. Full cancellation across all states (fulfills protocol contract from Phase 2 prerequisite):
-   - **Transcribing**: Add `AbortSignal` parameter to `VoiceProvider.transcribe()`. Handler passes an `AbortController` per requestId, stored in `GlassesSession.activeAbortControllers`. On cancel, `controller.abort()` → Deepgram SDK request aborts → handler catches abort error, sends `error` with `"cancelled"`.
-   - **Thinking**: Add `onProcessSpawned(kill: () => void)` callback to `IStreamingResponder` interface. Engine calls it after spawning Claude process, passing a `() => process.kill('SIGTERM')` thunk. Responder stores the kill function. On cancel, responder calls `kill()`, engine catches the signal and resolves, handler sends `error` with `"cancelled"`.
-   - **Speaking**: `ttsStream.abort()` (closes Deepgram TTS WebSocket), send `response_audio_end` followed by `error` with `"cancelled"` (matching protocol spec).
-   - Track active responders per requestId in `GlassesSession` for state-aware cancellation lookup across all three states.
-
-**WebSocket TTS lifecycle** (per request):
-- TTS stream lazily initialized on first sentence from sentence buffer
-- `deepgramClient.speak.live({ model, encoding, sample_rate })` — all values from `voice.deepgram` config (`ttsModel`, `ttsVoice`, `ttsSampleRate`; defaults: `aura-2-thalia-en`, `linear16`, `24000`)
-- Per sentence: `connection.sendText(sentence)` → `connection.flush()`
-- `LiveTTSEvents.Audio` fires with binary audio chunks → base64-encode → send as `response_audio`
-- `LiveTTSEvents.Flushed` tracks completion of each flush (counter-based)
-- On stream end: flush remaining sentence buffer → `connection.requestClose()` → wait for all `Flushed` events → send `response_audio_end`
-- On cancel: `connection.requestClose()` immediately → send `response_audio_end` followed by `error` with `"cancelled"`
-
-**Sentence buffer rules**:
-- Split on `.` `?` `!` followed by whitespace or end-of-input
-- Skip: abbreviations (`Mr.`, `Dr.`, `e.g.`, `i.e.`, `etc.`, `vs.`), decimals (`3.14`), ellipsis (`...`)
-- Code blocks (triple backtick): accumulate entire block as one unit
-- Minimum ~20 chars before emitting (avoid tiny fragments)
-
-**Tests**:
-- `src/__tests__/sentence-buffer.test.ts` -- sentence buffering logic:
-  - Buffers text until sentence boundary (`.`, `?`, `!`)
-  - Flushes partial buffer on stream end
-  - Handles edge cases: ellipsis (`...`), abbreviations (`e.g.`), code blocks, decimals
-  - Incremental feeding (char by char)
-  - Minimum length threshold
-- `src/__tests__/voice-deepgram-tts.test.ts` -- TTS WebSocket stream (mocked):
-  - TTS: opens WebSocket with correct model/encoding/sample_rate
-  - TTS: `sendText()` + `flush()` sends correct Speak/Flush messages
-  - TTS: `LiveTTSEvents.Audio` yields audio chunks
-  - TTS: `finalize()` waits for all `Flushed` events then closes
-  - TTS: `abort()` immediately closes WebSocket
-  - TTS: handles Deepgram errors gracefully
-- `src/__tests__/glasses-handler-voice.test.ts` -- full voice round-trip (mocked STT + TTS + Claude):
-  - Audio in → `status: transcribing` → `transcript` → `status: thinking` → `response_text` → `response_audio` → `response_audio_end`
-  - Cancel during transcribing: aborts STT, sends `error` with `"cancelled"`
-  - Cancel during thinking: kills Claude process, sends `error` with `"cancelled"`
-  - Cancel during speaking: aborts TTS, sends `response_audio_end` + `error` with `"cancelled"`
-  - Text-only path still works without TTS
-  - Concurrent requests from same client are serialized
-- Manual: browser test UI with mic + speaker for full voice loop
-
-**Audio format**: Config-driven via `voice.deepgram.ttsSampleRate` (default `24000`). Phase 3 uses `linear16` at 24kHz — raw PCM, trivial to play in browser via Web Audio API. Phase 4 sets `ttsSampleRate: 8000` to match glasses Bluetooth HFP speaker path.
+**Test UI**: Full mic + speaker with Web Audio API playback, push-to-talk, visual status indicators.
 
 ### Phase 4: Android Companion App
 
