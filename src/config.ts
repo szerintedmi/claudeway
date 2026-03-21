@@ -89,11 +89,14 @@ export function permissionKey(p: UserPermissions | undefined): string {
   return parts.join(',');
 }
 
+export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
+
 export interface ChannelConfig {
   name: string;
   repo?: string;
   folder?: string;
   model?: string;
+  effort?: EffortLevel;
   systemPrompt?: string;
   timeoutMs?: number;
   responseMode?: ResponseMode;
@@ -104,6 +107,7 @@ export interface ChannelConfig {
 
 export interface Defaults {
   model: string;
+  effort?: EffortLevel;
   systemPrompt: string;
   timeoutMs: number;
   responseMode: ResponseMode;
@@ -276,6 +280,7 @@ export function getChannelConfig(config: Config, channelId: string): ChannelConf
 export interface ResolvedChannelConfig extends ChannelConfig {
   folder: string;
   model: string;
+  effort?: EffortLevel;
   systemPrompt: string;
   timeoutMs: number;
   responseMode: ResponseMode;
@@ -295,6 +300,7 @@ export function resolvedChannelConfig(
     ...ch,
     folder,
     model: ch.model ?? config.defaults.model,
+    effort: ch.effort ?? config.defaults.effort,
     systemPrompt: ch.systemPrompt ?? config.defaults.systemPrompt,
     timeoutMs: ch.timeoutMs ?? config.defaults.timeoutMs,
     responseMode: ch.responseMode ?? config.defaults.responseMode,

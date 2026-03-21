@@ -16,6 +16,7 @@ export interface ClaudeOptions {
   message: string;
   cwd: string;
   model: string;
+  effort?: string;
   systemPrompt: string;
   timeoutMs: number;
   channelId: string;
@@ -750,6 +751,7 @@ function buildClaudeArgs(
     ...(outputFormat === 'stream-json' ? ['--verbose', '--include-partial-messages'] : []),
     '--model',
     model,
+    ...(options.effort ? ['--effort', options.effort] : []),
     ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId]),
     '--append-system-prompt',
     prompt,
@@ -902,6 +904,7 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
     '--replay-user-messages',
     '--model',
     model,
+    ...(options.effort ? ['--effort', options.effort] : []),
     ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId]),
     '--append-system-prompt',
     prompt,

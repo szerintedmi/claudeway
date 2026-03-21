@@ -4,6 +4,7 @@ import {
   resolvedDmConfig,
   resolveUserPermissions,
   resolvedTempDir,
+  type ResolvedChannelConfig,
   type UserPermissions,
 } from '../config.js';
 import { runClaude, runClaudeStreaming, runClaudePersistentStreaming } from '../claude.js';
@@ -92,7 +93,10 @@ export async function processQueuedMessage(
     permissions,
     scratchDir,
   );
-  const effectiveConfig = { ...channelConfig, systemPrompt: effectiveSystemPrompt };
+  const effectiveConfig: ResolvedChannelConfig = {
+    ...channelConfig,
+    systemPrompt: effectiveSystemPrompt,
+  };
 
   processingMessages.add(processingKey(queued.channelId, queued.ts));
   await responder.onProcessing();
@@ -133,6 +137,7 @@ export async function processQueuedMessage(
         message: queued.text,
         cwd: channelConfig.folder,
         model: channelConfig.model,
+        effort: effectiveConfig.effort,
         systemPrompt: effectiveConfig.systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
@@ -162,6 +167,7 @@ export async function processQueuedMessage(
         message: queued.text,
         cwd: channelConfig.folder,
         model: channelConfig.model,
+        effort: effectiveConfig.effort,
         systemPrompt: effectiveConfig.systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
