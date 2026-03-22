@@ -67,6 +67,11 @@ private fun ClaudewayNavHost() {
     val navController = rememberNavController()
     val viewModel: VoiceViewModel = viewModel()
     val uiState by viewModel.uiState.collectAsState()
+    val micLevel by viewModel.micLevel.collectAsState()
+    val availableRoutes by viewModel.availableRoutes.collectAsState()
+    val activeRouteId by viewModel.activeRouteId.collectAsState()
+    val selectedRouteId by viewModel.selectedRouteId.collectAsState()
+
     val prefs = viewModel.getApplication<android.app.Application>()
         .getSharedPreferences("claudeway", android.content.Context.MODE_PRIVATE)
     val savedUrl = remember { prefs.getString("server_url", "") ?: "" }
@@ -96,13 +101,21 @@ private fun ClaudewayNavHost() {
                 voiceFlowState = uiState.voiceFlowState,
                 statusText = uiState.statusText,
                 audioRouteState = uiState.audioRouteState,
+                inputMode = uiState.inputMode,
+                micLevel = micLevel,
                 messages = uiState.messages,
                 activeTranscript = uiState.activeTranscript,
                 activeResponseText = uiState.activeResponseText,
+                availableRoutes = availableRoutes,
+                activeRouteId = activeRouteId,
+                selectedRouteId = selectedRouteId,
                 onSendText = { viewModel.sendText(it) },
                 onStartRecording = { viewModel.startRecording() },
                 onStopRecording = { viewModel.stopRecording() },
                 onCancel = { viewModel.cancelCurrentRequest() },
+                onSetInputMode = { viewModel.setInputMode(it) },
+                onApplyAudioRoute = { routeId -> viewModel.applyAudioRouteSelection(routeId) },
+                deviceToasts = viewModel.deviceToasts,
             )
         }
     }

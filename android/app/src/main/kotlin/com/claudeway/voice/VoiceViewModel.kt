@@ -3,10 +3,12 @@ package com.claudeway.voice
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.claudeway.audio.AudioDevice
 import com.claudeway.audio.AudioPlayer
 import com.claudeway.audio.AudioRecorder
 import com.claudeway.audio.AudioRouteState
 import com.claudeway.audio.AudioRouter
+import com.claudeway.audio.DeviceToast
 import com.claudeway.glasses.GlassesManager
 import com.claudeway.glasses.GlassesState
 import com.claudeway.network.AudioChunkMessage
@@ -30,6 +32,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -56,6 +59,9 @@ data class ConversationMessage(
 
 enum class MessageRole { User, Assistant, Error, Status }
 
+/** Text vs Voice input mode for the dual-mode input bar. */
+enum class InputMode { Text, Voice }
+
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.Disconnected,
     val connectionError: ConnectionError? = null,
@@ -67,6 +73,7 @@ data class UiState(
     val messages: List<ConversationMessage> = emptyList(),
     val activeTranscript: String? = null,
     val activeResponseText: String? = null,
+    val inputMode: InputMode = InputMode.Voice,
 )
 
 // --- ViewModel ---
@@ -80,6 +87,18 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+
+    /** Normalized mic level (0-1) for the voice visualizer. */
+    val micLevel: StateFlow<Float> = audioRecorder.micLevel
+
+    val availableRoutes: StateFlow<List<AudioDevice>> = audioRouter.availableRoutes
+
+    val activeRouteId: StateFlow<Int?> = audioRouter.activeRouteId
+
+    val selectedRouteId: StateFlow<Int> = audioRouter.selectedRouteId
+
+    /** Device connect/disconnect toast events. */
+    val deviceToasts: SharedFlow<DeviceToast> = audioRouter.toasts
 
     private var recordingJob: Job? = null
     private var currentRequestId: String? = null
@@ -136,6 +155,18 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
         // Reconnect immediately when app returns to foreground
         ProcessLifecycleOwner.get().lifecycle.addObserver(lifecycleObserver)
+    }
+
+    // --- Input mode ---
+
+    fun setInputMode(mode: InputMode) {
+        _uiState.update { it.copy(inputMode = mode) }
+    }
+
+    // --- Audio device management ---
+
+    fun applyAudioRouteSelection(routeId: Int) {
+        audioRouter.applyRouteSelection(routeId)
     }
 
     // --- Connection ---
@@ -236,7 +267,6 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         audioRecorder.stopRecording()
         recordingJob?.cancel()
         recordingJob = null
-        // MODE_IN_COMMUNICATION stays on for the entire session — no toggling.
 
         if (!webSocket.send(AudioEndMessage(requestId = requestId))) {
             resetToIdle()
@@ -343,7 +373,6 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         if (msg.status == "tool") {
             when (msg.phase) {
                 "complete" -> {
-                    // Tool completed — add to chat history
                     val toolText = buildString {
                         append(msg.toolName ?: "Tool")
                         msg.keyArg?.let {
@@ -363,7 +392,6 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                     return
                 }
                 "subagent_completed" -> {
-                    // Agent completed — add with usage stats
                     val agentText = buildString {
                         append(msg.toolName ?: "Agent")
                         msg.description?.let { append("($it)") }
@@ -476,7 +504,6 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         if (!isActiveRequest(msg.requestId)) return
 
         audioPlayer.endOfAudio()
-        // (MODE_IN_COMMUNICATION stays on for the session)
         _uiState.update {
             it.copy(
                 voiceFlowState = VoiceFlowState.Idle,
@@ -493,9 +520,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         if (msg.requestId != null && !isActiveRequest(msg.requestId)) return
 
         audioPlayer.stop()
-        // (MODE_IN_COMMUNICATION stays on for the session)
         if (msg.message == "cancelled") {
-            // Expected cancellation — return to idle silently
             _uiState.update {
                 it.copy(
                     voiceFlowState = VoiceFlowState.Idle,
@@ -504,7 +529,6 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         } else if (msg.message == "No speech detected") {
-            // Subtle status — not a prominent error
             _uiState.update { state ->
                 state.copy(
                     voiceFlowState = VoiceFlowState.Idle,

@@ -58,6 +58,7 @@ dependencies {
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons)
+    implementation(libs.compose.ui.text.google.fonts)
     debugImplementation(libs.compose.ui.tooling)
 
     // AndroidX

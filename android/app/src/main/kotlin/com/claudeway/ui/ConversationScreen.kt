@@ -2,10 +2,13 @@ package com.claudeway.ui
 
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
@@ -16,7 +19,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -30,33 +32,60 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.Hearing
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.claudeway.audio.AUTO_ROUTE_ID
+import com.claudeway.audio.AudioDevice
+import com.claudeway.audio.AudioRouteState
+import com.claudeway.audio.DeviceToast
+import com.claudeway.audio.EARPIECE_ROUTE_ID
+import com.claudeway.audio.PHONE_SPEAKER_ROUTE_ID
+import com.claudeway.network.ConnectionState
 import com.claudeway.voice.ConversationMessage
+import com.claudeway.voice.InputMode
 import com.claudeway.voice.MessageRole
 import com.claudeway.voice.VoiceFlowState
-import com.claudeway.audio.AudioRouteState
-import com.claudeway.network.ConnectionState
+import kotlinx.coroutines.flow.SharedFlow
 
 @Composable
 fun ConversationScreen(
@@ -64,34 +93,50 @@ fun ConversationScreen(
     voiceFlowState: VoiceFlowState,
     statusText: String?,
     audioRouteState: AudioRouteState,
+    inputMode: InputMode,
+    micLevel: Float,
     messages: List<ConversationMessage>,
     activeTranscript: String?,
     activeResponseText: String?,
+    availableRoutes: List<AudioDevice>,
+    activeRouteId: Int?,
+    selectedRouteId: Int,
     onSendText: (String) -> Unit,
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit,
     onCancel: () -> Unit,
+    onSetInputMode: (InputMode) -> Unit,
+    onApplyAudioRoute: (routeId: Int) -> Unit,
+    deviceToasts: SharedFlow<DeviceToast>,
 ) {
     val listState = rememberLazyListState()
     var textInput by rememberSaveable { mutableStateOf("") }
+    var showAudioSettings by rememberSaveable { mutableStateOf(false) }
+    val snackbarHostState = remember { SnackbarHostState() }
 
-    // Auto-scroll to bottom when messages change or status updates
     LaunchedEffect(messages.size, activeResponseText, statusText) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
         }
     }
 
-    Scaffold { padding ->
+    LaunchedEffect(Unit) {
+        deviceToasts.collect { toast ->
+            snackbarHostState.showSnackbar(toast.message)
+        }
+    }
+
+    Scaffold(
+        containerColor = ObsidianTokens.Background,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+    ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .imePadding(),
+                .padding(padding),
         ) {
             val isConnected = connectionState == ConnectionState.Connected
 
-            // Connection status bar (only for connection issues — stays at top)
             val connectionStatusText = when {
                 connectionState == ConnectionState.Reconnecting -> "Reconnecting..."
                 connectionState == ConnectionState.Connecting -> "Connecting..."
@@ -107,11 +152,9 @@ fun ConversationScreen(
                 )
             }
 
-            // Activity status text (thinking/transcribing/speaking/tool) — shown inline at bottom
             val activityStatusText = if (isConnected) statusText else null
             val isActive = voiceFlowState != VoiceFlowState.Idle && voiceFlowState != VoiceFlowState.Error
 
-            // Message list
             LazyColumn(
                 state = listState,
                 modifier = Modifier
@@ -126,7 +169,6 @@ fun ConversationScreen(
                     MessageBubble(message = msg)
                 }
 
-                // Active transcript (partial STT)
                 if (activeTranscript != null) {
                     item {
                         MessageBubble(
@@ -140,7 +182,6 @@ fun ConversationScreen(
                     }
                 }
 
-                // Active response (streaming)
                 if (activeResponseText != null) {
                     item {
                         MessageBubble(
@@ -154,7 +195,6 @@ fun ConversationScreen(
                     }
                 }
 
-                // Inline activity status (below last message)
                 if (activityStatusText != null && isActive) {
                     item {
                         InlineStatusIndicator(
@@ -168,22 +208,43 @@ fun ConversationScreen(
                 item { Spacer(modifier = Modifier.height(8.dp)) }
             }
 
-            // Input bar
-            InputBar(
-                textInput = textInput,
-                onTextChange = { textInput = it },
-                onSendText = {
-                    onSendText(textInput)
-                    textInput = ""
-                },
-                voiceFlowState = voiceFlowState,
-                audioRouteState = audioRouteState,
-                isConnected = isConnected,
-                onStartRecording = onStartRecording,
-                onStopRecording = onStopRecording,
-                onCancel = onCancel,
-            )
+            when (inputMode) {
+                InputMode.Text -> TextInputBar(
+                    textInput = textInput,
+                    onTextChange = { textInput = it },
+                    onSendText = {
+                        onSendText(textInput)
+                        textInput = ""
+                    },
+                    voiceFlowState = voiceFlowState,
+                    isConnected = isConnected,
+                    onSwitchToVoice = { onSetInputMode(InputMode.Voice) },
+                )
+
+                InputMode.Voice -> VoiceInputBar(
+                    voiceFlowState = voiceFlowState,
+                    micLevel = micLevel,
+                    isConnected = isConnected,
+                    onStartRecording = onStartRecording,
+                    onStopRecording = onStopRecording,
+                    onSwitchToText = { onSetInputMode(InputMode.Text) },
+                    onOpenAudioSettings = { showAudioSettings = true },
+                )
+            }
         }
+    }
+
+    if (showAudioSettings) {
+        AudioSettingsSheet(
+            availableRoutes = availableRoutes,
+            activeRouteId = activeRouteId,
+            selectedRouteId = selectedRouteId,
+            onApply = { routeId ->
+                onApplyAudioRoute(routeId)
+                showAudioSettings = false
+            },
+            onDismiss = { showAudioSettings = false },
+        )
     }
 }
 
@@ -195,10 +256,10 @@ private fun StatusBar(
     showCancel: Boolean = true,
 ) {
     val bgColor = when (flowState) {
-        VoiceFlowState.Recording -> Color(0xFFE53935) // Red
-        VoiceFlowState.Transcribing -> Color(0xFFFFA726) // Orange
-        VoiceFlowState.Thinking -> Color(0xFF42A5F5) // Blue
-        VoiceFlowState.Speaking -> Color(0xFF66BB6A) // Green
+        VoiceFlowState.Recording -> Color(0xFFE53935)
+        VoiceFlowState.Transcribing -> Color(0xFFFFA726)
+        VoiceFlowState.Thinking -> Color(0xFF42A5F5)
+        VoiceFlowState.Speaking -> Color(0xFF66BB6A)
         VoiceFlowState.Error -> Color(0xFFE53935)
         VoiceFlowState.Idle -> MaterialTheme.colorScheme.surfaceVariant
     }
@@ -210,7 +271,6 @@ private fun StatusBar(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Pulsing dot
         Box(
             modifier = Modifier
                 .size(8.dp)
@@ -235,7 +295,6 @@ private fun StatusBar(
     }
 }
 
-/** Inline activity status shown below the last message in the conversation. */
 @Composable
 private fun InlineStatusIndicator(
     text: String,
@@ -297,7 +356,6 @@ private fun MessageBubble(message: ConversationMessage, isPartial: Boolean = fal
     val isError = message.role == MessageRole.Error
     val isStatus = message.role == MessageRole.Status
 
-    // Status messages render inline without a bubble
     if (isStatus) {
         StatusMessageRow(text = message.text)
         return
@@ -305,13 +363,13 @@ private fun MessageBubble(message: ConversationMessage, isPartial: Boolean = fal
 
     val bgColor = when {
         isError -> MaterialTheme.colorScheme.errorContainer
-        isUser -> MaterialTheme.colorScheme.primaryContainer
-        else -> MaterialTheme.colorScheme.surfaceVariant
+        isUser -> ObsidianTokens.PrimaryContainer
+        else -> ObsidianTokens.SurfaceContainerHighest
     }
     val textColor = when {
         isError -> MaterialTheme.colorScheme.onErrorContainer
-        isUser -> MaterialTheme.colorScheme.onPrimaryContainer
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
+        isUser -> ObsidianTokens.OnPrimary
+        else -> ObsidianTokens.OnSurface
     }
     val alignment = if (isUser) Alignment.End else Alignment.Start
 
@@ -323,6 +381,13 @@ private fun MessageBubble(message: ConversationMessage, isPartial: Boolean = fal
             modifier = Modifier
                 .clip(RoundedCornerShape(12.dp))
                 .background(bgColor.copy(alpha = if (isPartial) 0.6f else 1f))
+                .then(
+                    if (!isUser && !isError) Modifier.border(
+                        width = 1.dp,
+                        color = ObsidianTokens.Primary.copy(alpha = 0.2f),
+                        shape = RoundedCornerShape(12.dp),
+                    ) else Modifier
+                )
                 .padding(horizontal = 12.dp, vertical = 8.dp)
                 .fillMaxWidth(0.85f),
         ) {
@@ -335,10 +400,8 @@ private fun MessageBubble(message: ConversationMessage, isPartial: Boolean = fal
     }
 }
 
-/** Inline status/tool event row — subtle, no bubble, left-aligned with a dot. */
 @Composable
 private fun StatusMessageRow(text: String) {
-    // Non-action statuses (e.g. "No speech detected") use muted styling
     val isAction = !text.startsWith("No speech")
     val dotColor = if (isAction) Color(0xFF66BB6A) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
     val textAlpha = if (isAction) 0.7f else 0.5f
@@ -350,7 +413,7 @@ private fun StatusMessageRow(text: String) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = if (isAction) "●" else "○",
+            text = if (isAction) "\u25CF" else "\u25CB",
             style = MaterialTheme.typography.bodySmall,
             color = dotColor,
         )
@@ -364,149 +427,513 @@ private fun StatusMessageRow(text: String) {
 }
 
 @Composable
-private fun InputBar(
+private fun TextInputBar(
     textInput: String,
     onTextChange: (String) -> Unit,
     onSendText: () -> Unit,
     voiceFlowState: VoiceFlowState,
-    audioRouteState: AudioRouteState,
     isConnected: Boolean,
-    onStartRecording: () -> Unit,
-    onStopRecording: () -> Unit,
-    onCancel: () -> Unit,
+    onSwitchToVoice: () -> Unit,
 ) {
-    val isRecording = voiceFlowState == VoiceFlowState.Recording
-    // Only block input during recording/transcribing — allow barge-in during thinking/speaking
     val isBusy = !isConnected || voiceFlowState == VoiceFlowState.Recording || voiceFlowState == VoiceFlowState.Transcribing
-
-    // Hold stable references for the pointer input coroutine — using isBusy as a
-    // pointerInput key would restart the coroutine mid-gesture, cancelling tryAwaitRelease()
-    val currentIsBusy by rememberUpdatedState(isBusy)
-    val currentOnStartRecording by rememberUpdatedState(onStartRecording)
-    val currentOnStopRecording by rememberUpdatedState(onStopRecording)
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .then(
-                if (isRecording) Modifier.background(Color(0xFFE53935).copy(alpha = 0.1f))
-                else Modifier
-            )
+            .background(ObsidianTokens.SurfaceContainerLowest.copy(alpha = 0.9f))
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // Left area: text input OR recording indicator (mic button stays composed)
-        if (isRecording) {
-            Box(modifier = Modifier.weight(1f)) {
-                RecordingIndicator()
-            }
-        } else {
-            Row(
-                modifier = Modifier.weight(1f),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedTextField(
-                    value = textInput,
-                    onValueChange = onTextChange,
-                    placeholder = { Text("Type a message...") },
-                    singleLine = true,
-                    enabled = !isBusy,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = { if (textInput.isNotBlank()) onSendText() }),
-                    modifier = Modifier.weight(1f),
-                )
-
-                if (textInput.isNotBlank() && !isBusy) {
-                    IconButton(onClick = onSendText) {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
-                    }
-                }
-            }
+        IconButton(
+            onClick = onSwitchToVoice,
+            modifier = Modifier.size(40.dp),
+        ) {
+            Icon(
+                Icons.Default.Mic,
+                contentDescription = "Switch to voice",
+                tint = ObsidianTokens.OnSurfaceVariant,
+                modifier = Modifier.size(20.dp),
+            )
         }
 
-        // Mic button — always composed so pointerInput/tryAwaitRelease() survives recording state
-        val micColor = if (isRecording) Color(0xFFE53935) else MaterialTheme.colorScheme.primary
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .background(micColor)
-                    .pointerInput(Unit) {
-                        awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            down.consume()
-                            if (!currentIsBusy) {
-                                currentOnStartRecording()
-                                // Wait for finger up anywhere on screen, not just within bounds
-                                do {
-                                    val event = awaitPointerEvent()
-                                } while (event.changes.any { it.pressed })
-                                currentOnStopRecording()
-                            }
-                        }
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
+        OutlinedTextField(
+            value = textInput,
+            onValueChange = onTextChange,
+            placeholder = { Text("Type a message...") },
+            singleLine = true,
+            enabled = !isBusy,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(onSend = { if (textInput.isNotBlank()) onSendText() }),
+            modifier = Modifier.weight(1f),
+        )
+
+        if (textInput.isNotBlank() && !isBusy) {
+            IconButton(onClick = onSendText) {
                 Icon(
-                    Icons.Default.Mic,
-                    contentDescription = if (isRecording) "Release to send" else "Hold to talk",
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp),
-                )
-            }
-            if (!isRecording) {
-                val (micLabel, micLabelColor) = when (audioRouteState) {
-                    AudioRouteState.Routed -> "BT" to Color(0xFF4CAF50)
-                    AudioRouteState.NoDevice -> "Phone" to Color.Gray
-                    else -> "Phone" to Color.Gray
-                }
-                Text(
-                    text = micLabel,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = micLabelColor,
+                    Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "Send",
+                    tint = ObsidianTokens.Primary,
                 )
             }
         }
     }
 }
 
-/** Recording indicator that replaces the text field area while holding the mic button. */
 @Composable
-private fun RecordingIndicator() {
-    val recordingColor = Color(0xFFE53935)
-    val infiniteTransition = rememberInfiniteTransition(label = "recording")
+private fun VoiceInputBar(
+    voiceFlowState: VoiceFlowState,
+    micLevel: Float,
+    isConnected: Boolean,
+    onStartRecording: () -> Unit,
+    onStopRecording: () -> Unit,
+    onSwitchToText: () -> Unit,
+    onOpenAudioSettings: () -> Unit,
+) {
+    val isRecording = voiceFlowState == VoiceFlowState.Recording
+    val isBusy = !isConnected || voiceFlowState == VoiceFlowState.Transcribing
+
+    val currentOnStartRecording by rememberUpdatedState(onStartRecording)
+    val currentOnStopRecording by rememberUpdatedState(onStopRecording)
+    val currentIsBusy by rememberUpdatedState(isBusy)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(ObsidianTokens.SurfaceContainerLowest.copy(alpha = 0.9f))
+            .padding(top = 12.dp, bottom = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        if (isRecording) {
+            AudioVisualizer(
+                micLevel = micLevel,
+                modifier = Modifier.padding(bottom = 12.dp),
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceEvenly,
+        ) {
+            IconButton(
+                onClick = onOpenAudioSettings,
+                modifier = Modifier.size(48.dp),
+            ) {
+                Icon(
+                    Icons.Default.Tune,
+                    contentDescription = "Audio settings",
+                    tint = ObsidianTokens.OnSurfaceVariant.copy(alpha = 0.7f),
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+
+            MicButton(
+                isRecording = isRecording,
+                isBusy = currentIsBusy,
+                onStartRecording = currentOnStartRecording,
+                onStopRecording = currentOnStopRecording,
+            )
+
+            IconButton(
+                onClick = onSwitchToText,
+                modifier = Modifier.size(48.dp),
+            ) {
+                Icon(
+                    Icons.Default.Keyboard,
+                    contentDescription = "Switch to text",
+                    tint = ObsidianTokens.OnSurfaceVariant.copy(alpha = 0.7f),
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MicButton(
+    isRecording: Boolean,
+    isBusy: Boolean,
+    onStartRecording: () -> Unit,
+    onStopRecording: () -> Unit,
+) {
+    val currentIsBusy by rememberUpdatedState(isBusy)
+    val currentOnStartRecording by rememberUpdatedState(onStartRecording)
+    val currentOnStopRecording by rememberUpdatedState(onStopRecording)
+
+    val infiniteTransition = rememberInfiniteTransition(label = "mic-pulse")
     val pulseScale by infiniteTransition.animateFloat(
         initialValue = 1f,
         targetValue = 1.3f,
         animationSpec = infiniteRepeatable(
-            animation = tween(600),
+            animation = tween(1000),
             repeatMode = RepeatMode.Reverse,
         ),
-        label = "dot-pulse",
+        label = "ring-pulse",
     )
+
+    Box(contentAlignment = Alignment.Center) {
+        if (isRecording) {
+            Box(
+                modifier = Modifier
+                    .size(120.dp)
+                    .scale(pulseScale)
+                    .blur(24.dp)
+                    .clip(CircleShape)
+                    .background(ObsidianTokens.Primary.copy(alpha = 0.2f))
+            )
+            Box(
+                modifier = Modifier
+                    .size(96.dp)
+                    .scale(pulseScale)
+                    .clip(CircleShape)
+                    .background(ObsidianTokens.Primary.copy(alpha = 0.1f))
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .size(if (isRecording) 80.dp else 72.dp)
+                .clip(CircleShape)
+                .background(
+                    brush = Brush.linearGradient(
+                        colors = listOf(
+                            ObsidianTokens.PrimaryContainer,
+                            ObsidianTokens.Primary,
+                        ),
+                    )
+                )
+                .then(
+                    if (isRecording) Modifier.border(
+                        width = 4.dp,
+                        color = ObsidianTokens.Primary.copy(alpha = 0.1f),
+                        shape = CircleShape,
+                    ) else Modifier
+                )
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        down.consume()
+                        if (!currentIsBusy) {
+                            currentOnStartRecording()
+                            do {
+                                val event = awaitPointerEvent()
+                            } while (event.changes.any { it.pressed })
+                            currentOnStopRecording()
+                        }
+                    }
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Default.Mic,
+                contentDescription = if (isRecording) "Release to send" else "Hold to talk",
+                tint = ObsidianTokens.OnPrimary,
+                modifier = Modifier.size(32.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun AudioVisualizer(
+    micLevel: Float,
+    modifier: Modifier = Modifier,
+) {
+    val barWeights = remember { floatArrayOf(0.5f, 0.7f, 0.9f, 0.6f, 1.0f, 0.8f, 0.6f, 0.4f) }
+    val barCount = 8
+    val barWidth = 5.dp
+    val barSpacing = 7.dp
+    val maxBarHeight = 56.dp
+    val minBarHeight = 6.dp
+
+    val smoothedLevel by animateFloatAsState(
+        targetValue = micLevel,
+        animationSpec = tween(100),
+        label = "mic-smooth",
+    )
+
+    val infiniteTransition = rememberInfiniteTransition(label = "idle-pulse")
+    val idlePulse by infiniteTransition.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 0.6f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "idle-pulse-anim",
+    )
+
+    val totalWidth = (barWidth + barSpacing) * barCount - barSpacing
+
+    Box(
+        modifier = modifier
+            .height(maxBarHeight)
+            .width(totalWidth)
+            .drawBehind {
+                val bw = barWidth.toPx()
+                val bs = barSpacing.toPx()
+                val maxH = maxBarHeight.toPx()
+                val minH = minBarHeight.toPx()
+
+                for (i in 0 until barCount) {
+                    val weight = barWeights[i]
+                    val effectiveLevel = if (smoothedLevel < 0.02f) {
+                        idlePulse * weight * 0.15f
+                    } else {
+                        smoothedLevel * weight
+                    }
+                    val h = (minH + effectiveLevel * (maxH - minH)).coerceIn(minH, maxH)
+                    val x = i * (bw + bs)
+                    val y = (maxH - h) / 2f
+                    val alpha = (0.3f + effectiveLevel * 0.7f).coerceIn(0.3f, 1f)
+                    drawRoundRect(
+                        color = ObsidianTokens.Primary.copy(alpha = alpha),
+                        topLeft = Offset(x, y),
+                        size = Size(bw, h),
+                        cornerRadius = CornerRadius(bw / 2f),
+                    )
+                }
+            },
+    )
+}
+
+private const val NO_PENDING = Int.MIN_VALUE
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AudioSettingsSheet(
+    availableRoutes: List<AudioDevice>,
+    activeRouteId: Int?,
+    selectedRouteId: Int,
+    onApply: (routeId: Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var pendingRouteId by remember { mutableIntStateOf(NO_PENDING) }
+    val effectiveRouteId = if (pendingRouteId == NO_PENDING) selectedRouteId else pendingRouteId
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = ObsidianTokens.SurfaceContainerLow,
+        shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
+        tonalElevation = 0.dp,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Audio Settings",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = ObsidianTokens.Primary,
+                )
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(ObsidianTokens.SurfaceContainerHigh)
+                        .clickable { onDismiss() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = ObsidianTokens.OnSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(8.dp))
+
+            RouteSection(
+                routes = availableRoutes,
+                activeRouteId = activeRouteId,
+                selectedRouteId = effectiveRouteId,
+                onSelect = { pendingRouteId = it },
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(
+                        brush = Brush.horizontalGradient(
+                            colors = listOf(
+                                ObsidianTokens.PrimaryContainer,
+                                ObsidianTokens.Primary,
+                            ),
+                        )
+                    )
+                    .clickable { onApply(effectiveRouteId) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "Apply Route",
+                    fontWeight = FontWeight.Bold,
+                    color = ObsidianTokens.OnPrimary,
+                    fontSize = 16.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RouteSection(
+    routes: List<AudioDevice>,
+    activeRouteId: Int?,
+    selectedRouteId: Int,
+    onSelect: (Int) -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(bottom = 12.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Default.Tune,
+            contentDescription = "Audio route",
+            tint = ObsidianTokens.Tertiary,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = "AUDIO ROUTE",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = ObsidianTokens.OnSurfaceVariant,
+            letterSpacing = 3.sp,
+        )
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        routes.forEach { route ->
+            RouteRow(
+                route = route,
+                isSelected = route.id == selectedRouteId,
+                isActive = route.id == activeRouteId,
+                onClick = { onSelect(route.id) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun RouteRow(
+    route: AudioDevice,
+    isSelected: Boolean,
+    isActive: Boolean,
+    onClick: () -> Unit,
+) {
+    val bgColor = if (isSelected) ObsidianTokens.SurfaceContainerHighest else ObsidianTokens.SurfaceContainer
+    val borderMod = if (isSelected) Modifier.border(
+        width = 1.dp,
+        color = ObsidianTokens.Primary.copy(alpha = 0.2f),
+        shape = RoundedCornerShape(16.dp),
+    ) else Modifier
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp),
+            .clip(RoundedCornerShape(16.dp))
+            .then(borderMod)
+            .background(bgColor)
+            .clickable(onClick = onClick)
+            .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
     ) {
+        val iconBg = if (isSelected) ObsidianTokens.Primary.copy(alpha = 0.1f) else ObsidianTokens.SurfaceContainerHighest
+        val iconColor = if (isSelected) ObsidianTokens.Primary else ObsidianTokens.OnSurfaceVariant
+
         Box(
             modifier = Modifier
-                .size(12.dp)
-                .scale(pulseScale)
+                .size(40.dp)
                 .clip(CircleShape)
-                .background(recordingColor)
-        )
-        Spacer(modifier = Modifier.width(12.dp))
-        Text(
-            text = "Listening... release to send",
-            style = MaterialTheme.typography.bodyLarge,
-            color = recordingColor,
-        )
+                .background(iconBg),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = routeIcon(route.id),
+                contentDescription = route.name,
+                tint = iconColor,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+
+        Spacer(modifier = Modifier.width(16.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = route.name,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = if (isSelected) ObsidianTokens.OnSurface else ObsidianTokens.OnSurfaceVariant,
+            )
+            Text(
+                text = routeDescription(route),
+                style = MaterialTheme.typography.labelSmall,
+                color = if (isSelected) ObsidianTokens.Primary.copy(alpha = 0.75f)
+                    else ObsidianTokens.OnSurfaceVariant.copy(alpha = 0.6f),
+            )
+        }
+
+        if (isActive) {
+            Text(
+                text = "Current",
+                style = MaterialTheme.typography.labelSmall,
+                color = ObsidianTokens.Tertiary,
+                modifier = Modifier.padding(end = 10.dp),
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .size(20.dp)
+                .border(
+                    width = 2.dp,
+                    color = if (isSelected) ObsidianTokens.Primary else ObsidianTokens.OutlineVariant,
+                    shape = CircleShape,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (isSelected) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(ObsidianTokens.Primary),
+                )
+            }
+        }
     }
+}
+
+private fun routeIcon(routeId: Int) = when (routeId) {
+    AUTO_ROUTE_ID -> Icons.Default.Tune
+    PHONE_SPEAKER_ROUTE_ID -> Icons.Default.Smartphone
+    EARPIECE_ROUTE_ID -> Icons.Default.Hearing
+    else -> Icons.Default.Headphones
+}
+
+private fun routeDescription(route: AudioDevice): String = when (route.id) {
+    AUTO_ROUTE_ID -> "Use headset when available, otherwise phone speaker"
+    PHONE_SPEAKER_ROUTE_ID -> "Built-in speaker with built-in microphone"
+    EARPIECE_ROUTE_ID -> "Private earpiece audio with built-in microphone"
+    else -> route.subtitle ?: "Use the connected headset for voice"
 }

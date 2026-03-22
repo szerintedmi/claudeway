@@ -9,6 +9,9 @@ import android.util.Base64
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
@@ -19,7 +22,7 @@ private const val TAG = "AudioRecorder"
 
 /**
  * Captures PCM audio from the device microphone (or Bluetooth SCO mic when routed).
- * Outputs 8kHz mono 16-bit signed LE PCM — matching Bluetooth HFP constraints.
+ * Outputs 16kHz mono 16-bit signed LE PCM.
  */
 class AudioRecorder {
     companion object {
@@ -36,6 +39,10 @@ class AudioRecorder {
     }
 
     private var recorder: AudioRecord? = null
+
+    /** Normalized mic level (0f = silence, 1f = max) — updated per audio chunk during recording. */
+    private val _micLevel = MutableStateFlow(0f)
+    val micLevel: StateFlow<Float> = _micLevel.asStateFlow()
 
     /**
      * Start recording and emit PCM byte arrays as a Flow.
@@ -68,6 +75,7 @@ class AudioRecorder {
         }
 
         record.startRecording()
+        _micLevel.value = 0f
 
         // Log which device is actually being used
         val activeDevice = record.routedDevice
@@ -87,10 +95,14 @@ class AudioRecorder {
             while (coroutineContext.isActive && recorder != null) {
                 val bytesRead = record.read(buffer, 0, buffer.size)
                 if (bytesRead > 0) {
+                    val peak = peakAmplitude(buffer, bytesRead)
+                    // Normalize to 0-1 with light smoothing
+                    val normalized = (peak / 32767f).coerceIn(0f, 1f)
+                    _micLevel.value = normalized
+
                     // Log audio level for first few chunks to diagnose silent audio
                     if (chunkCount < 10 || chunkCount % 50 == 0) {
-                        val maxAmplitude = peakAmplitude(buffer, bytesRead)
-                        Log.d(TAG, "Chunk $chunkCount: ${bytesRead}B, peak=$maxAmplitude")
+                        Log.d(TAG, "Chunk $chunkCount: ${bytesRead}B, peak=$peak")
                     }
                     chunkCount++
                     emit(buffer.copyOf(bytesRead))
@@ -101,6 +113,7 @@ class AudioRecorder {
             }
         } finally {
             Log.d(TAG, "Recording stopped after $chunkCount chunks")
+            _micLevel.value = 0f
             record.stop()
             record.release()
             recorder = null
@@ -127,5 +140,18 @@ class AudioRecorder {
             i += 2
         }
         return peak
+    }
+
+    private fun deviceTypeName(type: Int?): String = when (type) {
+        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "BUILTIN_EARPIECE"
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "BUILTIN_SPEAKER"
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "BLUETOOTH_SCO"
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "BLUETOOTH_A2DP"
+        AudioDeviceInfo.TYPE_BLE_HEADSET -> "BLE_HEADSET"
+        AudioDeviceInfo.TYPE_BLE_SPEAKER -> "BLE_SPEAKER"
+        AudioDeviceInfo.TYPE_WIRED_HEADSET -> "WIRED_HEADSET"
+        AudioDeviceInfo.TYPE_USB_DEVICE -> "USB_DEVICE"
+        null -> "null"
+        else -> "UNKNOWN($type)"
     }
 }
