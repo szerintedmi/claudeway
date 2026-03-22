@@ -1,4 +1,4 @@
-// Glasses WebSocket protocol types
+// Voice WebSocket protocol types
 
 // --- Client -> Server ---
 
@@ -39,7 +39,7 @@ export interface AuthMessage {
   token: string;
 }
 
-export type GlassesClientMessage =
+export type VoiceClientMessage =
   | TextMessage
   | AudioStartMessage
   | AudioChunkMessage
@@ -97,7 +97,7 @@ export interface PongMessage {
   type: 'pong';
 }
 
-export type GlassesServerMessage =
+export type VoiceServerMessage =
   | StatusMessage
   | ResponseTextMessage
   | ResponseAudioMessage
@@ -120,7 +120,7 @@ const CLIENT_MESSAGE_TYPES = new Set([
  * Parse and validate a raw WebSocket message into a typed client message.
  * Throws on invalid input.
  */
-export function parseClientMessage(raw: string): GlassesClientMessage {
+export function parseClientMessage(raw: string): VoiceClientMessage {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -198,6 +198,6 @@ export function parseClientMessage(raw: string): GlassesClientMessage {
 /**
  * Serialize a server message to JSON string.
  */
-export function serializeServerMessage(msg: GlassesServerMessage): string {
+export function serializeServerMessage(msg: VoiceServerMessage): string {
   return JSON.stringify(msg);
 }

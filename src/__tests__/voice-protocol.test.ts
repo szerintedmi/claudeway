@@ -2,8 +2,8 @@ import { describe, it, expect } from 'bun:test';
 import {
   parseClientMessage,
   serializeServerMessage,
-  type GlassesServerMessage,
-} from '../adapters/glasses/protocol.js';
+  type VoiceServerMessage,
+} from '../adapters/voice/protocol.js';
 
 describe('parseClientMessage', () => {
   it('parses a valid text message', () => {
@@ -132,13 +132,13 @@ describe('parseClientMessage', () => {
 
 describe('serializeServerMessage', () => {
   it('serializes a status message', () => {
-    const msg: GlassesServerMessage = { type: 'status', requestId: 'r1', status: 'thinking' };
+    const msg: VoiceServerMessage = { type: 'status', requestId: 'r1', status: 'thinking' };
     const json = JSON.parse(serializeServerMessage(msg));
     expect(json).toEqual({ type: 'status', requestId: 'r1', status: 'thinking' });
   });
 
   it('serializes a response_text message', () => {
-    const msg: GlassesServerMessage = {
+    const msg: VoiceServerMessage = {
       type: 'response_text',
       requestId: 'r1',
       text: 'hello',
@@ -149,7 +149,7 @@ describe('serializeServerMessage', () => {
   });
 
   it('serializes a transcript message', () => {
-    const msg: GlassesServerMessage = {
+    const msg: VoiceServerMessage = {
       type: 'transcript',
       requestId: 'r1',
       text: 'spoken text',
@@ -165,19 +165,19 @@ describe('serializeServerMessage', () => {
   });
 
   it('serializes an error message with requestId', () => {
-    const msg: GlassesServerMessage = { type: 'error', requestId: 'r1', message: 'oops' };
+    const msg: VoiceServerMessage = { type: 'error', requestId: 'r1', message: 'oops' };
     const json = JSON.parse(serializeServerMessage(msg));
     expect(json).toEqual({ type: 'error', requestId: 'r1', message: 'oops' });
   });
 
   it('serializes an error message with null requestId', () => {
-    const msg: GlassesServerMessage = { type: 'error', requestId: null, message: 'bad' };
+    const msg: VoiceServerMessage = { type: 'error', requestId: null, message: 'bad' };
     const json = JSON.parse(serializeServerMessage(msg));
     expect(json).toEqual({ type: 'error', requestId: null, message: 'bad' });
   });
 
   it('serializes a pong message', () => {
-    const msg: GlassesServerMessage = { type: 'pong' };
+    const msg: VoiceServerMessage = { type: 'pong' };
     const json = JSON.parse(serializeServerMessage(msg));
     expect(json).toEqual({ type: 'pong' });
   });

@@ -116,16 +116,16 @@ export interface Defaults {
   tempDir?: string;
 }
 
-export interface GlassesTokenConfig {
+export interface VoiceTokenConfig {
   token: string;
   userId: string;
   defaultChannel: string;
 }
 
-export interface GlassesServerConfig {
+export interface VoiceServerConfig {
   enabled: boolean;
   port: number;
-  auth: { tokens: GlassesTokenConfig[] };
+  auth: { tokens: VoiceTokenConfig[] };
 }
 
 export interface DeepgramConfig {
@@ -147,7 +147,7 @@ export interface Config {
   channels: Record<string, ChannelConfig>;
   defaults: Defaults;
   botOwner?: string;
-  glassesServer?: GlassesServerConfig;
+  voiceServer?: VoiceServerConfig;
   voice?: VoiceConfig;
 }
 
@@ -317,11 +317,11 @@ export function interpolateEnvVars(value: string): string {
 }
 
 /**
- * Resolve a raw token (possibly with env var interpolation) to its GlassesTokenConfig.
+ * Resolve a raw token (possibly with env var interpolation) to its VoiceTokenConfig.
  * Returns null if no matching token is found.
  */
-export function resolveGlassesToken(config: Config, rawToken: string): GlassesTokenConfig | null {
-  const tokens = config.glassesServer?.auth?.tokens;
+export function resolveVoiceToken(config: Config, rawToken: string): VoiceTokenConfig | null {
+  const tokens = config.voiceServer?.auth?.tokens;
   if (!tokens) return null;
   for (const entry of tokens) {
     const resolved = interpolateEnvVars(entry.token);

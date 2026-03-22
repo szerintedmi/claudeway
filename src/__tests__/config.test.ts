@@ -7,7 +7,7 @@ import {
   loadConfig,
   saveConfig,
   resolveFolder,
-  resolveGlassesToken,
+  resolveVoiceToken,
   interpolateEnvVars,
   DATA_DIR,
   type Config,
@@ -309,12 +309,12 @@ describe('resolvedChannelConfig with repos', () => {
   });
 });
 
-describe('glassesServer config', () => {
+describe('voiceServer config', () => {
   let tmpDir: string;
   const originalCwd = process.cwd;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'claudeway-glasses-config-'));
+    tmpDir = mkdtempSync(join(tmpdir(), 'claudeway-voice-config-'));
     process.cwd = () => tmpDir;
   });
 
@@ -323,13 +323,13 @@ describe('glassesServer config', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('loads config with glassesServer section', () => {
+  it('loads config with voiceServer section', () => {
     const yaml = `
 channels:
   C001:
     name: test
     folder: /test
-glassesServer:
+voiceServer:
   enabled: true
   port: 8765
   auth:
@@ -345,13 +345,13 @@ defaults:
 `;
     writeFileSync(join(tmpDir, 'config.yaml'), yaml);
     const config = loadConfig();
-    expect(config.glassesServer?.enabled).toBe(true);
-    expect(config.glassesServer?.port).toBe(8765);
-    expect(config.glassesServer?.auth.tokens).toHaveLength(1);
-    expect(config.glassesServer?.auth.tokens[0].userId).toBe('U001');
+    expect(config.voiceServer?.enabled).toBe(true);
+    expect(config.voiceServer?.port).toBe(8765);
+    expect(config.voiceServer?.auth.tokens).toHaveLength(1);
+    expect(config.voiceServer?.auth.tokens[0].userId).toBe('U001');
   });
 
-  it('loads config without glassesServer (undefined, no error)', () => {
+  it('loads config without voiceServer (undefined, no error)', () => {
     const yaml = `
 channels:
   C001:
@@ -365,15 +365,15 @@ defaults:
 `;
     writeFileSync(join(tmpDir, 'config.yaml'), yaml);
     const config = loadConfig();
-    expect(config.glassesServer).toBeUndefined();
+    expect(config.voiceServer).toBeUndefined();
   });
 });
 
-describe('resolveGlassesToken', () => {
+describe('resolveVoiceToken', () => {
   const config: Config = {
     channels: { C001: { name: 'test', folder: '/test' } },
     defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
-    glassesServer: {
+    voiceServer: {
       enabled: true,
       port: 8765,
       auth: {
@@ -386,32 +386,32 @@ describe('resolveGlassesToken', () => {
   };
 
   it('returns matching token config', () => {
-    const result = resolveGlassesToken(config, 'secret-abc');
+    const result = resolveVoiceToken(config, 'secret-abc');
     expect(result).toEqual({ token: 'secret-abc', userId: 'U001', defaultChannel: 'C001' });
   });
 
   it('returns null for non-matching token', () => {
-    expect(resolveGlassesToken(config, 'wrong-token')).toBeNull();
+    expect(resolveVoiceToken(config, 'wrong-token')).toBeNull();
   });
 
-  it('returns null when glassesServer is absent', () => {
-    const noGlasses: Config = {
+  it('returns null when voiceServer is absent', () => {
+    const noVoice: Config = {
       channels: { C001: { name: 'test', folder: '/test' } },
       defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
     };
-    expect(resolveGlassesToken(noGlasses, 'anything')).toBeNull();
+    expect(resolveVoiceToken(noVoice, 'anything')).toBeNull();
   });
 });
 
 describe('interpolateEnvVars', () => {
   it('replaces env var references', () => {
-    const orig = process.env.TEST_GLASSES_VAR;
-    process.env.TEST_GLASSES_VAR = 'my-secret';
+    const orig = process.env.TEST_VOICE_VAR;
+    process.env.TEST_VOICE_VAR = 'my-secret';
     try {
-      expect(interpolateEnvVars('${TEST_GLASSES_VAR}')).toBe('my-secret');
+      expect(interpolateEnvVars('${TEST_VOICE_VAR}')).toBe('my-secret');
     } finally {
-      if (orig === undefined) delete process.env.TEST_GLASSES_VAR;
-      else process.env.TEST_GLASSES_VAR = orig;
+      if (orig === undefined) delete process.env.TEST_VOICE_VAR;
+      else process.env.TEST_VOICE_VAR = orig;
     }
   });
 
@@ -423,26 +423,26 @@ describe('interpolateEnvVars', () => {
     expect(interpolateEnvVars('plain-token')).toBe('plain-token');
   });
 
-  it('resolves glasses token with env var interpolation', () => {
-    const orig = process.env.TEST_GLASSES_TOKEN;
-    process.env.TEST_GLASSES_TOKEN = 'resolved-secret';
+  it('resolves voice token with env var interpolation', () => {
+    const orig = process.env.TEST_VOICE_TOKEN;
+    process.env.TEST_VOICE_TOKEN = 'resolved-secret';
     try {
       const config: Config = {
         channels: { C001: { name: 'test', folder: '/test' } },
         defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
-        glassesServer: {
+        voiceServer: {
           enabled: true,
           port: 8765,
           auth: {
-            tokens: [{ token: '${TEST_GLASSES_TOKEN}', userId: 'U001', defaultChannel: 'C001' }],
+            tokens: [{ token: '${TEST_VOICE_TOKEN}', userId: 'U001', defaultChannel: 'C001' }],
           },
         },
       };
-      const result = resolveGlassesToken(config, 'resolved-secret');
+      const result = resolveVoiceToken(config, 'resolved-secret');
       expect(result?.userId).toBe('U001');
     } finally {
-      if (orig === undefined) delete process.env.TEST_GLASSES_TOKEN;
-      else process.env.TEST_GLASSES_TOKEN = orig;
+      if (orig === undefined) delete process.env.TEST_VOICE_TOKEN;
+      else process.env.TEST_VOICE_TOKEN = orig;
     }
   });
 });

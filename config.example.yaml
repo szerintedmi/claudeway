@@ -24,10 +24,10 @@ channels:
     #   - "U0DEV00002": [git]              # git access, Jira read-only
     #   - "U0VIEW0003"                     # read-only (default)
 
-  # Glasses channel (used by the WebSocket glasses adapter)
+  # Voice channel (used by the WebSocket voice adapter)
   # The systemPrompt should be optimized for spoken output (TTS via Deepgram Aura-2).
-  # glasses-default:
-  #   name: my-glasses
+  # voice-default:
+  #   name: my-voice
   #   repo: my-project
   #   systemPrompt: >-
   #     Your responses will be spoken aloud via text-to-speech, not read on a screen.
@@ -50,19 +50,19 @@ channels:
   #     - No emoji or Unicode symbols.
   #     - Don't start responses with filler like "Sure!" or "Great question!" — just answer.
   #   allowedUsers:
-  #     - "glasses-user": [git]
+  #     - "voice-user": [git]
 
-# Optional: WebSocket server for Meta Ray-Ban glasses (or any WS text client)
-# glassesServer:
+# Optional: WebSocket voice server for Meta Ray-Ban glasses (or any WS voice/text client)
+# voiceServer:
 #   enabled: true
 #   port: 8765
 #   auth:
 #     tokens:
-#       - token: "${GLASSES_AUTH_TOKEN}"  # env var interpolation supported
-#         userId: glasses-user            # mapped to channel allowedUsers
-#         defaultChannel: glasses-default  # channel to route messages to
+#       - token: "${VOICE_AUTH_TOKEN}"  # env var interpolation supported
+#         userId: voice-user            # mapped to channel allowedUsers
+#         defaultChannel: voice-default  # channel to route messages to
 
-# Optional: Voice pipeline config (STT/TTS). Required for audio input via glasses adapter.
+# Optional: Voice pipeline config (STT/TTS). Required for audio input via voice adapter.
 # Uses Deepgram Nova-3 (STT) and Aura-2 (TTS).
 # voice:
 #   provider: deepgram

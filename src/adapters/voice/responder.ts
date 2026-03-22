@@ -6,10 +6,10 @@ import type {
 } from '../../core/interfaces.js';
 import { ProseChunker, type Chunk } from '../../core/prose-chunker.js';
 import type { VoiceProvider, TtsStreamHandle, TtsOptions } from '../../core/voice.js';
-import { serializeServerMessage, type GlassesServerMessage } from './protocol.js';
+import { serializeServerMessage, type VoiceServerMessage } from './protocol.js';
 import type { WsData } from './index.js';
 
-function send(ws: ServerWebSocket<WsData>, msg: GlassesServerMessage): void {
+function send(ws: ServerWebSocket<WsData>, msg: VoiceServerMessage): void {
   try {
     ws.send(serializeServerMessage(msg));
   } catch {
@@ -17,7 +17,7 @@ function send(ws: ServerWebSocket<WsData>, msg: GlassesServerMessage): void {
   }
 }
 
-class GlassesStreamingResponder implements IStreamingResponder {
+class VoiceStreamingResponder implements IStreamingResponder {
   private ws: ServerWebSocket<WsData>;
   private requestId: string;
   private fullText = '';
@@ -154,12 +154,12 @@ class GlassesStreamingResponder implements IStreamingResponder {
   /** Check if we're under the flush rate limit (sliding window) */
   private canFlush(): boolean {
     const now = Date.now();
-    const windowStart = now - GlassesStreamingResponder.FLUSH_WINDOW_MS;
+    const windowStart = now - VoiceStreamingResponder.FLUSH_WINDOW_MS;
     // Prune old timestamps
     while (this.flushTimestamps.length > 0 && this.flushTimestamps[0] < windowStart) {
       this.flushTimestamps.shift();
     }
-    return this.flushTimestamps.length < GlassesStreamingResponder.MAX_FLUSHES_PER_WINDOW;
+    return this.flushTimestamps.length < VoiceStreamingResponder.MAX_FLUSHES_PER_WINDOW;
   }
 
   /** Send a flush and record the timestamp */
@@ -184,7 +184,7 @@ class GlassesStreamingResponder implements IStreamingResponder {
       });
     });
     this.ttsStream.onError((err) => {
-      console.error(`[glasses] TTS error for ${this.requestId}:`, err.message);
+      console.error(`[voice] TTS error for ${this.requestId}:`, err.message);
       if (!this.ttsFailed) {
         this.ttsFailed = true;
         send(this.ws, {
@@ -225,8 +225,8 @@ class GlassesStreamingResponder implements IStreamingResponder {
             ? this.flushTimestamps[this.flushTimestamps.length - 1]
             : 0;
         shouldFlush =
-          chunk.text.length >= GlassesStreamingResponder.SENTENCE_FLUSH_MIN_CHARS ||
-          Date.now() - lastFlush >= GlassesStreamingResponder.SENTENCE_FLUSH_MIN_MS;
+          chunk.text.length >= VoiceStreamingResponder.SENTENCE_FLUSH_MIN_CHARS ||
+          Date.now() - lastFlush >= VoiceStreamingResponder.SENTENCE_FLUSH_MIN_MS;
         break;
       }
       case 'flush':
@@ -241,12 +241,12 @@ class GlassesStreamingResponder implements IStreamingResponder {
   }
 }
 
-export class GlassesChannelResponder implements ChannelResponder {
+export class VoiceChannelResponder implements ChannelResponder {
   private ws: ServerWebSocket<WsData>;
   private requestId: string;
   private voiceProvider: VoiceProvider | undefined;
   private ttsOptions: TtsOptions | undefined;
-  private streamingResponder: GlassesStreamingResponder | null = null;
+  private streamingResponder: VoiceStreamingResponder | null = null;
   private onDoneCallback: (() => void) | null = null;
   private _cancelled = false;
 
@@ -295,7 +295,7 @@ export class GlassesChannelResponder implements ChannelResponder {
   }
 
   createStreamingResponder(): IStreamingResponder {
-    this.streamingResponder = new GlassesStreamingResponder(
+    this.streamingResponder = new VoiceStreamingResponder(
       this.ws,
       this.requestId,
       this.voiceProvider,
@@ -330,7 +330,7 @@ export class GlassesChannelResponder implements ChannelResponder {
     }
   }
 
-  getStreamingResponder(): GlassesStreamingResponder | null {
+  getStreamingResponder(): VoiceStreamingResponder | null {
     return this.streamingResponder;
   }
 }

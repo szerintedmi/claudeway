@@ -1,4 +1,4 @@
-package com.claudeway.glasses
+package com.claudeway.voice
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
@@ -7,6 +7,8 @@ import com.claudeway.audio.AudioPlayer
 import com.claudeway.audio.AudioRecorder
 import com.claudeway.audio.AudioRouteState
 import com.claudeway.audio.AudioRouter
+import com.claudeway.glasses.GlassesManager
+import com.claudeway.glasses.GlassesState
 import com.claudeway.network.AudioChunkMessage
 import com.claudeway.network.AudioEndMessage
 import com.claudeway.network.AudioFormat
@@ -69,7 +71,7 @@ data class UiState(
 
 // --- ViewModel ---
 
-class GlassesViewModel(application: Application) : AndroidViewModel(application) {
+class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     val webSocket = ClaudewayWebSocket(viewModelScope)
     val audioRouter = AudioRouter(application)
     val glassesManager = GlassesManager(application)

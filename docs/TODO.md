@@ -13,5 +13,5 @@
 [ ] I'm on the main branch in the copilot-spike repo.
 [ ] Bug: CopilotBrain cannot see content of forwarded Slack messages attached to a user's message (only sees attached files/images, not forwarded message text)
 [ ] more generalized permissioning somehow ? eg. jiraWrite , git maybe somekind of plugin structure?
-[ ] Glasses UI: parse `assistant` events with tool_result content to show Bash command output as sub-detail (like Claude CLI does)
+[ ] Voice UI: parse `assistant` events with tool_result content to show Bash command output as sub-detail (like Claude CLI does)
 [ ] expose new TTS SST to capabilities to all channales (e.g receive voice from slack / generate )

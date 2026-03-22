@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'bun:test';
 import type { ServerWebSocket } from 'bun';
-import { GlassesChannelResponder } from '../adapters/glasses/responder.js';
-import type { WsData } from '../adapters/glasses/index.js';
+import { VoiceChannelResponder } from '../adapters/voice/responder.js';
+import type { WsData } from '../adapters/voice/index.js';
 
 // Mock ServerWebSocket — only the subset we use
 interface MockWs {
@@ -24,14 +24,14 @@ function parse(s: string) {
   return JSON.parse(s);
 }
 
-describe('GlassesChannelResponder', () => {
+describe('VoiceChannelResponder', () => {
   let ws: MockWs;
   let sent: string[];
-  let responder: GlassesChannelResponder;
+  let responder: VoiceChannelResponder;
 
   beforeEach(() => {
     ({ ws, sent } = makeMockWs());
-    responder = new GlassesChannelResponder(ws as unknown as ServerWebSocket<WsData>, 'req-1');
+    responder = new VoiceChannelResponder(ws as unknown as ServerWebSocket<WsData>, 'req-1');
   });
 
   it('onProcessing sends status: thinking', async () => {
@@ -84,14 +84,14 @@ describe('GlassesChannelResponder', () => {
   });
 });
 
-describe('GlassesStreamingResponder', () => {
+describe('VoiceStreamingResponder', () => {
   let ws: MockWs;
   let sent: string[];
-  let responder: GlassesChannelResponder;
+  let responder: VoiceChannelResponder;
 
   beforeEach(() => {
     ({ ws, sent } = makeMockWs());
-    responder = new GlassesChannelResponder(ws as unknown as ServerWebSocket<WsData>, 'req-2');
+    responder = new VoiceChannelResponder(ws as unknown as ServerWebSocket<WsData>, 'req-2');
   });
 
   it('onTextDelta sends chunks with final: false', () => {

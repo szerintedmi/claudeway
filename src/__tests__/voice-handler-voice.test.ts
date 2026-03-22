@@ -6,10 +6,10 @@ import {
   handleClose,
   getSession,
   resolveResponder,
-} from '../adapters/glasses/handler.js';
-import { GlassesChannelResponder } from '../adapters/glasses/responder.js';
+} from '../adapters/voice/handler.js';
+import { VoiceChannelResponder } from '../adapters/voice/responder.js';
 import { channelBusy } from '../core/engine.js';
-import type { WsData } from '../adapters/glasses/index.js';
+import type { WsData } from '../adapters/voice/index.js';
 import type {
   VoiceProvider,
   TranscriptionResult,
@@ -130,7 +130,7 @@ function audioEndMsg(requestId: string): string {
   return JSON.stringify({ type: 'audio_end', requestId });
 }
 
-describe('glasses handler voice round-trip', () => {
+describe('voice handler voice round-trip', () => {
   let ws: MockWs;
   let sent: string[];
 
@@ -271,7 +271,7 @@ describe('glasses handler voice round-trip', () => {
   });
 });
 
-describe('glasses handler cancel states', () => {
+describe('voice handler cancel states', () => {
   let ws: MockWs;
   let sent: string[];
 
@@ -353,7 +353,7 @@ describe('glasses handler cancel states', () => {
   });
 });
 
-describe('glasses streaming responder voice behavior', () => {
+describe('voice streaming responder voice behavior', () => {
   let ws: MockWs;
   let sent: string[];
 
@@ -363,7 +363,7 @@ describe('glasses streaming responder voice behavior', () => {
 
   it('onTextDelta is suppressed after cancel', () => {
     const { provider, ttsOptions } = makeMockVoiceProviderWithTts();
-    const responder = new GlassesChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
+    const responder = new VoiceChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
 
     const sr = responder.createStreamingResponder();
     sr.onTextDelta('before ');
@@ -394,7 +394,7 @@ describe('glasses streaming responder voice behavior', () => {
       },
     };
 
-    const responder = new GlassesChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
+    const responder = new VoiceChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
     const sr = responder.createStreamingResponder();
 
     // Send a short response (below 20-char sentence boundary threshold)
@@ -418,7 +418,7 @@ describe('glasses streaming responder voice behavior', () => {
   });
 
   it('onDone callback fires on onComplete', async () => {
-    const responder = new GlassesChannelResponder(asWs(ws), 'req-1');
+    const responder = new VoiceChannelResponder(asWs(ws), 'req-1');
     let doneFired = false;
     responder.onDone(() => {
       doneFired = true;
@@ -428,7 +428,7 @@ describe('glasses streaming responder voice behavior', () => {
   });
 
   it('onDone callback fires on onError', async () => {
-    const responder = new GlassesChannelResponder(asWs(ws), 'req-1');
+    const responder = new VoiceChannelResponder(asWs(ws), 'req-1');
     let doneFired = false;
     responder.onDone(() => {
       doneFired = true;
@@ -438,7 +438,7 @@ describe('glasses streaming responder voice behavior', () => {
   });
 
   it('onToolEvent is suppressed after cancel', () => {
-    const responder = new GlassesChannelResponder(asWs(ws), 'req-1');
+    const responder = new VoiceChannelResponder(asWs(ws), 'req-1');
     const sr = responder.createStreamingResponder();
 
     sr.onToolEvent({ toolName: 'Read', phase: 'start' });
@@ -508,7 +508,7 @@ describe('glasses streaming responder voice behavior', () => {
       },
     };
 
-    const responder = new GlassesChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
+    const responder = new VoiceChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
     const sr = responder.createStreamingResponder();
 
     // Feed enough text to trigger TTS stream creation (needs a sentence boundary)
@@ -526,7 +526,7 @@ describe('glasses streaming responder voice behavior', () => {
 
   it('no duplicate terminal errors after cancel — onError is suppressed', async () => {
     const { provider, ttsOptions } = makeMockVoiceProviderWithTts();
-    const responder = new GlassesChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
+    const responder = new VoiceChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
     let doneFired = 0;
     responder.onDone(() => {
       doneFired++;
@@ -556,7 +556,7 @@ describe('glasses streaming responder voice behavior', () => {
 
   it('response_audio_end is sent after cancel', () => {
     const { provider, ttsOptions } = makeMockVoiceProviderWithTts();
-    const responder = new GlassesChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
+    const responder = new VoiceChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
     const sr = responder.createStreamingResponder();
     sr.onTextDelta('Hello world, testing audio end.\n');
 
@@ -590,7 +590,7 @@ describe('flush policy and protocol sequencing', () => {
       },
     };
 
-    const responder = new GlassesChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
+    const responder = new VoiceChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
     const sr = responder.createStreamingResponder();
 
     // Feed text with a newline — should trigger TTS stream and flush before turn end
@@ -620,7 +620,7 @@ describe('flush policy and protocol sequencing', () => {
       },
     };
 
-    const responder = new GlassesChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
+    const responder = new VoiceChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
     const sr = responder.createStreamingResponder();
 
     // Feed text with a newline (triggers one flush during streaming)
@@ -662,7 +662,7 @@ describe('flush policy and protocol sequencing', () => {
       },
     };
 
-    const responder = new GlassesChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
+    const responder = new VoiceChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
     const sr = responder.createStreamingResponder();
 
     // Feed 20 lines — each newline is a strong boundary that triggers a flush
@@ -698,7 +698,7 @@ describe('flush policy and protocol sequencing', () => {
       },
     };
 
-    const responder = new GlassesChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
+    const responder = new VoiceChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
     const sr = responder.createStreamingResponder();
 
     // Simulate a long response with 50 lines
@@ -733,7 +733,7 @@ describe('flush policy and protocol sequencing', () => {
       },
     };
 
-    const responder = new GlassesChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
+    const responder = new VoiceChannelResponder(asWs(ws), 'req-1', provider, ttsOptions);
     const sr = responder.createStreamingResponder();
     sr.onTextDelta('Hello world sentence here.\n');
 

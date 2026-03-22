@@ -4,7 +4,7 @@ import {
   appendChunk,
   assembleBuffer,
   MAX_AUDIO_BYTES,
-} from '../adapters/glasses/audio-session.js';
+} from '../adapters/voice/audio-session.js';
 
 describe('audio-session', () => {
   const format = { mimeType: 'audio/webm;codecs=opus' };

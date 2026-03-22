@@ -1,6 +1,6 @@
-# Claudeway Glasses — Android Companion App
+# Claudeway — Android Companion App
 
-Connects Meta Ray-Ban smart glasses (or any Bluetooth headset) to a Claudeway WebSocket server for voice interaction with Claude.
+Connects to a Claudeway WebSocket voice server for voice interaction with Claude. Supports Meta Ray-Ban smart glasses (via DAT SDK) or any Bluetooth headset, or the phone's own mic/speaker.
 
 ## Prerequisites
 
@@ -43,12 +43,13 @@ APK output: `app/build/outputs/apk/debug/app-debug.apk`
 
 ## Architecture
 
-Thin transport layer: glasses mic → WebSocket → Claudeway server → WebSocket → glasses speaker.
+Thin transport layer: mic → WebSocket → Claudeway server → WebSocket → speaker.
 
 ```
 network/     — WebSocket client (OkHttp), protocol types matching server
 audio/       — Bluetooth SCO routing, PCM capture (8kHz mono), playback
-glasses/     — DAT SDK integration, ViewModel (state machine)
+voice/       — VoiceViewModel (state machine), UI state types
+glasses/     — Meta DAT SDK integration (GlassesManager, GlassesState)
 ui/          — Jetpack Compose (connection + conversation screens)
 ```
 

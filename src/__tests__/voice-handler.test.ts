@@ -7,9 +7,9 @@ import {
   getSession,
   resolveResponder,
   queueKeyToWs,
-} from '../adapters/glasses/handler.js';
+} from '../adapters/voice/handler.js';
 import { channelBusy } from '../core/engine.js';
-import type { WsData } from '../adapters/glasses/index.js';
+import type { WsData } from '../adapters/voice/index.js';
 import type { VoiceProvider, TranscriptionResult } from '../core/voice.js';
 
 // Mock ServerWebSocket — only the subset we use
@@ -37,7 +37,7 @@ function asWs(mock: MockWs): ServerWebSocket<WsData> {
   return mock as unknown as ServerWebSocket<WsData>;
 }
 
-describe('glasses handler', () => {
+describe('voice handler', () => {
   let ws: MockWs;
   let sent: string[];
 
@@ -257,7 +257,7 @@ function audioEndMsg(requestId: string): string {
   return JSON.stringify({ type: 'audio_end', requestId });
 }
 
-describe('glasses handler audio', () => {
+describe('voice handler audio', () => {
   let ws: MockWs;
   let sent: string[];
   let voiceProvider: VoiceProvider;

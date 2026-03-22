@@ -2,9 +2,9 @@ package com.claudeway
 
 import android.app.Application
 import androidx.test.core.app.ApplicationProvider
-import com.claudeway.glasses.GlassesViewModel
-import com.claudeway.glasses.MessageRole
-import com.claudeway.glasses.VoiceFlowState
+import com.claudeway.voice.VoiceViewModel
+import com.claudeway.voice.MessageRole
+import com.claudeway.voice.VoiceFlowState
 import com.claudeway.network.ConnectionState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -22,15 +22,15 @@ import org.robolectric.RobolectricTestRunner
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
-class GlassesViewModelTest {
+class VoiceViewModelTest {
     private val testDispatcher = UnconfinedTestDispatcher()
-    private lateinit var vm: GlassesViewModel
+    private lateinit var vm: VoiceViewModel
 
     @Before
     fun setup() {
         Dispatchers.setMain(testDispatcher)
         val app = ApplicationProvider.getApplicationContext<Application>()
-        vm = GlassesViewModel(app)
+        vm = VoiceViewModel(app)
     }
 
     @After

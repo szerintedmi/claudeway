@@ -257,7 +257,7 @@ export function drainAllPending(app: App): void {
     const pending = getPending();
     if (pending.length === 0) return;
 
-    // Discard non-Slack messages (e.g. glasses) — the WebSocket is gone after restart
+    // Discard non-Slack messages (e.g. voice) — the WebSocket is gone after restart
     const discarded: string[] = [];
     const slackPending = pending.filter((m) => {
       if (m.adapter && m.adapter !== 'slack') {

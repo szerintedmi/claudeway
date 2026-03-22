@@ -89,7 +89,7 @@ export class DeepgramVoiceProvider implements VoiceProvider {
  *
  * This class owns protocol execution only — sendText, flush, finalize, clear, abort.
  * Flush scheduling policy (when and how often to flush) is owned by the caller
- * (e.g. GlassesStreamingResponder). Deepgram allows max 20 Flush per 60s.
+ * (e.g. VoiceStreamingResponder). Deepgram allows max 20 Flush per 60s.
  *
  * Clear semantics (per Deepgram docs):
  * - Use Clear for conversational barge-in / interruption.

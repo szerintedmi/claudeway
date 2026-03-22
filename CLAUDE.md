@@ -19,7 +19,7 @@ Claudeway is a multi-channel Claude Code CLI gateway. Messages arrive via Slack 
 - `src/core/voice-deepgram.ts` — Deepgram Nova-3 (STT) + Aura-2 (TTS) implementation
 - `src/core/prose-chunker.ts` — Sentence-boundary text chunking for TTS
 - `src/adapters/slack/` — Slack Bolt adapter (handler, responder, formatting, thread context)
-- `src/adapters/glasses/` — WebSocket voice adapter (protocol, handler, responder, audio sessions, test UI) — used by Android companion app, Meta glasses, and browser test UI
+- `src/adapters/voice/` — WebSocket voice adapter (protocol, handler, responder, audio sessions, test UI) — used by Android companion app, Meta glasses, and browser test UI
 - `src/claude.ts` — Claude CLI orchestration (batch and streaming process runners)
 - `src/config.ts` — Config loading/saving, channel resolution with defaults, user permission parsing
 - `src/queue.ts` — Persistent file-based message queue
@@ -30,10 +30,11 @@ Claudeway is a multi-channel Claude Code CLI gateway. Messages arrive via Slack 
 
 ### Android Companion App (Kotlin / Jetpack Compose)
 
-- `android/app/src/main/kotlin/com/claudeway/glasses/`
+- `android/app/src/main/kotlin/com/claudeway/`
   - `network/` — WebSocket client (OkHttp), protocol types matching server
   - `audio/` — Bluetooth SCO routing, PCM capture (8kHz mono), playback (supports server TTS, client-side Deepgram TTS, and Android built-in TTS)
-  - `glasses/` — Meta DAT SDK integration, ViewModel state machine
+  - `voice/` — VoiceViewModel state machine, UI state types (VoiceFlowState, ConversationMessage)
+  - `glasses/` — Meta DAT SDK integration (GlassesManager, GlassesState)
   - `ui/` — Jetpack Compose screens (connection, conversation, settings for STT/TTS mode selection)
 
 ## Key Patterns

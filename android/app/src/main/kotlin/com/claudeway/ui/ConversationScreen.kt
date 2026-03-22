@@ -55,9 +55,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.claudeway.glasses.ConversationMessage
-import com.claudeway.glasses.MessageRole
-import com.claudeway.glasses.VoiceFlowState
+import com.claudeway.voice.ConversationMessage
+import com.claudeway.voice.MessageRole
+import com.claudeway.voice.VoiceFlowState
 import com.claudeway.audio.AudioRouteState
 import com.claudeway.network.ConnectionState
 

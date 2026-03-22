@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import { enqueue, dequeue } from '../../queue.js';
 import { drainChannel, channelBusy } from '../../core/engine.js';
 import { parseClientMessage, serializeServerMessage } from './protocol.js';
-import { GlassesChannelResponder } from './responder.js';
+import { VoiceChannelResponder } from './responder.js';
 import {
   createRecording,
   appendChunk,
@@ -13,7 +13,7 @@ import {
 import type { VoiceProvider, TtsOptions } from '../../core/voice.js';
 import type { WsData } from './index.js';
 
-export interface GlassesSession {
+export interface VoiceSession {
   sessionId: string;
   userId: string;
   defaultChannel: string;
@@ -26,10 +26,10 @@ export interface GlassesSession {
   /** AbortControllers for in-flight STT transcriptions, keyed by client requestId */
   activeAbortControllers: Map<string, AbortController>;
   /** Active responders for in-flight requests (processing/speaking), keyed by client requestId */
-  activeResponders: Map<string, GlassesChannelResponder>;
+  activeResponders: Map<string, VoiceChannelResponder>;
 }
 
-const sessions = new WeakMap<ServerWebSocket<WsData>, GlassesSession>();
+const sessions = new WeakMap<ServerWebSocket<WsData>, VoiceSession>();
 
 /**
  * Maps server-scoped queue key -> the WS that owns it.
@@ -38,7 +38,7 @@ const sessions = new WeakMap<ServerWebSocket<WsData>, GlassesSession>();
  */
 export const queueKeyToWs = new Map<string, ServerWebSocket<WsData>>();
 
-export function getSession(ws: ServerWebSocket<WsData>): GlassesSession | undefined {
+export function getSession(ws: ServerWebSocket<WsData>): VoiceSession | undefined {
   return sessions.get(ws);
 }
 
@@ -60,12 +60,12 @@ export function initSession(
 }
 
 /** Build a server-scoped queue key that is unique across sessions */
-function queueKey(session: GlassesSession, requestId: string): string {
+function queueKey(session: VoiceSession, requestId: string): string {
   return `${session.sessionId}:${requestId}`;
 }
 
 /** Cancel all active and pending work for a session (barge-in support) */
-function cancelActiveResponders(ws: ServerWebSocket<WsData>, session: GlassesSession): void {
+function cancelActiveResponders(ws: ServerWebSocket<WsData>, session: VoiceSession): void {
   // Cancel active responders (thinking or speaking)
   for (const [reqId, responder] of session.activeResponders) {
     responder.cancel();
@@ -99,7 +99,7 @@ export function resolveResponder(
   fallbackWs: ServerWebSocket<WsData>,
   voiceProvider?: VoiceProvider,
   ttsOptions?: TtsOptions,
-): GlassesChannelResponder {
+): VoiceChannelResponder {
   const ownerWs = queueKeyToWs.get(queued.ts);
   const ownerSession = ownerWs ? sessions.get(ownerWs) : undefined;
   const clientRequestId = ownerSession?.queueKeyToRequestId.get(queued.ts) ?? queued.ts;
@@ -111,12 +111,7 @@ export function resolveResponder(
   queueKeyToWs.delete(queued.ts);
 
   const targetWs = ownerWs ?? fallbackWs;
-  const responder = new GlassesChannelResponder(
-    targetWs,
-    clientRequestId,
-    voiceProvider,
-    ttsOptions,
-  );
+  const responder = new VoiceChannelResponder(targetWs, clientRequestId, voiceProvider, ttsOptions);
 
   // Track the active responder for cancellation, clean up when done
   if (ownerSession) {
@@ -132,7 +127,7 @@ export function resolveResponder(
 /** Shared helper: enqueue text and start drain if channel is idle */
 function enqueueText(
   ws: ServerWebSocket<WsData>,
-  session: GlassesSession,
+  session: VoiceSession,
   requestId: string,
   text: string,
   voiceProvider?: VoiceProvider,
@@ -152,7 +147,7 @@ function enqueueText(
     ts: key,
     threadTs: session.sessionId, // All requests in a session share Claude context
     queuedAt: new Date().toISOString(),
-    adapter: 'glasses',
+    adapter: 'voice',
   });
 
   if (channelBusy.has(channelId)) {
@@ -163,7 +158,7 @@ function enqueueText(
     const responder = resolveResponder(queued, ws, voiceProvider, ttsOptions);
     return responder;
   }).catch((err) => {
-    console.error(`[glasses:${channelId}] Queue drain error:`, err);
+    console.error(`[voice:${channelId}] Queue drain error:`, err);
   });
 }
 
@@ -181,7 +176,7 @@ function sendMsg(
 /** Handle audio_end: transcribe and enqueue (async, fire-and-forget) */
 async function handleAudioEnd(
   ws: ServerWebSocket<WsData>,
-  session: GlassesSession,
+  session: VoiceSession,
   requestId: string,
   recording: AudioRecording,
   voiceProvider: VoiceProvider,
@@ -220,7 +215,7 @@ async function handleAudioEnd(
     }
 
     const message = err instanceof Error ? err.message : 'Transcription failed';
-    console.error(`[glasses] STT error for ${requestId}:`, message);
+    console.error(`[voice] STT error for ${requestId}:`, message);
     sendMsg(ws, { type: 'error', requestId, message: `Transcription failed: ${message}` });
   }
 }
@@ -344,7 +339,7 @@ export function handleMessage(
       }
 
       handleAudioEnd(ws, session, requestId, recording, voiceProvider, ttsOptions).catch((err) => {
-        console.error(`[glasses] Unexpected error in handleAudioEnd:`, err);
+        console.error(`[voice] Unexpected error in handleAudioEnd:`, err);
       });
       break;
     }

@@ -128,10 +128,10 @@ if (existsSync(mcpPath) && statSync(mcpPath).isFile()) {
 
 const hasSlack = !!(process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN);
 const config = loadConfig();
-const glassesEnabled = config.glassesServer?.enabled;
+const voiceEnabled = config.voiceServer?.enabled;
 
-if (!hasSlack && !glassesEnabled) {
-  console.error('No adapters configured. Set Slack env vars or enable glassesServer in config.');
+if (!hasSlack && !voiceEnabled) {
+  console.error('No adapters configured. Set Slack env vars or enable voiceServer in config.');
   process.exit(1);
 }
 
@@ -142,9 +142,9 @@ if (hasSlack) {
   if (hook) shutdownHooks.push(hook);
 }
 
-if (glassesEnabled) {
-  const { startGlassesAdapter } = await import('./adapters/glasses/index.js');
-  startGlassesAdapter(config);
+if (voiceEnabled) {
+  const { startVoiceAdapter } = await import('./adapters/voice/index.js');
+  startVoiceAdapter(config);
 }
 
 console.log('Claudeway started');

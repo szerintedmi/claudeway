@@ -1,6 +1,6 @@
 import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
-import { loadConfig, resolveGlassesToken, interpolateEnvVars, type Config } from '../../config.js';
+import { loadConfig, resolveVoiceToken, interpolateEnvVars, type Config } from '../../config.js';
 import { initSession, handleMessage, handleClose } from './handler.js';
 import { parseClientMessage, serializeServerMessage } from './protocol.js';
 import type { VoiceProvider, TtsOptions } from '../../core/voice.js';
@@ -63,15 +63,15 @@ function buildTtsOptions(cfg: Config): TtsOptions | undefined {
   };
 }
 
-export function startGlassesAdapter(config?: Config): void {
+export function startVoiceAdapter(config?: Config): void {
   const cfg = config ?? loadConfig();
-  const serverConfig = cfg.glassesServer;
+  const serverConfig = cfg.voiceServer;
   if (!serverConfig?.enabled) return;
 
-  // Voice config required when glasses adapter is enabled (Phase 2+)
+  // Voice config required when voice adapter is enabled (Phase 2+)
   if (!cfg.voice) {
     throw new Error(
-      '[glasses] Cannot start: voice config is required when glassesServer is enabled. ' +
+      '[voice] Cannot start: voice config is required when voiceServer is enabled. ' +
         'Add a "voice" section to config.yaml with provider and API key.',
     );
   }
@@ -100,7 +100,7 @@ export function startGlassesAdapter(config?: Config): void {
         if (rawToken) {
           // Header auth — validate now
           const freshConfig = loadConfig();
-          const tokenConfig = resolveGlassesToken(freshConfig, rawToken);
+          const tokenConfig = resolveVoiceToken(freshConfig, rawToken);
           if (!tokenConfig) {
             recordAuthFailure();
             return new Response('Unauthorized: invalid token', { status: 401 });
@@ -123,7 +123,7 @@ export function startGlassesAdapter(config?: Config): void {
         return undefined;
       }
 
-      // Favicon — inline SVG glasses icon
+      // Favicon — inline SVG icon
       if (url.pathname === '/favicon.ico') {
         const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#1a1a2e"/><circle cx="10" cy="16" r="5" stroke="#0a9396" stroke-width="2" fill="none"/><circle cx="22" cy="16" r="5" stroke="#0a9396" stroke-width="2" fill="none"/><path d="M15 16h2" stroke="#0a9396" stroke-width="2" stroke-linecap="round"/><path d="M5 16H3M29 16h-2" stroke="#0a9396" stroke-width="1.5" stroke-linecap="round"/></svg>`;
         return new Response(svg, {
@@ -157,10 +157,10 @@ export function startGlassesAdapter(config?: Config): void {
         if (ws.data.authenticated) {
           initSession(ws, ws.data.userId, ws.data.defaultChannel);
           console.log(
-            `[glasses] Client connected: userId=${ws.data.userId} channel=${ws.data.defaultChannel}`,
+            `[voice] Client connected: userId=${ws.data.userId} channel=${ws.data.defaultChannel}`,
           );
         } else {
-          console.log('[glasses] Client connected, awaiting auth message');
+          console.log('[voice] Client connected, awaiting auth message');
         }
       },
 
@@ -193,7 +193,7 @@ export function startGlassesAdapter(config?: Config): void {
               return;
             }
             const freshConfig = loadConfig();
-            const tokenConfig = resolveGlassesToken(freshConfig, msg.token);
+            const tokenConfig = resolveVoiceToken(freshConfig, msg.token);
             if (!tokenConfig) {
               recordAuthFailure();
               ws.send(
@@ -212,7 +212,7 @@ export function startGlassesAdapter(config?: Config): void {
             ws.data.authenticated = true;
             initSession(ws, tokenConfig.userId, tokenConfig.defaultChannel);
             console.log(
-              `[glasses] Client authenticated: userId=${tokenConfig.userId} channel=${tokenConfig.defaultChannel}`,
+              `[voice] Client authenticated: userId=${tokenConfig.userId} channel=${tokenConfig.defaultChannel}`,
             );
             ws.send(serializeServerMessage({ type: 'pong' }));
             return;
@@ -232,7 +232,7 @@ export function startGlassesAdapter(config?: Config): void {
       },
 
       close(ws) {
-        console.log(`[glasses] Client disconnected: userId=${ws.data.userId}`);
+        console.log(`[voice] Client disconnected: userId=${ws.data.userId}`);
         handleClose(ws);
       },
 
@@ -242,12 +242,12 @@ export function startGlassesAdapter(config?: Config): void {
     },
   });
 
-  console.log(`[glasses] WebSocket server listening on port ${port}`);
+  console.log(`[voice] WebSocket server listening on port ${port}`);
   if (cfg.voice) {
     const ttsModel = cfg.voice.deepgram.ttsModel ?? 'aura-2-thalia-en';
     const ttsSampleRate = cfg.voice.deepgram.ttsSampleRate ?? 24000;
     console.log(
-      `[glasses] Voice provider: ${cfg.voice.provider} (STT: ${cfg.voice.deepgram.sttModel ?? 'nova-3'}, TTS: ${ttsModel}@${ttsSampleRate}Hz)`,
+      `[voice] Voice provider: ${cfg.voice.provider} (STT: ${cfg.voice.deepgram.sttModel ?? 'nova-3'}, TTS: ${ttsModel}@${ttsSampleRate}Hz)`,
     );
   }
 }

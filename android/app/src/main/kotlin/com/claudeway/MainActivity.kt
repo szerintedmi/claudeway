@@ -20,7 +20,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.claudeway.glasses.GlassesViewModel
+import com.claudeway.voice.VoiceViewModel
 import com.claudeway.ui.ClaudewayTheme
 import com.claudeway.ui.ConnectionScreen
 import com.claudeway.ui.ConversationScreen
@@ -65,7 +65,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun ClaudewayNavHost() {
     val navController = rememberNavController()
-    val viewModel: GlassesViewModel = viewModel()
+    val viewModel: VoiceViewModel = viewModel()
     val uiState by viewModel.uiState.collectAsState()
     val prefs = viewModel.getApplication<android.app.Application>()
         .getSharedPreferences("claudeway", android.content.Context.MODE_PRIVATE)

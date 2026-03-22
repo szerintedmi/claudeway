@@ -12,7 +12,7 @@ export interface QueuedMessage {
   filePaths?: string[];
   userName?: string;
   /** Which adapter enqueued this message (default: "slack") */
-  adapter?: 'slack' | 'glasses';
+  adapter?: 'slack' | 'voice';
 }
 
 import { DATA_DIR } from './config.js';
