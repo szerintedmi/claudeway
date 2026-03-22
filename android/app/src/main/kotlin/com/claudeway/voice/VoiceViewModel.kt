@@ -343,7 +343,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         webSocket.send(CancelMessage(requestId = activeId))
 
         // Preserve any accumulated response text in history before clearing
-        val accumulatedText = responseTextAccumulator.toString()
+        val accumulatedText = responseTextAccumulator.toString().trimStart('\n', '\r')
         currentRequestId = null
         responseTextAccumulator.clear()
         _uiState.update {
@@ -533,7 +533,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         if (!isActiveRequest(msg.requestId)) return
 
         responseTextAccumulator.append(msg.text)
-        val fullText = responseTextAccumulator.toString()
+        val fullText = responseTextAccumulator.toString().trimStart('\n', '\r')
 
         val wasTtsMuted = currentRequestTtsMuted
         _uiState.update { state ->
