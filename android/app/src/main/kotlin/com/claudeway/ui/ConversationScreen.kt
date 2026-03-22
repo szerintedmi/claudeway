@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import com.claudeway.glasses.ConversationMessage
 import com.claudeway.glasses.MessageRole
 import com.claudeway.glasses.VoiceFlowState
+import com.claudeway.audio.AudioRouteState
 import com.claudeway.network.ConnectionState
 
 @Composable
@@ -65,6 +66,7 @@ fun ConversationScreen(
     connectionState: ConnectionState,
     voiceFlowState: VoiceFlowState,
     statusText: String?,
+    audioRouteState: AudioRouteState,
     messages: List<ConversationMessage>,
     activeTranscript: String?,
     activeResponseText: String?,
@@ -161,6 +163,7 @@ fun ConversationScreen(
                     textInput = ""
                 },
                 voiceFlowState = voiceFlowState,
+                audioRouteState = audioRouteState,
                 isConnected = isConnected,
                 onStartRecording = onStartRecording,
                 onStopRecording = onStopRecording,
@@ -260,6 +263,7 @@ private fun InputBar(
     onTextChange: (String) -> Unit,
     onSendText: () -> Unit,
     voiceFlowState: VoiceFlowState,
+    audioRouteState: AudioRouteState,
     isConnected: Boolean,
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit,
@@ -318,33 +322,47 @@ private fun InputBar(
 
         // Mic button — always composed so pointerInput/tryAwaitRelease() survives recording state
         val micColor = if (isRecording) Color(0xFFE53935) else MaterialTheme.colorScheme.primary
-        Box(
-            modifier = Modifier
-                .size(48.dp)
-                .clip(CircleShape)
-                .background(micColor)
-                .pointerInput(Unit) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        down.consume()
-                        if (!currentIsBusy) {
-                            currentOnStartRecording()
-                            // Wait for finger up anywhere on screen, not just within bounds
-                            do {
-                                val event = awaitPointerEvent()
-                            } while (event.changes.any { it.pressed })
-                            currentOnStopRecording()
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(micColor)
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            down.consume()
+                            if (!currentIsBusy) {
+                                currentOnStartRecording()
+                                // Wait for finger up anywhere on screen, not just within bounds
+                                do {
+                                    val event = awaitPointerEvent()
+                                } while (event.changes.any { it.pressed })
+                                currentOnStopRecording()
+                            }
                         }
-                    }
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                Icons.Default.Mic,
-                contentDescription = if (isRecording) "Release to send" else "Hold to talk",
-                tint = Color.White,
-                modifier = Modifier.size(24.dp),
-            )
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Default.Mic,
+                    contentDescription = if (isRecording) "Release to send" else "Hold to talk",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+            if (!isRecording) {
+                val (micLabel, micLabelColor) = when (audioRouteState) {
+                    AudioRouteState.Routed -> "BT" to Color(0xFF4CAF50)
+                    AudioRouteState.NoDevice -> "Phone" to Color.Gray
+                    else -> "Phone" to Color.Gray
+                }
+                Text(
+                    text = micLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = micLabelColor,
+                )
+            }
         }
     }
 }

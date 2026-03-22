@@ -1,9 +1,11 @@
 package com.claudeway.audio
 
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.util.Base64
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +23,21 @@ import kotlinx.coroutines.launch
  * stop() signals it to exit and the coroutine releases the native resource
  * in its finally block, avoiding races between write() and release().
  */
+private const val TAG = "AudioPlayer"
+
+internal fun deviceTypeName(type: Int?): String = when (type) {
+    null -> "NONE"
+    AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "BUILTIN_EARPIECE"
+    AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "BUILTIN_SPEAKER"
+    AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "BLUETOOTH_SCO"
+    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "BLUETOOTH_A2DP"
+    AudioDeviceInfo.TYPE_BLE_HEADSET -> "BLE_HEADSET"
+    AudioDeviceInfo.TYPE_BLE_SPEAKER -> "BLE_SPEAKER"
+    AudioDeviceInfo.TYPE_WIRED_HEADSET -> "WIRED_HEADSET"
+    AudioDeviceInfo.TYPE_USB_DEVICE -> "USB_DEVICE"
+    else -> "UNKNOWN($type)"
+}
+
 class AudioPlayer(private val scope: CoroutineScope) {
     private var audioTrack: AudioTrack? = null
     private var playbackJob: Job? = null
@@ -90,6 +107,15 @@ class AudioPlayer(private val scope: CoroutineScope) {
 
         track.play()
         audioTrack = track
+        val routed = track.routedDevice
+        val rates = routed?.sampleRates
+        val ratesStr = when {
+            rates == null -> "unknown"
+            rates.isEmpty() -> "any (unconstrained)"
+            else -> rates.toList().toString()
+        }
+        Log.d(TAG, "Playback started — device: ${routed?.productName ?: "default"} " +
+            "(${deviceTypeName(routed?.type)}), requestedRate=$sampleRate, deviceRates=$ratesStr")
 
         // Start playback loop — the coroutine owns the track's release lifecycle
         val queue = Channel<ByteArray>(capacity = Channel.UNLIMITED)

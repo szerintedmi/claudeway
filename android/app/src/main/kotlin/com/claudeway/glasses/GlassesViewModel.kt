@@ -139,10 +139,12 @@ class GlassesViewModel(application: Application) : AndroidViewModel(application)
 
     fun connect(url: String, token: String) {
         webSocket.connect(url, token)
+        audioRouter.startSession()
     }
 
     fun disconnect() {
         webSocket.disconnect()
+        audioRouter.endSession()
     }
 
     // --- Text input ---
@@ -213,7 +215,7 @@ class GlassesViewModel(application: Application) : AndroidViewModel(application)
 
         // Start capturing and streaming audio chunks
         recordingJob = viewModelScope.launch {
-            audioRecorder.startRecording().collect { pcmData ->
+            audioRecorder.startRecording(preferredDevice = audioRouter.routedDevice).collect { pcmData ->
                 val base64 = audioRecorder.encodeToBase64(pcmData)
                 if (!webSocket.send(AudioChunkMessage(requestId = requestId, data = base64))) {
                     // Connection lost during recording — abort
@@ -231,6 +233,7 @@ class GlassesViewModel(application: Application) : AndroidViewModel(application)
         audioRecorder.stopRecording()
         recordingJob?.cancel()
         recordingJob = null
+        // MODE_IN_COMMUNICATION stays on for the entire session — no toggling.
 
         if (!webSocket.send(AudioEndMessage(requestId = requestId))) {
             resetToIdle()
@@ -403,6 +406,7 @@ class GlassesViewModel(application: Application) : AndroidViewModel(application)
         if (!isActiveRequest(msg.requestId)) return
 
         audioPlayer.endOfAudio()
+        // (MODE_IN_COMMUNICATION stays on for the session)
         _uiState.update {
             it.copy(
                 voiceFlowState = VoiceFlowState.Idle,
@@ -419,6 +423,7 @@ class GlassesViewModel(application: Application) : AndroidViewModel(application)
         if (msg.requestId != null && !isActiveRequest(msg.requestId)) return
 
         audioPlayer.stop()
+        // (MODE_IN_COMMUNICATION stays on for the session)
         if (msg.message == "cancelled") {
             // Expected cancellation — return to idle silently
             _uiState.update {
@@ -444,16 +449,6 @@ class GlassesViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // --- Bluetooth routing ---
-
-    fun tryRouteAudioToBluetooth() {
-        audioRouter.routeToBluetooth()
-    }
-
-    fun releaseAudioRoute() {
-        audioRouter.release()
-    }
-
     // --- Cleanup ---
 
     override fun onCleared() {
@@ -461,7 +456,7 @@ class GlassesViewModel(application: Application) : AndroidViewModel(application)
         ProcessLifecycleOwner.get().lifecycle.removeObserver(lifecycleObserver)
         audioPlayer.stop()
         audioRecorder.stopRecording()
-        audioRouter.release()
+        audioRouter.destroy()
         glassesManager.release()
         webSocket.disconnect()
     }

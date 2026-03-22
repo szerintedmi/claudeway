@@ -47,7 +47,6 @@ fun ConnectionScreen(
     savedToken: String,
     onConnect: (url: String, token: String) -> Unit,
     onDisconnect: () -> Unit,
-    onRouteAudio: () -> Unit,
     onNavigateToConversation: () -> Unit,
 ) {
     var url by rememberSaveable { mutableStateOf(savedUrl) }
@@ -161,22 +160,6 @@ fun ConnectionScreen(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text("Open Conversation")
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedButton(
-                        onClick = onRouteAudio,
-                        enabled = audioRouteState == AudioRouteState.Available ||
-                            audioRouteState == AudioRouteState.NoDevice ||
-                            audioRouteState == AudioRouteState.Error,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            when (audioRouteState) {
-                                AudioRouteState.Routed -> "Audio Routed to Bluetooth"
-                                AudioRouteState.Routing -> "Routing..."
-                                else -> "Route Audio to Bluetooth"
-                            }
-                        )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedButton(

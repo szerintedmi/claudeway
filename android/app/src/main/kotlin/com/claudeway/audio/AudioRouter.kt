@@ -23,6 +23,10 @@ enum class AudioRouteState {
     UnsupportedApi, // API 31+ required for communication device routing
 }
 
+/** Check if a device is a Bluetooth headset (classic SCO or BLE). */
+private fun AudioDeviceInfo.isBtDevice(): Boolean =
+    type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || type == AudioDeviceInfo.TYPE_BLE_HEADSET
+
 class AudioRouter(context: Context) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
@@ -30,6 +34,9 @@ class AudioRouter(context: Context) {
     val state: StateFlow<AudioRouteState> = _state.asStateFlow()
 
     private var currentDevice: AudioDeviceInfo? = null
+
+    /** When true, auto-route to BT devices as they appear and enter communication mode. */
+    private var sessionActive = false
 
     private val deviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
@@ -48,16 +55,14 @@ class AudioRouter(context: Context) {
             _state.value = AudioRouteState.UnsupportedApi
             Log.w(TAG, "API ${Build.VERSION.SDK_INT} < 31 — setCommunicationDevice not available")
         } else {
-            // Register for device connect/disconnect events
             audioManager.registerAudioDeviceCallback(deviceCallback, Handler(Looper.getMainLooper()))
-            // Probe initial state
             refreshState()
         }
     }
 
     /**
      * Re-check available SCO devices and update state.
-     * Called on init and on device connect/disconnect.
+     * Auto-routes to BT only when a session is active.
      */
     private fun refreshState() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
@@ -66,11 +71,13 @@ class AudioRouter(context: Context) {
         if (_state.value == AudioRouteState.Routed) {
             val stillAvailable = currentDevice?.let { routed ->
                 audioManager.availableCommunicationDevices.any {
-                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO && it.id == routed.id
+                    it.isBtDevice() && it.id == routed.id
                 }
             } ?: false
             if (!stillAvailable) {
                 Log.d(TAG, "Routed device disconnected")
+                audioManager.clearCommunicationDevice()
+                audioManager.mode = AudioManager.MODE_NORMAL
                 currentDevice = null
                 // Fall through to check if another SCO device is available
             } else {
@@ -78,10 +85,13 @@ class AudioRouter(context: Context) {
             }
         }
 
-        val hasSco = audioManager.availableCommunicationDevices.any {
-            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+        val scoDevice = audioManager.availableCommunicationDevices.firstOrNull { it.isBtDevice() }
+        if (scoDevice != null && sessionActive) {
+            Log.d(TAG, "Auto-routing to BT device: ${scoDevice.productName}")
+            routeToDevice(scoDevice)
+        } else {
+            _state.value = if (scoDevice != null) AudioRouteState.Available else AudioRouteState.NoDevice
         }
-        _state.value = if (hasSco) AudioRouteState.Available else AudioRouteState.NoDevice
     }
 
     /** Find a Bluetooth SCO device (glasses or headset) from available communication devices. */
@@ -95,7 +105,7 @@ class AudioRouter(context: Context) {
             Log.d(TAG, "  - type=${device.type} (${deviceTypeName(device.type)}), " +
                 "name=${device.productName}, id=${device.id}")
         }
-        val scoDevice = devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+        val scoDevice = devices.firstOrNull { it.isBtDevice() }
         if (scoDevice != null) {
             Log.d(TAG, "Found SCO device: ${scoDevice.productName}")
         } else {
@@ -116,27 +126,55 @@ class AudioRouter(context: Context) {
         else -> "UNKNOWN($type)"
     }
 
-    /** Route audio to the given Bluetooth SCO device. */
+    /** Route audio to the given Bluetooth SCO device. Sets MODE_IN_COMMUNICATION for the session. */
     fun routeToDevice(device: AudioDeviceInfo): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
             _state.value = AudioRouteState.UnsupportedApi
             return false
         }
         _state.value = AudioRouteState.Routing
+        // Mode must be set BEFORE setCommunicationDevice for reliable SCO activation
+        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+        Log.d(TAG, "Audio mode -> MODE_IN_COMMUNICATION")
         val success = audioManager.setCommunicationDevice(device)
         if (success) {
             currentDevice = device
             _state.value = AudioRouteState.Routed
             Log.d(TAG, "Routed audio to: ${device.productName}")
         } else {
+            audioManager.mode = AudioManager.MODE_NORMAL
             _state.value = AudioRouteState.Error
             Log.e(TAG, "Failed to route audio to: ${device.productName}")
         }
         return success
     }
 
+    /**
+     * Start a session: find and route to a Bluetooth SCO device.
+     * Enables auto-routing so late-arriving BT devices are picked up.
+     */
+    fun startSession(): Boolean {
+        sessionActive = true
+        return routeToBluetooth()
+    }
+
+    /**
+     * End the session: release the audio route and stop auto-routing.
+     * The device callback stays registered for future sessions.
+     */
+    fun endSession() {
+        sessionActive = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            audioManager.clearCommunicationDevice()
+            audioManager.mode = AudioManager.MODE_NORMAL
+            Log.d(TAG, "Audio mode -> MODE_NORMAL (endSession)")
+        }
+        currentDevice = null
+        _state.value = if (findScoDevice() != null) AudioRouteState.Available else AudioRouteState.NoDevice
+    }
+
     /** Attempt to find and route to a Bluetooth SCO device. */
-    fun routeToBluetooth(): Boolean {
+    private fun routeToBluetooth(): Boolean {
         val device = findScoDevice() ?: run {
             if (_state.value != AudioRouteState.UnsupportedApi) {
                 _state.value = AudioRouteState.NoDevice
@@ -146,10 +184,12 @@ class AudioRouter(context: Context) {
         return routeToDevice(device)
     }
 
-    /** Release the audio route back to default. */
-    fun release() {
+    /** Full teardown — call from ViewModel.onCleared() only. */
+    fun destroy() {
+        sessionActive = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             audioManager.clearCommunicationDevice()
+            audioManager.mode = AudioManager.MODE_NORMAL
             audioManager.unregisterAudioDeviceCallback(deviceCallback)
         }
         currentDevice = null
@@ -159,4 +199,8 @@ class AudioRouter(context: Context) {
     /** Check if currently routed to a Bluetooth SCO device. */
     val isRouted: Boolean
         get() = _state.value == AudioRouteState.Routed
+
+    /** The currently routed device, or null if not routed. */
+    val routedDevice: AudioDeviceInfo?
+        get() = if (isRouted) currentDevice else null
 }

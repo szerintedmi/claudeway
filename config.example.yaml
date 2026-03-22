@@ -70,6 +70,7 @@ channels:
 #     apiKey: "${DEEPGRAM_API_KEY}"
 #     sttModel: nova-3          # optional, defaults to nova-3
 #     ttsModel: aura-2-thalia-en # optional, Deepgram Aura-2 voice model
+#     ttsSampleRate: 16000       # optional, TTS output Hz (default 24000; 16000 for BT voice path)
 #     # Note: Deepgram's `speed` param is REST-only, not supported on WebSocket streaming
 
 defaults:

@@ -86,7 +86,6 @@ private fun ClaudewayNavHost() {
                     viewModel.connect(url, token)
                 },
                 onDisconnect = { viewModel.disconnect() },
-                onRouteAudio = { viewModel.tryRouteAudioToBluetooth() },
                 onNavigateToConversation = { navController.navigate("conversation") },
             )
         }
@@ -96,6 +95,7 @@ private fun ClaudewayNavHost() {
                 connectionState = uiState.connectionState,
                 voiceFlowState = uiState.voiceFlowState,
                 statusText = uiState.statusText,
+                audioRouteState = uiState.audioRouteState,
                 messages = uiState.messages,
                 activeTranscript = uiState.activeTranscript,
                 activeResponseText = uiState.activeResponseText,
