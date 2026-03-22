@@ -14,6 +14,10 @@ import kotlinx.coroutines.launch
  * Plays PCM audio received from the server through the device speaker
  * (or Bluetooth SCO speaker when routed via AudioRouter).
  * Uses a coroutine-backed queue for gapless sequential playback.
+ *
+ * Thread safety: the playback coroutine owns the AudioTrack lifecycle —
+ * stop() signals it to exit and the coroutine releases the native resource
+ * in its finally block, avoiding races between write() and release().
  */
 class AudioPlayer(private val scope: CoroutineScope) {
     private var audioTrack: AudioTrack? = null
@@ -35,20 +39,14 @@ class AudioPlayer(private val scope: CoroutineScope) {
 
     /** Stop playback immediately (for cancellation/barge-in). */
     fun stop() {
-        playbackJob?.cancel()
-        playbackJob = null
+        // Stop the track first to unblock any pending write() on the IO thread,
+        // so the playback coroutine can exit and release() in its finally block.
+        audioTrack?.let { try { it.stop() } catch (_: IllegalStateException) {} }
+        audioTrack = null
         audioQueue?.close()
         audioQueue = null
-        audioTrack?.let { track ->
-            try {
-                track.pause()
-                track.flush()
-                track.release()
-            } catch (_: IllegalStateException) {
-                // Already released
-            }
-        }
-        audioTrack = null
+        playbackJob?.cancel()
+        playbackJob = null
         currentSampleRate = 0
     }
 
@@ -57,10 +55,11 @@ class AudioPlayer(private val scope: CoroutineScope) {
         val needNewQueue = audioQueue?.isClosedForSend != false || currentSampleRate != sampleRate
         if (!needNewQueue) return
 
-        // Clean up previous playback state
+        // Signal previous playback to stop — track.stop() unblocks pending write()
+        audioTrack?.let { try { it.stop() } catch (_: IllegalStateException) {} }
+        audioTrack = null
         playbackJob?.cancel()
         playbackJob = null
-        audioTrack?.release()
 
         currentSampleRate = sampleRate
         val bufferSize = AudioTrack.getMinBufferSize(
@@ -90,12 +89,23 @@ class AudioPlayer(private val scope: CoroutineScope) {
         track.play()
         audioTrack = track
 
-        // Start playback loop
+        // Start playback loop — the coroutine owns the track's release lifecycle
         val queue = Channel<ByteArray>(capacity = Channel.UNLIMITED)
         audioQueue = queue
         playbackJob = scope.launch(Dispatchers.IO) {
-            for (chunk in queue) {
-                track.write(chunk, 0, chunk.size)
+            try {
+                for (chunk in queue) {
+                    track.write(chunk, 0, chunk.size)
+                }
+            } catch (_: Exception) {
+                // Track stopped/released during write — expected on barge-in
+            } finally {
+                try {
+                    track.flush()
+                    track.release()
+                } catch (_: IllegalStateException) {
+                    // Already released
+                }
             }
         }
     }

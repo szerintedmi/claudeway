@@ -1,7 +1,13 @@
 package com.claudeway.glasses.ui
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,9 +48,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.claudeway.glasses.glasses.ConversationMessage
 import com.claudeway.glasses.glasses.MessageRole
@@ -257,7 +266,8 @@ private fun InputBar(
     onCancel: () -> Unit,
 ) {
     val isRecording = voiceFlowState == VoiceFlowState.Recording
-    val isBusy = !isConnected || (voiceFlowState != VoiceFlowState.Idle && voiceFlowState != VoiceFlowState.Error)
+    // Only block input during recording/transcribing — allow barge-in during thinking/speaking
+    val isBusy = !isConnected || voiceFlowState == VoiceFlowState.Recording || voiceFlowState == VoiceFlowState.Transcribing
 
     // Hold stable references for the pointer input coroutine — using isBusy as a
     // pointerInput key would restart the coroutine mid-gesture, cancelling tryAwaitRelease()
@@ -268,57 +278,111 @@ private fun InputBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .then(
+                if (isRecording) Modifier.background(Color(0xFFE53935).copy(alpha = 0.1f))
+                else Modifier
+            )
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // Text input
-        OutlinedTextField(
-            value = textInput,
-            onValueChange = onTextChange,
-            placeholder = { Text("Type a message...") },
-            singleLine = true,
-            enabled = !isBusy,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { if (textInput.isNotBlank()) onSendText() }),
-            modifier = Modifier.weight(1f),
-        )
+        // Left area: text input OR recording indicator (mic button stays composed)
+        if (isRecording) {
+            Box(modifier = Modifier.weight(1f)) {
+                RecordingIndicator()
+            }
+        } else {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = textInput,
+                    onValueChange = onTextChange,
+                    placeholder = { Text("Type a message...") },
+                    singleLine = true,
+                    enabled = !isBusy,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { if (textInput.isNotBlank()) onSendText() }),
+                    modifier = Modifier.weight(1f),
+                )
 
-        // Send text button
-        if (textInput.isNotBlank() && !isBusy) {
-            IconButton(onClick = onSendText) {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                if (textInput.isNotBlank() && !isBusy) {
+                    IconButton(onClick = onSendText) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                    }
+                }
             }
         }
 
-        // Mic button (hold-to-talk)
+        // Mic button — always composed so pointerInput/tryAwaitRelease() survives recording state
+        val micColor = if (isRecording) Color(0xFFE53935) else MaterialTheme.colorScheme.primary
         Box(
             modifier = Modifier
                 .size(48.dp)
                 .clip(CircleShape)
-                .background(
-                    if (isRecording) Color(0xFFE53935)
-                    else MaterialTheme.colorScheme.primary
-                )
+                .background(micColor)
                 .pointerInput(Unit) {
-                    detectTapGestures(
-                        onPress = {
-                            if (!currentIsBusy) {
-                                currentOnStartRecording()
-                                tryAwaitRelease()
-                                currentOnStopRecording()
-                            }
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        down.consume()
+                        if (!currentIsBusy) {
+                            currentOnStartRecording()
+                            // Wait for finger up anywhere on screen, not just within bounds
+                            do {
+                                val event = awaitPointerEvent()
+                            } while (event.changes.any { it.pressed })
+                            currentOnStopRecording()
                         }
-                    )
+                    }
                 },
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 Icons.Default.Mic,
-                contentDescription = if (isRecording) "Release to stop" else "Hold to talk",
+                contentDescription = if (isRecording) "Release to send" else "Hold to talk",
                 tint = Color.White,
                 modifier = Modifier.size(24.dp),
             )
         }
+    }
+}
+
+/** Recording indicator that replaces the text field area while holding the mic button. */
+@Composable
+private fun RecordingIndicator() {
+    val recordingColor = Color(0xFFE53935)
+    val infiniteTransition = rememberInfiniteTransition(label = "recording")
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.3f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dot-pulse",
+    )
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(12.dp)
+                .scale(pulseScale)
+                .clip(CircleShape)
+                .background(recordingColor)
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = "Listening... release to send",
+            style = MaterialTheme.typography.bodyLarge,
+            color = recordingColor,
+        )
     }
 }

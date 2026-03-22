@@ -140,6 +140,10 @@ class GlassesViewModel(application: Application) : AndroidViewModel(application)
 
     fun sendText(text: String) {
         if (text.isBlank()) return
+
+        // Barge-in: cancel active request before sending new one
+        interruptIfActive()
+
         val requestId = UUID.randomUUID().toString()
 
         if (!webSocket.send(TextMessage(requestId = requestId, text = text))) {
@@ -164,6 +168,9 @@ class GlassesViewModel(application: Application) : AndroidViewModel(application)
 
     fun startRecording() {
         if (_uiState.value.voiceFlowState == VoiceFlowState.Recording) return
+
+        // Barge-in: cancel active request before starting new recording
+        interruptIfActive()
 
         val requestId = UUID.randomUUID().toString()
 
@@ -232,16 +239,30 @@ class GlassesViewModel(application: Application) : AndroidViewModel(application)
 
     // --- Cancellation ---
 
-    fun cancelCurrentRequest() {
-        val requestId = currentRequestId ?: return
+    /**
+     * Interrupt the active request (barge-in). Stops audio/recording and sends cancel,
+     * but does NOT reset UI to idle — the caller is about to start a new request.
+     */
+    private fun interruptIfActive() {
+        val activeId = currentRequestId ?: return
+        audioPlayer.stop()
         audioRecorder.stopRecording()
         recordingJob?.cancel()
         recordingJob = null
-        audioPlayer.stop()
+        webSocket.send(CancelMessage(requestId = activeId))
+        currentRequestId = null
+        responseTextAccumulator.clear()
+        _uiState.update {
+            it.copy(
+                currentRequestId = null,
+                activeTranscript = null,
+                activeResponseText = null,
+            )
+        }
+    }
 
-        // Best-effort cancel — don't care if send fails since we're cleaning up anyway
-        webSocket.send(CancelMessage(requestId = requestId))
-
+    fun cancelCurrentRequest() {
+        interruptIfActive()
         resetToIdle()
     }
 
