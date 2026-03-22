@@ -15,12 +15,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.claudeway.settings.ConnectionSettingsRepository
 import com.claudeway.voice.VoiceViewModel
 import com.claudeway.ui.ClaudewayTheme
 import com.claudeway.ui.ConnectionScreen
@@ -65,6 +67,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun ClaudewayNavHost() {
+    val context = LocalContext.current
     val navController = rememberNavController()
     val viewModel: VoiceViewModel = viewModel()
     val uiState by viewModel.uiState.collectAsState()
@@ -72,37 +75,32 @@ private fun ClaudewayNavHost() {
     val availableRoutes by viewModel.availableRoutes.collectAsState()
     val activeRouteId by viewModel.activeRouteId.collectAsState()
     val selectedRouteId by viewModel.selectedRouteId.collectAsState()
+    val settingsRepository = remember(context) { ConnectionSettingsRepository(context) }
 
-    val prefs = viewModel.getApplication<android.app.Application>()
-        .getSharedPreferences("claudeway", android.content.Context.MODE_PRIVATE)
+    fun loadSettings() = settingsRepository.load()
 
-    // Read credentials live from prefs (not cached) so retry/settings always use latest values
-    fun readUrl() = prefs.getString("server_url", "") ?: ""
-    fun readToken() = prefs.getString("auth_token", "") ?: ""
-
-    val initialUrl = remember { readUrl() }
-    val initialToken = remember { readToken() }
-    val hasSavedCredentials = initialUrl.isNotBlank() && initialToken.isNotBlank()
-    val startDestination = if (hasSavedCredentials) "conversation" else "connection"
+    val initialSettings = remember(settingsRepository) { loadSettings() }
+    val startDestination = if (initialSettings.hasCredentials) "conversation" else "connection"
 
     // Auto-connect when launching directly to conversation with saved credentials
-    if (hasSavedCredentials) {
+    if (initialSettings.hasCredentials) {
         LaunchedEffect(Unit) {
-            viewModel.connect(initialUrl, initialToken)
+            viewModel.connect(initialSettings.serverUrl, initialSettings.authToken)
         }
     }
 
     NavHost(navController = navController, startDestination = startDestination) {
         composable("connection") {
+            val settings = loadSettings()
             ConnectionScreen(
                 connectionState = uiState.connectionState,
                 connectionError = uiState.connectionError,
                 glassesState = uiState.glassesState,
                 audioRouteState = uiState.audioRouteState,
-                savedUrl = readUrl(),
-                savedToken = readToken(),
+                savedUrl = settings.serverUrl,
+                savedToken = settings.authToken,
                 onConnect = { url, token ->
-                    prefs.edit().putString("server_url", url).putString("auth_token", token).apply()
+                    settingsRepository.save(url, token)
                     viewModel.connect(url, token)
                 },
                 onDisconnect = { viewModel.disconnect() },
@@ -127,7 +125,10 @@ private fun ClaudewayNavHost() {
                 channelName = uiState.channelName,
                 channelRepo = uiState.channelRepo,
                 ttsEnabled = uiState.ttsEnabled,
-                onNewChat = { viewModel.newChat(readUrl(), readToken()) },
+                onNewChat = {
+                    val settings = loadSettings()
+                    viewModel.newChat(settings.serverUrl, settings.authToken)
+                },
                 onToggleTts = { viewModel.toggleTts() },
                 onSendText = { viewModel.sendText(it) },
                 onStartRecording = { viewModel.startRecording() },
@@ -140,7 +141,10 @@ private fun ClaudewayNavHost() {
                         launchSingleTop = true
                     }
                 },
-                onRetryConnection = { viewModel.connect(readUrl(), readToken()) },
+                onRetryConnection = {
+                    val settings = loadSettings()
+                    viewModel.connect(settings.serverUrl, settings.authToken)
+                },
                 deviceToasts = viewModel.deviceToasts,
             )
         }

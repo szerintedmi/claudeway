@@ -5,7 +5,6 @@ import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
-import android.os.Build
 import android.util.Base64
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
@@ -140,10 +139,8 @@ class AudioRecorder {
     private fun selectAudioSource(preferredDevice: AudioDeviceInfo?): Int {
         return if (preferredDevice?.isBtDevice() == true) {
             MediaRecorder.AudioSource.VOICE_COMMUNICATION
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            MediaRecorder.AudioSource.UNPROCESSED
         } else {
-            MediaRecorder.AudioSource.MIC
+            MediaRecorder.AudioSource.UNPROCESSED
         }
     }
 

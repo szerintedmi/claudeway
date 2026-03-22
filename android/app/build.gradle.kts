@@ -77,7 +77,7 @@ dependencies {
     // Network
     implementation(libs.okhttp)
     // org.json is provided by Android runtime; add for unit tests
-    testImplementation("org.json:json:20240303")
+    testImplementation(libs.org.json)
 
     // Meta DAT SDK — comment out if not available yet
     // implementation(libs.dat.sdk)
