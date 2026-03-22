@@ -1,4 +1,4 @@
-package com.claudeway.glasses.ui
+package com.claudeway.ui
 
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -55,10 +55,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.claudeway.glasses.glasses.ConversationMessage
-import com.claudeway.glasses.glasses.MessageRole
-import com.claudeway.glasses.glasses.VoiceFlowState
-import com.claudeway.glasses.network.ConnectionState
+import com.claudeway.glasses.ConversationMessage
+import com.claudeway.glasses.MessageRole
+import com.claudeway.glasses.VoiceFlowState
+import com.claudeway.network.ConnectionState
 
 @Composable
 fun ConversationScreen(

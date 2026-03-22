@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.claudeway.glasses"
+    namespace = "com.claudeway"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.claudeway.glasses"
+        applicationId = "com.claudeway"
         minSdk = 29
         targetSdk = 35
         versionCode = 1

@@ -22,9 +22,9 @@
         android:name=".ClaudewayApp"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
-        android:label="Claudeway Glasses"
+        android:label="Claudeway"
         android:supportsRtl="true"
-        android:theme="@style/Theme.ClaudewayGlasses">
+        android:theme="@style/Theme.Claudeway">
 
         <activity
             android:name=".MainActivity"

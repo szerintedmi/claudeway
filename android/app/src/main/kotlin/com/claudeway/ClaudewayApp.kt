@@ -1,7 +1,7 @@
-package com.claudeway.glasses
+package com.claudeway
 
 import android.app.Application
-import com.claudeway.glasses.glasses.GlassesManager
+import com.claudeway.glasses.GlassesManager
 
 class ClaudewayApp : Application() {
     override fun onCreate() {

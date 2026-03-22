@@ -1,9 +1,9 @@
-package com.claudeway.glasses
+package com.claudeway
 
-import com.claudeway.glasses.network.ClaudewayWebSocket
-import com.claudeway.glasses.network.ConnectionState
-import com.claudeway.glasses.network.PingMessage
-import com.claudeway.glasses.network.TextMessage
+import com.claudeway.network.ClaudewayWebSocket
+import com.claudeway.network.ConnectionState
+import com.claudeway.network.PingMessage
+import com.claudeway.network.TextMessage
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher

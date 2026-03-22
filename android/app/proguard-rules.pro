@@ -5,4 +5,4 @@
 -dontwarn org.openjsse.**
 
 # Keep protocol data classes for JSON serialization
--keep class com.claudeway.glasses.network.* { *; }
+-keep class com.claudeway.network.* { *; }

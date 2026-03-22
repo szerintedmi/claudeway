@@ -1,4 +1,4 @@
-package com.claudeway.glasses.network
+package com.claudeway.network
 
 import org.json.JSONObject
 

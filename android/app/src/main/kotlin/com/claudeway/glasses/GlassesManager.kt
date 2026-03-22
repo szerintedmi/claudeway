@@ -1,4 +1,4 @@
-package com.claudeway.glasses.glasses
+package com.claudeway.glasses
 
 import android.content.Context
 import android.util.Log

@@ -1,4 +1,4 @@
-package com.claudeway.glasses
+package com.claudeway
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -20,10 +20,10 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.claudeway.glasses.glasses.GlassesViewModel
-import com.claudeway.glasses.ui.ClaudewayGlassesTheme
-import com.claudeway.glasses.ui.ConnectionScreen
-import com.claudeway.glasses.ui.ConversationScreen
+import com.claudeway.glasses.GlassesViewModel
+import com.claudeway.ui.ClaudewayTheme
+import com.claudeway.ui.ConnectionScreen
+import com.claudeway.ui.ConversationScreen
 
 class MainActivity : ComponentActivity() {
     private val requiredPermissions = buildList {
@@ -50,12 +50,12 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            ClaudewayGlassesTheme {
+            ClaudewayTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    ClaudewayGlassesApp()
+                    ClaudewayNavHost()
                 }
             }
         }
@@ -63,7 +63,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun ClaudewayGlassesApp() {
+private fun ClaudewayNavHost() {
     val navController = rememberNavController()
     val viewModel: GlassesViewModel = viewModel()
     val uiState by viewModel.uiState.collectAsState()
@@ -78,6 +78,7 @@ private fun ClaudewayGlassesApp() {
                 connectionState = uiState.connectionState,
                 connectionError = uiState.connectionError,
                 glassesState = uiState.glassesState,
+                audioRouteState = uiState.audioRouteState,
                 savedUrl = savedUrl,
                 savedToken = savedToken,
                 onConnect = { url, token ->
@@ -85,7 +86,7 @@ private fun ClaudewayGlassesApp() {
                     viewModel.connect(url, token)
                 },
                 onDisconnect = { viewModel.disconnect() },
-                onRouteAudio = { viewModel.tryRouteAudioToGlasses() },
+                onRouteAudio = { viewModel.tryRouteAudioToBluetooth() },
                 onNavigateToConversation = { navController.navigate("conversation") },
             )
         }

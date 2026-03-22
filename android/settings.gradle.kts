@@ -26,5 +26,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "claudeway-glasses"
+rootProject.name = "claudeway"
 include(":app")

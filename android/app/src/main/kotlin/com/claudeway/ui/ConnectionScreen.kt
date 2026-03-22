@@ -1,4 +1,4 @@
-package com.claudeway.glasses.ui
+package com.claudeway.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -31,16 +31,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import com.claudeway.glasses.BuildConfig
-import com.claudeway.glasses.glasses.GlassesState
-import com.claudeway.glasses.network.ConnectionError
-import com.claudeway.glasses.network.ConnectionState
+import com.claudeway.BuildConfig
+import com.claudeway.audio.AudioRouteState
+import com.claudeway.glasses.GlassesState
+import com.claudeway.network.ConnectionError
+import com.claudeway.network.ConnectionState
 
 @Composable
 fun ConnectionScreen(
     connectionState: ConnectionState,
     connectionError: ConnectionError?,
     glassesState: GlassesState,
+    audioRouteState: AudioRouteState,
     savedUrl: String,
     savedToken: String,
     onConnect: (url: String, token: String) -> Unit,
@@ -61,7 +63,7 @@ fun ConnectionScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
-                text = "Claudeway Glasses",
+                text = "Claudeway",
                 style = MaterialTheme.typography.headlineMedium,
             )
             Text(
@@ -114,6 +116,12 @@ fun ConnectionScreen(
                 state = glassesState.displayText,
                 color = glassesState.indicatorColor,
             )
+            Spacer(modifier = Modifier.height(8.dp))
+            StatusRow(
+                label = "Audio",
+                state = audioRouteState.displayText,
+                color = audioRouteState.indicatorColor,
+            )
 
             Spacer(modifier = Modifier.height(24.dp))
 
@@ -157,9 +165,18 @@ fun ConnectionScreen(
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedButton(
                         onClick = onRouteAudio,
+                        enabled = audioRouteState == AudioRouteState.Available ||
+                            audioRouteState == AudioRouteState.NoDevice ||
+                            audioRouteState == AudioRouteState.Error,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text("Route Audio to Glasses")
+                        Text(
+                            when (audioRouteState) {
+                                AudioRouteState.Routed -> "Audio Routed to Bluetooth"
+                                AudioRouteState.Routing -> "Routing..."
+                                else -> "Route Audio to Bluetooth"
+                            }
+                        )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedButton(
@@ -212,6 +229,26 @@ private val ConnectionState.indicatorColor: Color
         ConnectionState.Connected -> Color(0xFF4CAF50)
         ConnectionState.Reconnecting -> Color.Yellow
         ConnectionState.Error -> Color.Red
+    }
+
+private val AudioRouteState.displayText: String
+    get() = when (this) {
+        AudioRouteState.NoDevice -> "No Bluetooth device"
+        AudioRouteState.Available -> "Bluetooth device available"
+        AudioRouteState.Routing -> "Routing..."
+        AudioRouteState.Routed -> "Routed to Bluetooth"
+        AudioRouteState.Error -> "Routing failed"
+        AudioRouteState.UnsupportedApi -> "Requires Android 12+"
+    }
+
+private val AudioRouteState.indicatorColor: Color
+    get() = when (this) {
+        AudioRouteState.NoDevice -> Color.Gray
+        AudioRouteState.Available -> Color.Yellow
+        AudioRouteState.Routing -> Color.Yellow
+        AudioRouteState.Routed -> Color(0xFF4CAF50)
+        AudioRouteState.Error -> Color.Red
+        AudioRouteState.UnsupportedApi -> Color.Gray
     }
 
 private val GlassesState.displayText: String

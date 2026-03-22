@@ -1,11 +1,11 @@
-package com.claudeway.glasses
+package com.claudeway
 
 import android.app.Application
 import androidx.test.core.app.ApplicationProvider
-import com.claudeway.glasses.glasses.GlassesViewModel
-import com.claudeway.glasses.glasses.MessageRole
-import com.claudeway.glasses.glasses.VoiceFlowState
-import com.claudeway.glasses.network.ConnectionState
+import com.claudeway.glasses.GlassesViewModel
+import com.claudeway.glasses.MessageRole
+import com.claudeway.glasses.VoiceFlowState
+import com.claudeway.network.ConnectionState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher

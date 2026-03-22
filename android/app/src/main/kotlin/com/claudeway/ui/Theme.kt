@@ -1,4 +1,4 @@
-package com.claudeway.glasses.ui
+package com.claudeway.ui
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -30,7 +30,7 @@ private val LightColorScheme = lightColorScheme(
 )
 
 @Composable
-fun ClaudewayGlassesTheme(
+fun ClaudewayTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     dynamicColor: Boolean = true,
     content: @Composable () -> Unit,

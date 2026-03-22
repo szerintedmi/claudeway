@@ -1,27 +1,28 @@
-package com.claudeway.glasses.glasses
+package com.claudeway.glasses
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.claudeway.glasses.audio.AudioPlayer
-import com.claudeway.glasses.audio.AudioRecorder
-import com.claudeway.glasses.audio.AudioRouter
-import com.claudeway.glasses.network.AudioChunkMessage
-import com.claudeway.glasses.network.AudioEndMessage
-import com.claudeway.glasses.network.AudioFormat
-import com.claudeway.glasses.network.AudioStartMessage
-import com.claudeway.glasses.network.CancelMessage
-import com.claudeway.glasses.network.ClaudewayWebSocket
-import com.claudeway.glasses.network.ConnectionError
-import com.claudeway.glasses.network.ConnectionState
-import com.claudeway.glasses.network.ErrorServerMessage
-import com.claudeway.glasses.network.ResponseAudioEndServerMessage
-import com.claudeway.glasses.network.ResponseAudioServerMessage
-import com.claudeway.glasses.network.ResponseTextServerMessage
-import com.claudeway.glasses.network.ServerMessage
-import com.claudeway.glasses.network.StatusServerMessage
-import com.claudeway.glasses.network.TextMessage
-import com.claudeway.glasses.network.TranscriptServerMessage
+import com.claudeway.audio.AudioPlayer
+import com.claudeway.audio.AudioRecorder
+import com.claudeway.audio.AudioRouteState
+import com.claudeway.audio.AudioRouter
+import com.claudeway.network.AudioChunkMessage
+import com.claudeway.network.AudioEndMessage
+import com.claudeway.network.AudioFormat
+import com.claudeway.network.AudioStartMessage
+import com.claudeway.network.CancelMessage
+import com.claudeway.network.ClaudewayWebSocket
+import com.claudeway.network.ConnectionError
+import com.claudeway.network.ConnectionState
+import com.claudeway.network.ErrorServerMessage
+import com.claudeway.network.ResponseAudioEndServerMessage
+import com.claudeway.network.ResponseAudioServerMessage
+import com.claudeway.network.ResponseTextServerMessage
+import com.claudeway.network.ServerMessage
+import com.claudeway.network.StatusServerMessage
+import com.claudeway.network.TextMessage
+import com.claudeway.network.TranscriptServerMessage
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -57,6 +58,7 @@ data class UiState(
     val connectionState: ConnectionState = ConnectionState.Disconnected,
     val connectionError: ConnectionError? = null,
     val glassesState: GlassesState = GlassesState.NotInitialized,
+    val audioRouteState: AudioRouteState = AudioRouteState.NoDevice,
     val voiceFlowState: VoiceFlowState = VoiceFlowState.Idle,
     val currentRequestId: String? = null,
     val statusText: String? = null,
@@ -109,6 +111,13 @@ class GlassesViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             glassesManager.state.collect { state ->
                 _uiState.update { it.copy(glassesState = state) }
+            }
+        }
+
+        // Observe audio route state
+        viewModelScope.launch {
+            audioRouter.state.collect { state ->
+                _uiState.update { it.copy(audioRouteState = state) }
             }
         }
 
@@ -437,8 +446,8 @@ class GlassesViewModel(application: Application) : AndroidViewModel(application)
 
     // --- Bluetooth routing ---
 
-    fun tryRouteAudioToGlasses() {
-        audioRouter.routeToGlasses()
+    fun tryRouteAudioToBluetooth() {
+        audioRouter.routeToBluetooth()
     }
 
     fun releaseAudioRoute() {
