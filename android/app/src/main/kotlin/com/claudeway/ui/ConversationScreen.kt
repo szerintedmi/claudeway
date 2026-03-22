@@ -351,6 +351,7 @@ private fun StatusBar(
     showCancel: Boolean = true,
 ) {
     val bgColor = when (flowState) {
+        VoiceFlowState.Preparing -> Color(0xFFFFA726)
         VoiceFlowState.Recording -> Color(0xFFE53935)
         VoiceFlowState.Transcribing -> Color(0xFFFFA726)
         VoiceFlowState.Thinking -> Color(0xFF42A5F5)
@@ -443,6 +444,7 @@ private fun InlineStatusIndicator(
     onCancel: () -> Unit,
 ) {
     val color = when (flowState) {
+        VoiceFlowState.Preparing -> Color(0xFFFFA726)
         VoiceFlowState.Recording -> Color(0xFFE53935)
         VoiceFlowState.Transcribing -> Color(0xFFFFA726)
         VoiceFlowState.Thinking -> Color(0xFF42A5F5)
@@ -576,7 +578,10 @@ private fun TextInputBar(
     isConnected: Boolean,
     onSwitchToVoice: () -> Unit,
 ) {
-    val isBusy = !isConnected || voiceFlowState == VoiceFlowState.Recording || voiceFlowState == VoiceFlowState.Transcribing
+    val isBusy = !isConnected ||
+        voiceFlowState == VoiceFlowState.Preparing ||
+        voiceFlowState == VoiceFlowState.Recording ||
+        voiceFlowState == VoiceFlowState.Transcribing
 
     Row(
         modifier = Modifier
@@ -631,7 +636,7 @@ private fun VoiceInputBar(
     onSwitchToText: () -> Unit,
     onOpenAudioSettings: () -> Unit,
 ) {
-    val isRecording = voiceFlowState == VoiceFlowState.Recording
+    val isRecording = voiceFlowState == VoiceFlowState.Preparing || voiceFlowState == VoiceFlowState.Recording
     val isBusy = !isConnected || voiceFlowState == VoiceFlowState.Transcribing
 
     val currentOnStartRecording by rememberUpdatedState(onStartRecording)

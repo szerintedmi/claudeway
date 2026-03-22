@@ -48,7 +48,7 @@ class VoiceViewModelTest {
 
         val state = vm.uiState.value
         assertEquals(VoiceFlowState.Error, state.voiceFlowState)
-        assertEquals("Not connected", state.statusText)
+        assertEquals("Failed to send — not connected to server", state.statusText)
         assertNull(state.currentRequestId)
         assertTrue(state.messages.any {
             it.role == MessageRole.Error && it.text.contains("not connected")
@@ -70,7 +70,7 @@ class VoiceViewModelTest {
 
         val state = vm.uiState.value
         assertEquals(VoiceFlowState.Error, state.voiceFlowState)
-        assertEquals("Not connected", state.statusText)
+        assertEquals("Failed to send — not connected to server", state.statusText)
         assertNull(state.currentRequestId)
     }
 

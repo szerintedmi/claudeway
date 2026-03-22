@@ -38,12 +38,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.ArrayDeque
 import java.util.UUID
 
 // --- UI State ---
 
 enum class VoiceFlowState {
     Idle,
+    Preparing,
     Recording,
     Transcribing,
     Thinking,
@@ -114,6 +116,14 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
     // Accumulate streaming response text per request
     private val responseTextAccumulator = StringBuilder()
+    private val pendingAudioChunks = ArrayDeque<ByteArray>()
+    private var recordingReady = false
+    private var streamingAudio = false
+
+    companion object {
+        private const val PRE_ROLL_MS = 240
+        private val PRE_ROLL_CHUNKS = maxOf(1, PRE_ROLL_MS / AudioRecorder.CHUNK_DURATION_MS)
+    }
 
     private val lifecycleObserver = object : DefaultLifecycleObserver {
         override fun onStart(owner: LifecycleOwner) {
@@ -254,56 +264,91 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     // --- Voice input (push-to-talk) ---
 
     fun startRecording() {
-        if (_uiState.value.voiceFlowState == VoiceFlowState.Recording) return
+        if (
+            _uiState.value.voiceFlowState == VoiceFlowState.Preparing ||
+            _uiState.value.voiceFlowState == VoiceFlowState.Recording
+        ) return
+
+        // Fail fast if not connected — no point starting AudioRecord
+        if (_uiState.value.connectionState != ConnectionState.Connected) {
+            showSendError()
+            return
+        }
 
         // Barge-in: cancel active request before starting new recording
         interruptIfActive()
 
         val requestId = UUID.randomUUID().toString()
-
         val ttsMuted = !_uiState.value.ttsEnabled
         val ttsFlag = if (ttsMuted) false else null
-        val sent = webSocket.send(
-            AudioStartMessage(
-                requestId = requestId,
-                format = AudioFormat(
-                    mimeType = AudioRecorder.MIME_TYPE,
-                    sampleRate = AudioRecorder.SAMPLE_RATE,
-                    channels = 1,
-                    encoding = "linear16",
-                ),
-                tts = ttsFlag,
+
+        if (!webSocket.send(
+                AudioStartMessage(
+                    requestId = requestId,
+                    format = AudioFormat(
+                        mimeType = AudioRecorder.MIME_TYPE,
+                        sampleRate = AudioRecorder.SAMPLE_RATE,
+                        channels = 1,
+                        encoding = "linear16",
+                    ),
+                    tts = ttsFlag,
+                )
             )
-        )
-        if (!sent) {
+        ) {
             showSendError()
             return
         }
 
         currentRequestId = requestId
         currentRequestTtsMuted = ttsMuted
+        recordingReady = false
+        streamingAudio = false
+        pendingAudioChunks.clear()
         responseTextAccumulator.clear()
         _uiState.update {
             it.copy(
-                voiceFlowState = VoiceFlowState.Recording,
+                voiceFlowState = VoiceFlowState.Preparing,
                 currentRequestId = requestId,
-                statusText = "Recording...",
+                statusText = "Preparing microphone...",
                 activeTranscript = null,
                 activeResponseText = null,
             )
         }
 
-        // Start capturing and streaming audio chunks
         recordingJob = viewModelScope.launch {
-            audioRecorder.startRecording(preferredDevice = audioRouter.routedDevice).collect { pcmData ->
-                val base64 = audioRecorder.encodeToBase64(pcmData)
-                if (!webSocket.send(AudioChunkMessage(requestId = requestId, data = base64))) {
-                    // Connection lost during recording — abort
-                    stopRecording()
-                    resetToIdle()
-                    showSendError()
-                    return@collect
+            try {
+                audioRecorder.startRecording(preferredDevice = audioRouter.routedDevice).collect { pcmData ->
+                    pendingAudioChunks.addLast(pcmData)
+                    if (!recordingReady) {
+                        recordingReady = true
+                        _uiState.update {
+                            it.copy(
+                                voiceFlowState = VoiceFlowState.Recording,
+                                statusText = "Recording...",
+                            )
+                        }
+                    }
+
+                    if (!streamingAudio) {
+                        if (pendingAudioChunks.size < PRE_ROLL_CHUNKS) {
+                            return@collect
+                        }
+                        streamingAudio = true
+                        if (!flushPendingAudio(requestId)) {
+                            return@collect
+                        }
+                        return@collect
+                    }
+
+                    if (!sendAudioChunk(requestId, pendingAudioChunks.removeFirst())) {
+                        return@collect
+                    }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e // normal cancellation — rethrow so coroutine machinery works
+            } catch (_: Exception) {
+                resetToIdle()
+                showOperationError("Microphone unavailable")
             }
         }
     }
@@ -313,6 +358,12 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         audioRecorder.stopRecording()
         recordingJob?.cancel()
         recordingJob = null
+
+        if (!streamingAudio && pendingAudioChunks.isNotEmpty()) {
+            if (!flushPendingAudio(requestId)) {
+                return
+            }
+        }
 
         if (!webSocket.send(AudioEndMessage(requestId = requestId))) {
             resetToIdle()
@@ -380,16 +431,46 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         }
         currentRequestId = null
         currentRequestTtsMuted = false
+        recordingReady = false
+        streamingAudio = false
+        pendingAudioChunks.clear()
         responseTextAccumulator.clear()
     }
 
+    private fun flushPendingAudio(requestId: String): Boolean {
+        while (pendingAudioChunks.isNotEmpty()) {
+            if (!sendAudioChunk(requestId, pendingAudioChunks.removeFirst())) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun sendAudioChunk(requestId: String, pcmData: ByteArray): Boolean {
+        val base64 = audioRecorder.encodeToBase64(pcmData)
+        if (webSocket.send(AudioChunkMessage(requestId = requestId, data = base64))) {
+            return true
+        }
+
+        audioRecorder.stopRecording()
+        recordingJob?.cancel()
+        recordingJob = null
+        resetToIdle()
+        showSendError()
+        return false
+    }
+
     private fun showSendError() {
+        showOperationError("Failed to send — not connected to server")
+    }
+
+    private fun showOperationError(message: String) {
         _uiState.update { state ->
             state.copy(
                 voiceFlowState = VoiceFlowState.Error,
-                statusText = "Not connected",
+                statusText = message,
                 messages = state.messages + ConversationMessage(
-                    "", MessageRole.Error, "Failed to send — not connected to server"
+                    "", MessageRole.Error, message
                 ),
             )
         }

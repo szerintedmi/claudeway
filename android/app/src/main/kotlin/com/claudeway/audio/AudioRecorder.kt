@@ -5,6 +5,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Build
 import android.util.Base64
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
@@ -30,11 +31,12 @@ class AudioRecorder {
         const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         const val AUDIO_ENCODING = AudioFormat.ENCODING_PCM_16BIT
         const val MIME_TYPE = "audio/l16;rate=16000"
+        const val CHUNK_DURATION_MS = 20
 
-        /** Buffer size in bytes (~100ms of audio) */
+        /** Buffer size in bytes (~20ms of audio) */
         val BUFFER_SIZE: Int = maxOf(
             AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_ENCODING),
-            SAMPLE_RATE * 2 / 10 // 100ms at 16-bit mono = 1600 bytes
+            SAMPLE_RATE * 2 * CHUNK_DURATION_MS / 1000
         )
     }
 
@@ -46,15 +48,16 @@ class AudioRecorder {
 
     /**
      * Start recording and emit PCM byte arrays as a Flow.
-     * Each emission is ~100ms of raw PCM data.
+     * Each emission is ~20ms of raw PCM data.
      * The flow completes when [stopRecording] is called or the coroutine is cancelled.
      *
      * @param preferredDevice If non-null, route recording to this specific device (e.g. BT SCO).
      */
     @SuppressLint("MissingPermission") // Permission checked at UI layer before starting
     fun startRecording(preferredDevice: AudioDeviceInfo? = null): Flow<ByteArray> = flow {
+        val audioSource = selectAudioSource(preferredDevice)
         val record = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            audioSource,
             SAMPLE_RATE,
             CHANNEL_CONFIG,
             AUDIO_ENCODING,
@@ -85,8 +88,12 @@ class AudioRecorder {
             rates.isEmpty() -> "any (unconstrained)"
             else -> rates.toList().toString()
         }
-        Log.d(TAG, "Recording started — device: ${activeDevice?.productName ?: "default"} " +
-            "(${deviceTypeName(activeDevice?.type)}), requestedRate=$SAMPLE_RATE, deviceRates=$ratesStr")
+        Log.d(
+            TAG,
+            "Recording started — source=${audioSourceName(audioSource)}, " +
+                "device: ${activeDevice?.productName ?: "default"} " +
+                "(${deviceTypeName(activeDevice?.type)}), requestedRate=$SAMPLE_RATE, deviceRates=$ratesStr"
+        )
 
         val buffer = ByteArray(BUFFER_SIZE)
         var chunkCount = 0
@@ -130,6 +137,16 @@ class AudioRecorder {
         return Base64.encodeToString(pcmData, Base64.NO_WRAP)
     }
 
+    private fun selectAudioSource(preferredDevice: AudioDeviceInfo?): Int {
+        return if (preferredDevice?.isBtDevice() == true) {
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            MediaRecorder.AudioSource.UNPROCESSED
+        } else {
+            MediaRecorder.AudioSource.MIC
+        }
+    }
+
     /** Peak amplitude from 16-bit PCM samples. 0 = silence, 32767 = max. */
     private fun peakAmplitude(buffer: ByteArray, length: Int): Int {
         var peak = 0
@@ -154,4 +171,15 @@ class AudioRecorder {
         null -> "null"
         else -> "UNKNOWN($type)"
     }
+
+    private fun audioSourceName(source: Int): String = when (source) {
+        MediaRecorder.AudioSource.MIC -> "MIC"
+        MediaRecorder.AudioSource.UNPROCESSED -> "UNPROCESSED"
+        MediaRecorder.AudioSource.VOICE_COMMUNICATION -> "VOICE_COMMUNICATION"
+        else -> "UNKNOWN($source)"
+    }
+
+    @SuppressLint("InlinedApi")
+    private fun AudioDeviceInfo.isBtDevice(): Boolean =
+        type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || type == AudioDeviceInfo.TYPE_BLE_HEADSET
 }
