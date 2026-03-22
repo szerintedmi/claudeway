@@ -20,17 +20,20 @@ sealed interface ClientMessage {
 data class TextMessage(
     val requestId: String,
     val text: String,
+    val tts: Boolean? = null,
 ) : ClientMessage {
     override fun toJson(): String = JSONObject().apply {
         put("type", "text")
         put("requestId", requestId)
         put("text", text)
+        if (tts != null) put("tts", tts)
     }.toString()
 }
 
 data class AudioStartMessage(
     val requestId: String,
     val format: AudioFormat,
+    val tts: Boolean? = null,
 ) : ClientMessage {
     override fun toJson(): String = JSONObject().apply {
         put("type", "audio_start")
@@ -41,6 +44,7 @@ data class AudioStartMessage(
             format.channels?.let { put("channels", it) }
             format.encoding?.let { put("encoding", it) }
         })
+        if (tts != null) put("tts", tts)
     }.toString()
 }
 

@@ -39,6 +39,9 @@ import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.outlined.AddComment
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -48,6 +51,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -110,6 +114,9 @@ fun ConversationScreen(
     selectedRouteId: Int,
     channelName: String?,
     channelRepo: String?,
+    ttsEnabled: Boolean,
+    onNewChat: () -> Unit,
+    onToggleTts: () -> Unit,
     onSendText: (String) -> Unit,
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit,
@@ -123,6 +130,7 @@ fun ConversationScreen(
     val listState = rememberLazyListState()
     var textInput by rememberSaveable { mutableStateOf("") }
     var showAudioSettings by rememberSaveable { mutableStateOf(false) }
+    var showNewChatConfirm by rememberSaveable { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(messages.size, activeResponseText, statusText) {
@@ -135,6 +143,24 @@ fun ConversationScreen(
         deviceToasts.collect { toast ->
             snackbarHostState.showSnackbar(toast.message)
         }
+    }
+
+    if (showNewChatConfirm) {
+        AlertDialog(
+            onDismissRequest = { showNewChatConfirm = false },
+            title = { Text("New conversation?", color = ObsidianTokens.OnSurface) },
+            text = { Text("This will clear the current conversation and start fresh.", color = ObsidianTokens.OnSurfaceVariant) },
+            confirmButton = {
+                TextButton(onClick = {
+                    showNewChatConfirm = false
+                    onNewChat()
+                }) { Text("Start new") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNewChatConfirm = false }) { Text("Cancel") }
+            },
+            containerColor = ObsidianTokens.SurfaceContainer,
+        )
     }
 
     Scaffold(
@@ -160,6 +186,22 @@ fun ConversationScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = {
+                        if (messages.isEmpty()) onNewChat() else showNewChatConfirm = true
+                    }) {
+                        Icon(
+                            Icons.Outlined.AddComment,
+                            contentDescription = "New conversation",
+                            tint = ObsidianTokens.OnSurfaceVariant,
+                        )
+                    }
+                    IconButton(onClick = onToggleTts) {
+                        Icon(
+                            if (ttsEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                            contentDescription = if (ttsEnabled) "Mute TTS" else "Enable TTS",
+                            tint = ObsidianTokens.OnSurfaceVariant,
+                        )
+                    }
                     IconButton(onClick = onNavigateToSettings) {
                         Icon(
                             Icons.Default.Settings,

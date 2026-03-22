@@ -79,6 +79,7 @@ data class UiState(
     val channelName: String? = null,
     val channelRepo: String? = null,
     val channelModel: String? = null,
+    val ttsEnabled: Boolean = true,
 )
 
 // --- ViewModel ---
@@ -107,6 +108,9 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
     private var recordingJob: Job? = null
     private var currentRequestId: String? = null
+    /** Whether the current in-flight request was sent with TTS disabled */
+    private var currentRequestTtsMuted = false
+    private var pendingNewChat = false
 
     // Accumulate streaming response text per request
     private val responseTextAccumulator = StringBuilder()
@@ -122,6 +126,9 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         // Observe WebSocket connection state
         viewModelScope.launch {
             webSocket.connectionState.collect { state ->
+                if (state == ConnectionState.Error) {
+                    pendingNewChat = false
+                }
                 _uiState.update { it.copy(connectionState = state) }
             }
         }
@@ -168,6 +175,29 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(inputMode = mode) }
     }
 
+    // --- TTS toggle ---
+
+    fun toggleTts() {
+        val wasEnabled = _uiState.value.ttsEnabled
+        _uiState.update { it.copy(ttsEnabled = !wasEnabled) }
+        if (wasEnabled) {
+            // Immediately stop any active playback
+            audioPlayer.stop()
+        }
+    }
+
+    // --- New chat ---
+
+    /** Start a new conversation by disconnecting and reconnecting. */
+    fun newChat(url: String, token: String) {
+        interruptIfActive()
+        resetToIdle()
+        disconnect()
+        connect(url, token)
+        // Set after connect() so any synchronous Disconnected state from disconnect() doesn't clear it
+        pendingNewChat = true
+    }
+
     // --- Audio device management ---
 
     fun applyAudioRouteSelection(routeId: Int) {
@@ -182,6 +212,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnect() {
+        pendingNewChat = false
         webSocket.disconnect()
         audioRouter.endSession()
         _uiState.update {
@@ -199,12 +230,15 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
         val requestId = UUID.randomUUID().toString()
 
-        if (!webSocket.send(TextMessage(requestId = requestId, text = text))) {
+        val ttsMuted = !_uiState.value.ttsEnabled
+        val ttsFlag = if (ttsMuted) false else null
+        if (!webSocket.send(TextMessage(requestId = requestId, text = text, tts = ttsFlag))) {
             showSendError()
             return
         }
 
         currentRequestId = requestId
+        currentRequestTtsMuted = ttsMuted
         responseTextAccumulator.clear()
         _uiState.update {
             it.copy(
@@ -227,6 +261,8 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
         val requestId = UUID.randomUUID().toString()
 
+        val ttsMuted = !_uiState.value.ttsEnabled
+        val ttsFlag = if (ttsMuted) false else null
         val sent = webSocket.send(
             AudioStartMessage(
                 requestId = requestId,
@@ -236,6 +272,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                     channels = 1,
                     encoding = "linear16",
                 ),
+                tts = ttsFlag,
             )
         )
         if (!sent) {
@@ -244,6 +281,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         currentRequestId = requestId
+        currentRequestTtsMuted = ttsMuted
         responseTextAccumulator.clear()
         _uiState.update {
             it.copy(
@@ -341,6 +379,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         currentRequestId = null
+        currentRequestTtsMuted = false
         responseTextAccumulator.clear()
     }
 
@@ -376,12 +415,15 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         requestId == currentRequestId
 
     private fun handleChannelInfo(msg: ChannelInfoServerMessage) {
+        val clearMessages = pendingNewChat
+        pendingNewChat = false
         _uiState.update {
             it.copy(
                 channelId = msg.channelId,
                 channelName = msg.channelName,
                 channelRepo = msg.repo,
                 channelModel = msg.model,
+                messages = if (clearMessages) emptyList() else it.messages,
             )
         }
     }
@@ -493,10 +535,15 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         responseTextAccumulator.append(msg.text)
         val fullText = responseTextAccumulator.toString()
 
+        val wasTtsMuted = currentRequestTtsMuted
         _uiState.update { state ->
             if (msg.isFinal) {
                 state.copy(
                     activeResponseText = null,
+                    // When this request was sent with TTS off, no response_audio_end will come — reset to idle here
+                    voiceFlowState = if (wasTtsMuted) VoiceFlowState.Idle else state.voiceFlowState,
+                    currentRequestId = if (wasTtsMuted) null else state.currentRequestId,
+                    statusText = if (wasTtsMuted) null else state.statusText,
                     messages = state.messages + ConversationMessage(
                         msg.requestId, MessageRole.Assistant, fullText
                     ),
@@ -508,11 +555,15 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
         if (msg.isFinal) {
             responseTextAccumulator.clear()
+            if (wasTtsMuted) {
+                currentRequestId = null
+            }
         }
     }
 
     private fun handleResponseAudio(msg: ResponseAudioServerMessage) {
         if (!isActiveRequest(msg.requestId)) return
+        if (!_uiState.value.ttsEnabled) return
 
         audioPlayer.queueAudio(msg.data, msg.sampleRate)
         _uiState.update {

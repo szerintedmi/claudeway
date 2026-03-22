@@ -6,12 +6,14 @@ export interface TextMessage {
   type: 'text';
   requestId: string;
   text: string;
+  tts?: boolean;
 }
 
 export interface AudioStartMessage {
   type: 'audio_start';
   requestId: string;
   format: { mimeType: string; sampleRate?: number; channels?: number; encoding?: string };
+  tts?: boolean;
 }
 
 export interface AudioChunkMessage {
@@ -167,7 +169,12 @@ export function parseClientMessage(raw: string): VoiceClientMessage {
     if (typeof msg.text !== 'string') {
       throw new Error('Missing text field');
     }
-    return { type: 'text', requestId: msg.requestId, text: msg.text };
+    return {
+      type: 'text',
+      requestId: msg.requestId,
+      text: msg.text,
+      ...(typeof msg.tts === 'boolean' ? { tts: msg.tts } : {}),
+    };
   }
 
   if (msg.type === 'audio_start') {
@@ -187,6 +194,7 @@ export function parseClientMessage(raw: string): VoiceClientMessage {
         ...(typeof fmt.channels === 'number' ? { channels: fmt.channels } : {}),
         ...(typeof fmt.encoding === 'string' ? { encoding: fmt.encoding } : {}),
       },
+      ...(typeof msg.tts === 'boolean' ? { tts: msg.tts } : {}),
     };
   }
 

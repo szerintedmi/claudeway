@@ -263,7 +263,8 @@ export function handleMessage(
       }
       // Auto-cancel any active responder (barge-in)
       cancelActiveResponders(ws, session);
-      enqueueText(ws, session, requestId, msg.text, voiceProvider, ttsOptions);
+      const effectiveTts = msg.tts === false ? undefined : ttsOptions;
+      enqueueText(ws, session, requestId, msg.text, voiceProvider, effectiveTts);
       break;
     }
 
@@ -288,7 +289,7 @@ export function handleMessage(
       }
       // Auto-cancel any active responder (barge-in)
       cancelActiveResponders(ws, session);
-      session.activeRecordings.set(requestId, createRecording(requestId, format));
+      session.activeRecordings.set(requestId, createRecording(requestId, format, msg.tts));
       break;
     }
 
@@ -338,7 +339,8 @@ export function handleMessage(
         break;
       }
 
-      handleAudioEnd(ws, session, requestId, recording, voiceProvider, ttsOptions).catch((err) => {
+      const audioTts = recording.tts === false ? undefined : ttsOptions;
+      handleAudioEnd(ws, session, requestId, recording, voiceProvider, audioTts).catch((err) => {
         console.error(`[voice] Unexpected error in handleAudioEnd:`, err);
       });
       break;
