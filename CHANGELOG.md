@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.22.0] - 2026-03-22
+
+### Added
+- **Voice channel**: WebSocket-based voice interface with provider-agnostic STT/TTS (Deepgram Nova-3 + Aura-2). Supports server-side, client-side, and local TTS modes
+- **Android companion app**: Kotlin/Jetpack Compose app with push-to-talk and hands-free voice modes, Bluetooth SCO audio routing, barge-in support, and Meta glasses integration
+- **Web voice test UI**: Browser-based voice interface with new chat, TTS mute, and audio device selector
+- **Per-channel effort level**: `effort` config option (`low`, `medium`, `high`) in defaults or per channel to control Claude CLI thinking effort
+- **Channel-agnostic engine**: Core message processing decoupled from Slack — enables multiple channel adapters (Slack, voice WebSocket)
+
+### Fixed
+- Bluetooth audio routing and SCO session management on Android
+- Speech clipping on Android voice recording
+- Soft keyboard covering text input on Android
+
 ## [0.21.0] - 2026-03-16
 
 ### Added

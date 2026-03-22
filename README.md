@@ -1,15 +1,17 @@
 # Claudeway
 
-Slack-to-Claude Code CLI gateway for solo developers.
+Multi-channel Claude Code CLI gateway for solo developers — Slack, voice, and Android.
 
 ## Design Concept
 
 Claudeway is a **personal tool for a single developer** using their own Claude Max subscription through the official Claude Code CLI. It is not a multi-user service, does not extract OAuth tokens, and does not route requests through third-party backends.
 
-It's just a remote terminal with Slack as the transport layer. You type in Slack, Claude Code runs on your machine, the response comes back to Slack. No TOS violations.
+It's just a remote terminal with Slack and voice as transport layers. You type in Slack or speak through the Android app / browser, Claude Code runs on your machine, and the response comes back through the originating channel. No TOS violations.
 
 ```
-You (Slack) --> Socket Mode --> Claudeway (your machine) --> claude CLI --> response --> Slack
+You (Slack)    --> Socket Mode --> Claudeway (your machine) --> claude CLI --> response --> Slack
+You (Voice)    --> WebSocket   --> Claudeway (your machine) --> claude CLI --> response --> TTS audio
+You (Android)  --> WebSocket   --> Claudeway (your machine) --> claude CLI --> response --> TTS audio
 ```
 
 ## How It Works
@@ -22,6 +24,16 @@ You (Slack) --> Socket Mode --> Claudeway (your machine) --> claude CLI --> resp
 6. Temp image files are cleaned up after processing
 
 Each channel maps to a repo, so you can have `#dashboard` pointing to your dashboard repo, `#api` pointing to your API, etc. Session IDs are derived deterministically from the channel + repo pair, so conversations persist across restarts — Claude remembers what you discussed earlier in the same channel.
+
+## Voice Channel
+
+Claudeway includes a WebSocket-based voice interface with speech-to-text and text-to-speech support (Deepgram Nova-3 / Aura-2). Three ways to use it:
+
+- **Android companion app** — Kotlin/Jetpack Compose app with push-to-talk and hands-free modes, Bluetooth headset support, barge-in, and Meta glasses integration. See `android/README.md` for setup.
+- **Web test UI** — Browser-based interface at the voice adapter's HTTP endpoint. Supports new chat, TTS mute, and audio device selection.
+- **Any WebSocket client** — Connect to the voice WebSocket endpoint and implement the protocol (see `src/adapters/voice/`).
+
+TTS modes are configurable per connection: server-side (Deepgram Aura-2), client-side (client handles TTS), or local (Android built-in TTS).
 
 ## Self-Configuration
 
@@ -216,6 +228,7 @@ Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutd
 | `responseMode` | How responses are delivered (see below) | from defaults |
 | `processMode` | How the Claude CLI process is managed (see below) | from defaults |
 | `triggerMode` | When to respond: `all` or `mention` (see below) | `all` |
+| `effort` | Claude CLI thinking effort (`low`, `medium`, `high`) | from defaults |
 | `allowedUsers` | Slack user IDs allowed to interact with the bot in this channel | everyone |
 
 ### Trigger Modes
