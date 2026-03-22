@@ -1,13 +1,18 @@
 services:
   claudeway:
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        skills: ./.docker/skills-empty
     container_name: claudeway
     restart: unless-stopped
     env_file:
-      - .env  # SLACK_BOT_TOKEN, SLACK_APP_TOKEN (only for Claudeway process, stripped before Claude CLI)
+      - .env  # SLACK_BOT_TOKEN, SLACK_APP_TOKEN, VOICE_AUTH_TOKEN (only for Claudeway process, stripped before Claude CLI)
     environment:
       - HOME=/home/claudeway
       - USER=claudeway
+    ports:
+      - "${VOICE_PORT:-8765}:${VOICE_PORT:-8765}"  # Voice WebSocket server (only used when voiceServer.enabled)
     volumes:
       # Config (read-only)
       - ./config.yaml:/app/config.yaml:ro

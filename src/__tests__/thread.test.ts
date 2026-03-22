@@ -1,8 +1,16 @@
+import { beforeEach, describe, it, expect, spyOn } from 'bun:test';
 import type { WebClient } from '@slack/web-api';
-import { resetUserNameCache, resolveUserName, fetchThreadContext } from '../thread.js';
+import {
+  resetUserNameCache,
+  resolveUserName,
+  fetchThreadContext,
+} from '../adapters/slack/thread.js';
 
 beforeEach(() => {
   resetUserNameCache();
+  // Suppress expected console noise from error-path tests
+  spyOn(console, 'warn').mockImplementation(() => {});
+  spyOn(console, 'error').mockImplementation(() => {});
 });
 
 function makeUserClient(displayName: string) {

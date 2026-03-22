@@ -89,11 +89,14 @@ export function permissionKey(p: UserPermissions | undefined): string {
   return parts.join(',');
 }
 
+export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
+
 export interface ChannelConfig {
   name: string;
   repo?: string;
   folder?: string;
   model?: string;
+  effort?: EffortLevel;
   systemPrompt?: string;
   timeoutMs?: number;
   responseMode?: ResponseMode;
@@ -104,6 +107,7 @@ export interface ChannelConfig {
 
 export interface Defaults {
   model: string;
+  effort?: EffortLevel;
   systemPrompt: string;
   timeoutMs: number;
   responseMode: ResponseMode;
@@ -112,11 +116,39 @@ export interface Defaults {
   tempDir?: string;
 }
 
+export interface VoiceTokenConfig {
+  token: string;
+  userId: string;
+  defaultChannel: string;
+}
+
+export interface VoiceServerConfig {
+  enabled: boolean;
+  port: number;
+  auth: { tokens: VoiceTokenConfig[] };
+}
+
+export interface DeepgramConfig {
+  apiKey: string;
+  sttModel?: string; // defaults to 'nova-3'
+  ttsModel?: string; // defaults to 'aura-2-thalia-en' (Deepgram Aura-2)
+  ttsVoice?: string; // unused for now — voice embedded in model name
+  ttsSampleRate?: number; // defaults to 24000
+  // Note: Deepgram's `speed` param is REST-only, not supported on WebSocket streaming
+}
+
+export interface VoiceConfig {
+  provider: 'deepgram';
+  deepgram: DeepgramConfig;
+}
+
 export interface Config {
   repos?: Record<string, RepoConfig>;
   channels: Record<string, ChannelConfig>;
   defaults: Defaults;
   botOwner?: string;
+  voiceServer?: VoiceServerConfig;
+  voice?: VoiceConfig;
 }
 
 export function getConfigPath(): string {
@@ -176,6 +208,22 @@ export function loadConfig(): Config {
     }
   }
 
+  // Validate voice config if present
+  if (config.voice) {
+    if (config.voice.provider !== 'deepgram') {
+      throw new Error(`${configPath}: voice.provider must be "deepgram"`);
+    }
+    if (!config.voice.deepgram?.apiKey) {
+      throw new Error(`${configPath}: voice.deepgram.apiKey is required`);
+    }
+    const resolvedKey = interpolateEnvVars(config.voice.deepgram.apiKey);
+    if (!resolvedKey) {
+      throw new Error(
+        `${configPath}: voice.deepgram.apiKey resolves to empty — set the environment variable`,
+      );
+    }
+  }
+
   // Validate repo references
   if (config.repos) {
     for (const [channelId, ch] of Object.entries(config.channels)) {
@@ -232,6 +280,7 @@ export function getChannelConfig(config: Config, channelId: string): ChannelConf
 export interface ResolvedChannelConfig extends ChannelConfig {
   folder: string;
   model: string;
+  effort?: EffortLevel;
   systemPrompt: string;
   timeoutMs: number;
   responseMode: ResponseMode;
@@ -251,10 +300,32 @@ export function resolvedChannelConfig(
     ...ch,
     folder,
     model: ch.model ?? config.defaults.model,
+    effort: ch.effort ?? config.defaults.effort,
     systemPrompt: ch.systemPrompt ?? config.defaults.systemPrompt,
     timeoutMs: ch.timeoutMs ?? config.defaults.timeoutMs,
     responseMode: ch.responseMode ?? config.defaults.responseMode,
     processMode: ch.processMode ?? config.defaults.processMode ?? 'oneshot',
     triggerMode: ch.triggerMode ?? config.defaults.triggerMode ?? 'all',
   };
+}
+
+/**
+ * Interpolate env var references like ${VAR_NAME} in a string.
+ */
+export function interpolateEnvVars(value: string): string {
+  return value.replace(/\$\{([^}]+)\}/g, (_, name) => process.env[name] ?? '');
+}
+
+/**
+ * Resolve a raw token (possibly with env var interpolation) to its VoiceTokenConfig.
+ * Returns null if no matching token is found.
+ */
+export function resolveVoiceToken(config: Config, rawToken: string): VoiceTokenConfig | null {
+  const tokens = config.voiceServer?.auth?.tokens;
+  if (!tokens) return null;
+  for (const entry of tokens) {
+    const resolved = interpolateEnvVars(entry.token);
+    if (resolved === rawToken) return entry;
+  }
+  return null;
 }

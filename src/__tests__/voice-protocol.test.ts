@@ -1,0 +1,184 @@
+import { describe, it, expect } from 'bun:test';
+import {
+  parseClientMessage,
+  serializeServerMessage,
+  type VoiceServerMessage,
+} from '../adapters/voice/protocol.js';
+
+describe('parseClientMessage', () => {
+  it('parses a valid text message', () => {
+    const msg = parseClientMessage('{"type":"text","requestId":"r1","text":"hello"}');
+    expect(msg).toEqual({ type: 'text', requestId: 'r1', text: 'hello' });
+  });
+
+  it('parses a valid cancel message', () => {
+    const msg = parseClientMessage('{"type":"cancel","requestId":"r2"}');
+    expect(msg).toEqual({ type: 'cancel', requestId: 'r2' });
+  });
+
+  it('parses a valid ping message', () => {
+    const msg = parseClientMessage('{"type":"ping"}');
+    expect(msg).toEqual({ type: 'ping' });
+  });
+
+  it('rejects invalid JSON', () => {
+    expect(() => parseClientMessage('not json')).toThrow('Invalid JSON');
+  });
+
+  it('rejects non-object JSON', () => {
+    expect(() => parseClientMessage('"hello"')).toThrow('must be a JSON object');
+  });
+
+  it('rejects missing type', () => {
+    expect(() => parseClientMessage('{"requestId":"r1"}')).toThrow(
+      'Unknown or missing message type',
+    );
+  });
+
+  it('rejects unknown type', () => {
+    expect(() => parseClientMessage('{"type":"audio","requestId":"r1"}')).toThrow(
+      'Unknown or missing message type',
+    );
+  });
+
+  it('rejects text message without requestId', () => {
+    expect(() => parseClientMessage('{"type":"text","text":"hi"}')).toThrow(
+      'Missing or empty requestId',
+    );
+  });
+
+  it('rejects text message with empty requestId', () => {
+    expect(() => parseClientMessage('{"type":"text","requestId":"","text":"hi"}')).toThrow(
+      'Missing or empty requestId',
+    );
+  });
+
+  it('rejects text message without text field', () => {
+    expect(() => parseClientMessage('{"type":"text","requestId":"r1"}')).toThrow(
+      'Missing text field',
+    );
+  });
+
+  it('rejects cancel message without requestId', () => {
+    expect(() => parseClientMessage('{"type":"cancel"}')).toThrow('Missing or empty requestId');
+  });
+
+  // --- Audio message parsing ---
+
+  it('parses a valid audio_start message', () => {
+    const msg = parseClientMessage(
+      '{"type":"audio_start","requestId":"r1","format":{"mimeType":"audio/webm;codecs=opus"}}',
+    );
+    expect(msg).toEqual({
+      type: 'audio_start',
+      requestId: 'r1',
+      format: { mimeType: 'audio/webm;codecs=opus' },
+    });
+  });
+
+  it('parses audio_start with optional format fields', () => {
+    const msg = parseClientMessage(
+      JSON.stringify({
+        type: 'audio_start',
+        requestId: 'r1',
+        format: { mimeType: 'audio/l16', sampleRate: 16000, channels: 1, encoding: 'linear16' },
+      }),
+    );
+    expect(msg).toEqual({
+      type: 'audio_start',
+      requestId: 'r1',
+      format: { mimeType: 'audio/l16', sampleRate: 16000, channels: 1, encoding: 'linear16' },
+    });
+  });
+
+  it('rejects audio_start without format', () => {
+    expect(() => parseClientMessage('{"type":"audio_start","requestId":"r1"}')).toThrow(
+      'Missing format object',
+    );
+  });
+
+  it('rejects audio_start with empty mimeType', () => {
+    expect(() =>
+      parseClientMessage('{"type":"audio_start","requestId":"r1","format":{"mimeType":""}}'),
+    ).toThrow('Missing or empty format.mimeType');
+  });
+
+  it('parses a valid audio_chunk message', () => {
+    const msg = parseClientMessage('{"type":"audio_chunk","requestId":"r1","data":"AQID"}');
+    expect(msg).toEqual({ type: 'audio_chunk', requestId: 'r1', data: 'AQID' });
+  });
+
+  it('rejects audio_chunk without data', () => {
+    expect(() => parseClientMessage('{"type":"audio_chunk","requestId":"r1"}')).toThrow(
+      'Missing or empty data field',
+    );
+  });
+
+  it('rejects audio_chunk with empty data', () => {
+    expect(() => parseClientMessage('{"type":"audio_chunk","requestId":"r1","data":""}')).toThrow(
+      'Missing or empty data field',
+    );
+  });
+
+  it('parses a valid audio_end message', () => {
+    const msg = parseClientMessage('{"type":"audio_end","requestId":"r1"}');
+    expect(msg).toEqual({ type: 'audio_end', requestId: 'r1' });
+  });
+
+  it('rejects audio_end without requestId', () => {
+    expect(() => parseClientMessage('{"type":"audio_end"}')).toThrow('Missing or empty requestId');
+  });
+});
+
+describe('serializeServerMessage', () => {
+  it('serializes a status message', () => {
+    const msg: VoiceServerMessage = { type: 'status', requestId: 'r1', status: 'thinking' };
+    const json = JSON.parse(serializeServerMessage(msg));
+    expect(json).toEqual({ type: 'status', requestId: 'r1', status: 'thinking' });
+  });
+
+  it('serializes a response_text message', () => {
+    const msg: VoiceServerMessage = {
+      type: 'response_text',
+      requestId: 'r1',
+      text: 'hello',
+      final: true,
+    };
+    const json = JSON.parse(serializeServerMessage(msg));
+    expect(json).toEqual({ type: 'response_text', requestId: 'r1', text: 'hello', final: true });
+  });
+
+  it('serializes a transcript message', () => {
+    const msg: VoiceServerMessage = {
+      type: 'transcript',
+      requestId: 'r1',
+      text: 'spoken text',
+      final: false,
+    };
+    const json = JSON.parse(serializeServerMessage(msg));
+    expect(json).toEqual({
+      type: 'transcript',
+      requestId: 'r1',
+      text: 'spoken text',
+      final: false,
+    });
+  });
+
+  it('serializes an error message with requestId', () => {
+    const msg: VoiceServerMessage = { type: 'error', requestId: 'r1', message: 'oops' };
+    const json = JSON.parse(serializeServerMessage(msg));
+    expect(json).toEqual({ type: 'error', requestId: 'r1', message: 'oops' });
+  });
+
+  it('serializes an error message with null requestId', () => {
+    const msg: VoiceServerMessage = { type: 'error', requestId: null, message: 'bad' };
+    const json = JSON.parse(serializeServerMessage(msg));
+    expect(json).toEqual({ type: 'error', requestId: null, message: 'bad' });
+  });
+
+  it('serializes a pong message', () => {
+    const msg: VoiceServerMessage = { type: 'pong' };
+    const json = JSON.parse(serializeServerMessage(msg));
+    expect(json).toEqual({ type: 'pong' });
+  });
+});

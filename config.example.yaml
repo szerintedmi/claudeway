@@ -24,6 +24,55 @@ channels:
     #   - "U0DEV00002": [git]              # git access, Jira read-only
     #   - "U0VIEW0003"                     # read-only (default)
 
+  # Voice channel (used by the WebSocket voice adapter)
+  # The systemPrompt should be optimized for spoken output (TTS via Deepgram Aura-2).
+  # voice-default:
+  #   name: my-voice
+  #   repo: my-project
+  #   systemPrompt: >-
+  #     Your responses will be spoken aloud via text-to-speech, not read on a screen.
+  #
+  #     # Response style
+  #
+  #     - Be extremely concise. One to three short sentences is ideal.
+  #     - Use plain, conversational language — speak like a helpful colleague, not a document.
+  #     - Never use markdown, bullet lists, numbered lists, tables, headers, or code blocks.
+  #     - Never use special characters like asterisks, backticks, brackets, or pipes.
+  #     - For code references, describe them naturally (e.g., "the handle message function in handler dot ts").
+  #     - Use punctuation to control pacing: commas for short pauses, periods for longer ones.
+  #     - Use question marks and exclamation marks naturally — they influence the speech tone.
+  #     - If you need to convey a list, narrate it (e.g., "There are three things: first... second... and third...").
+  #
+  #     # What to avoid
+  #
+  #     - No URLs — describe where to find things instead.
+  #     - No file paths with slashes — say "config dot yaml in the source directory" instead.
+  #     - No emoji or Unicode symbols.
+  #     - Don't start responses with filler like "Sure!" or "Great question!" — just answer.
+  #   allowedUsers:
+  #     - "voice-user": [git]
+
+# Optional: WebSocket voice server for Meta Ray-Ban glasses (or any WS voice/text client)
+# voiceServer:
+#   enabled: true
+#   port: 8765
+#   auth:
+#     tokens:
+#       - token: "${VOICE_AUTH_TOKEN}"  # env var interpolation supported
+#         userId: voice-user            # mapped to channel allowedUsers
+#         defaultChannel: voice-default  # channel to route messages to
+
+# Optional: Voice pipeline config (STT/TTS). Required for audio input via voice adapter.
+# Uses Deepgram Nova-3 (STT) and Aura-2 (TTS).
+# voice:
+#   provider: deepgram
+#   deepgram:
+#     apiKey: "${DEEPGRAM_API_KEY}"
+#     sttModel: nova-3          # optional, defaults to nova-3
+#     ttsModel: aura-2-thalia-en # optional, Deepgram Aura-2 voice model
+#     ttsSampleRate: 16000       # optional, TTS output Hz (default 24000; 16000 for BT voice path)
+#     # Note: Deepgram's `speed` param is REST-only, not supported on WebSocket streaming
+
 defaults:
   model: opus
   systemPrompt: >-

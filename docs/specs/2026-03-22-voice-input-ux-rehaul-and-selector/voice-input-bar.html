@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Obsidian - Listening</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;700;800&amp;family=Inter:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "on-tertiary-fixed-variant": "#5a422b",
+              "surface-dim": "#131313",
+              "outline": "#a38c85",
+              "background": "#131313",
+              "surface-variant": "#353535",
+              "surface-container-high": "#2a2a2a",
+              "surface-bright": "#393939",
+              "primary-fixed-dim": "#ffb59e",
+              "on-secondary-container": "#bcb3af",
+              "on-surface-variant": "#dbc1b9",
+              "secondary": "#cec5c0",
+              "on-primary-fixed": "#390b00",
+              "surface": "#131313",
+              "secondary-fixed-dim": "#cec5c0",
+              "on-primary-fixed-variant": "#7a2f15",
+              "on-primary-container": "#541400",
+              "inverse-surface": "#e5e2e1",
+              "inverse-primary": "#99462a",
+              "tertiary": "#e3c0a2",
+              "surface-container-highest": "#353535",
+              "on-error-container": "#ffdad6",
+              "error": "#ffb4ab",
+              "surface-container-lowest": "#0e0e0e",
+              "surface-container": "#20201f",
+              "on-secondary-fixed": "#1f1b18",
+              "tertiary-fixed-dim": "#e3c0a2",
+              "surface-container-low": "#1c1b1b",
+              "on-secondary-fixed-variant": "#4b4642",
+              "on-secondary": "#342f2c",
+              "secondary-fixed": "#eae1dc",
+              "outline-variant": "#55433d",
+              "on-background": "#e5e2e1",
+              "on-error": "#690005",
+              "on-tertiary": "#412c17",
+              "error-container": "#93000a",
+              "primary-container": "#d97757",
+              "secondary-container": "#4b4642",
+              "on-tertiary-container": "#3b2611",
+              "on-surface": "#e5e2e1",
+              "tertiary-container": "#ab8c70",
+              "surface-tint": "#ffb59e",
+              "tertiary-fixed": "#ffdcbf",
+              "primary": "#ffb59e",
+              "inverse-on-surface": "#313030",
+              "primary-fixed": "#ffdbd0",
+              "on-primary": "#5c1902",
+              "on-tertiary-fixed": "#2a1705"
+            },
+            fontFamily: {
+              "headline": ["Manrope"],
+              "body": ["Inter"],
+              "label": ["Inter"]
+            },
+            borderRadius: {"DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px"},
+          },
+        },
+      }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .bg-glass {
+            background: rgba(53, 53, 53, 0.7);
+            backdrop-filter: blur(20px);
+        }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+</head>
+<body class="bg-background text-on-background font-body selection:bg-primary/30 min-h-screen flex flex-col overflow-hidden">
+<!-- TopAppBar -->
+<header class="fixed top-0 w-full z-50 flex justify-between items-center px-6 h-16 bg-[#131313] dark:bg-[#131313]">
+<div class="flex items-center gap-4">
+<button class="text-[#ffb59e] dark:text-[#ffb59e] hover:bg-[#1c1b1b] transition-colors p-2 rounded-full active:scale-95 duration-200">
+<span class="material-symbols-outlined" data-icon="menu">menu</span>
+</button>
+<h1 class="text-xl font-extrabold text-[#ffb59e] tracking-tighter font-manrope">Obsidian</h1>
+</div>
+<div class="flex items-center">
+<div class="w-8 h-8 rounded-full bg-surface-container-highest border border-outline-variant/20 overflow-hidden">
+<img alt="User Profile" data-alt="Minimalist user profile avatar placeholder" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAGY-W2EcREdqxKO9d3ZEb114CBk6XMAxsCvDizM1CIwtbzzj_mDkSnQCRuiJFt2VvGKeiSDvQsDdg2qEGKthmJSF98E4kQxnlr57EveQyACjZZJgJADhQAbS2T0ZhY4llJKfiy8IKuuIXwKvOfbD_2TEbwkuaeX-lCWJbDUci_QOs3HBvGBzJcdCsyPv6aimriMOXG0j_igd-9dMjLrQabtEabzJTsw4fWGY0Qt8-lwPKGgmqPY5Yx5IJU22EputdAQlPrdMcGnBQ"/>
+</div>
+</div>
+</header>
+<!-- Main Content Canvas -->
+<main class="flex-1 mt-16 pb-32 px-6 overflow-y-auto space-y-8 scroll-smooth">
+<!-- Empty State / Greeting (Design System Rule: Editorial Feel) -->
+<div class="pt-12 pb-6">
+<h2 class="font-headline font-extrabold text-4xl tracking-tight text-on-surface max-w-[280px] leading-tight opacity-40">
+                Architecting thought...
+            </h2>
+</div>
+<!-- Chat History (Tonal Stacking) -->
+<div class="space-y-10">
+<!-- User Message -->
+<div class="flex flex-col items-end gap-2">
+<div class="max-w-[85%] bg-primary-container text-on-primary-container p-4 rounded-xl rounded-br-sm shadow-sm font-medium">
+                    Analyze the architectural significance of the Barcelona Pavilion.
+                </div>
+<span class="text-[10px] uppercase tracking-widest text-on-surface-variant font-label mr-1">Sent 10:42 AM</span>
+</div>
+<!-- AI Message (Structural Surface) -->
+<div class="flex flex-col items-start gap-3">
+<div class="max-w-[90%] bg-surface-container-highest text-on-surface p-5 rounded-xl rounded-bl-sm leading-relaxed border-l-2 border-primary/20">
+                    Mies van der Rohe's 1929 masterpiece is defined by the <span class="text-primary font-semibold">Free Plan</span> and the <span class="text-primary font-semibold">Flow of Space</span>. It introduced the concept of physical transparency as a metaphor for modern movement, using materials like travertine, red onyx, and tinted glass to create a rhythmic, non-hierarchical layout.
+                </div>
+</div>
+</div>
+</main>
+<!-- Voice Interaction Overlay (Active State) -->
+<!-- Voice Interaction Overlay (Refined Pill State) -->
+<div class="fixed bottom-48 left-1/2 -translate-x-1/2 z-40 pointer-events-none transition-opacity duration-500 flex flex-col items-center">
+<div class="flex flex-col items-center gap-3 bg-black/60 border border-white/10 rounded-full px-8 py-4 shadow-2xl">
+<!-- Fluid Audio Visualizer -->
+<div class="flex items-center justify-center gap-1.5 h-8">
+<div class="w-1 bg-primary/40 rounded-full h-3"></div>
+<div class="w-1 bg-primary/60 rounded-full h-5"></div>
+<div class="w-1 bg-primary/80 rounded-full h-7"></div>
+<div class="w-1 bg-primary rounded-full h-4"></div>
+<div class="w-1 bg-primary/90 rounded-full h-8"></div>
+<div class="w-1 bg-primary/70 rounded-full h-6"></div>
+<div class="w-1 bg-primary/50 rounded-full h-3"></div>
+<div class="w-1 bg-primary/30 rounded-full h-4"></div>
+</div>
+</div>
+</div>
+<!-- Bottom Navigation Shell (PTT Focused) -->
+<nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-8 pb-8 pt-4 bg-[#0e0e0e]/90 backdrop-blur-xl dark:bg-[#0e0e0e]/90 rounded-t-3xl shadow-[0_-4px_24px_rgba(229,226,225,0.04)]">
+<!-- History (Inactive/Dimmed) -->
+<div class="flex flex-col items-center opacity-70 hover:opacity-100 transition-opacity cursor-pointer">
+<div class="flex items-center justify-center text-[#dbc1b9] w-12 h-12"><span class="material-symbols-outlined text-2xl text-[#dbc1b9]" data-icon="volume_up">volume_up</span></div>
+</div>
+<!-- Central PTT Button (Active Pulse State) -->
+<div class="relative group">
+<!-- Glow Effect -->
+<div class="absolute inset-0 bg-primary/20 blur-3xl rounded-full scale-150"></div>
+<button class="relative flex items-center justify-center bg-[#d97757] text-[#131313] rounded-full w-20 h-20 shadow-[0_0_60px_rgba(255,181,158,0.4)] scale-110 ring-4 ring-primary/10 transition-transform duration-300">
+<span class="material-symbols-outlined text-3xl" data-icon="mic" style="font-variation-settings: 'FILL' 1;">mic</span>
+</button>
+</div>
+<!-- Keyboard (Inactive/Dimmed) -->
+<div class="flex flex-col items-center opacity-70 hover:opacity-100 transition-opacity cursor-pointer">
+<div class="flex items-center justify-center text-[#dbc1b9] w-12 h-12"><span class="material-symbols-outlined text-2xl text-[#dbc1b9]" data-icon="tune">tune</span></div>
+</div>
+<!-- Settings (Inactive/Dimmed) -->
+</nav>
+<!-- Floating UI Subtle Hint (Design System: Special Highlights) -->
+<div class="fixed top-20 right-6 z-30">
+<div class="bg-tertiary-container/20 border border-tertiary/10 backdrop-blur-md px-4 py-2 rounded-full flex items-center gap-2">
+<div class="w-1.5 h-1.5 rounded-full bg-tertiary"></div>
+<span class="text-tertiary text-[10px] font-bold uppercase tracking-wider">Voice 2.0 Active</span>
+</div>
+</div>
+</body></html>

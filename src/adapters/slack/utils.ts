@@ -1,5 +1,5 @@
 import type { WebClient } from '@slack/web-api';
-import { extractAllowedUserIds, type AllowedUserEntry } from './config.js';
+import { extractAllowedUserIds, type AllowedUserEntry } from '../../config.js';
 
 /**
  * Check if a user is allowed to use a channel.

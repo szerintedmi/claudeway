@@ -27,6 +27,7 @@
   "author": "Tamas Kalman",
   "license": "MIT",
   "dependencies": {
+    "@deepgram/sdk": "^5.0.0",
     "@slack/bolt": "4.6.0",
     "uuid": "13.0.0",
     "yaml": "2.8.2"

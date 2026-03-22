@@ -1,9 +1,9 @@
 import type { WebClient } from '@slack/web-api';
-import { loadConfig, resolvedChannelConfig, type Config } from './config.js';
-import { getActiveProcesses, killProcess, killAllProcesses, nudgeProcess } from './claude.js';
-import { getPending } from './queue.js';
-import { isUserAllowed, safeReact, warnInThread } from './slack-utils.js';
-import { MAX_CONCURRENT_PROCESSES } from './slack.js';
+import { loadConfig, resolvedChannelConfig, type Config } from '../../config.js';
+import { getActiveProcesses, killProcess, killAllProcesses, nudgeProcess } from '../../claude.js';
+import { getPending } from '../../queue.js';
+import { isUserAllowed, safeReact, warnInThread } from './utils.js';
+import { MAX_CONCURRENT_PROCESSES } from '../../core/engine.js';
 
 // --- Types ---
 
@@ -81,11 +81,11 @@ export function formatChannelConfig(
 ): string {
   return [
     `<#${channelId}>`,
-    `• Folder: \`${resolved.folder}\``,
-    `• Model: \`${resolved.model}\``,
-    `• Mode: \`${resolved.responseMode}\` / \`${resolved.processMode}\``,
-    `• Trigger: \`${resolved.triggerMode ?? 'all'}\``,
-    `• Timeout: ${formatTimeout(resolved.timeoutMs)}`,
+    `\u2022 Folder: \`${resolved.folder}\``,
+    `\u2022 Model: \`${resolved.model}\``,
+    `\u2022 Mode: \`${resolved.responseMode}\` / \`${resolved.processMode}\``,
+    `\u2022 Trigger: \`${resolved.triggerMode ?? 'all'}\``,
+    `\u2022 Timeout: ${formatTimeout(resolved.timeoutMs)}`,
   ].join('\n');
 }
 
@@ -246,7 +246,7 @@ async function nudgeHandler(ctx: CommandContext): Promise<void> {
     await client.chat.postMessage({
       channel: channelId,
       thread_ts: threadTs,
-      text: `:bell: Nudged #${name} (sent SIGINT — process may wrap up or continue)`,
+      text: `:bell: Nudged #${name} (sent SIGINT \u2014 process may wrap up or continue)`,
     });
   } else {
     await client.chat.postMessage({

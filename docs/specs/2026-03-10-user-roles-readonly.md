@@ -142,7 +142,7 @@ The permission set for comparison is the sorted, serialized permissions array (e
 - [x] **Validate permission strings** in `loadConfig()` — unknown permissions (e.g., typo `jireWrite`) throw a clear error at startup
 - [x] Add `resolveUserPermissions(config, channelId, userId)` → returns `UserPermissions` (botOwner gets all true)
 - [x] Add `permissionKey(permissions)` → stable string key for comparison (e.g., `""`, `"git"`, `"git,jiraWrite"`)
-- [x] Update `isUserAllowed()` in `src/slack-utils.ts` to extract user IDs from the new mixed format (both string and object entries)
+- [x] Update `isUserAllowed()` in `src/adapters/slack/utils.ts` (moved from `src/slack-utils.ts` in Phase 0 modularization) to extract user IDs from the new mixed format (both string and object entries)
 - [x] **Fix `botOwner` message-level bypass**: added `botOwner` check before `isUserAllowed` in `registerMessageHandler` so `botOwner` can message any configured channel even if not listed in `allowedUsers`
 
 ### Phase 2: Git Env Injection -- DONE
@@ -195,11 +195,11 @@ The permission set for comparison is the sorted, serialized permissions array (e
 
 - [x] Add `userName?: string` field to `QueuedMessage` (backward compatible)
 
-**File: `src/slack.ts`**
+**Files: `src/adapters/slack/handler.ts` + `src/core/engine.ts`** (split from `src/slack.ts` in Phase 0 modularization)
 
-- [x] In `registerMessageHandler`, extract `userName` from `resolveUserDirectory()` result, add to `enqueue()` call
-- [x] In `processQueuedMessage()`, resolve permissions via `resolveUserPermissions()`, create scratch dir, append access restrictions to system prompt
-- [x] Pass `PermissionContext` (userPermissions, userName, channelName, scratchDir) through to all 6 processor call sites
+- [x] In `registerMessageHandler` (now `src/adapters/slack/handler.ts`), extract `userName` from `resolveUserDirectory()` result, add to `enqueue()` call
+- [x] In `processQueuedMessage()` (now `src/core/engine.ts`), resolve permissions via `resolveUserPermissions()`, create scratch dir, append access restrictions to system prompt
+- [x] Pass `PermissionContext` (userPermissions, userName, channelName, scratchDir) through to Claude spawn
 
 ### Phase 8: Documentation & Config Migration -- DONE
 
@@ -235,14 +235,15 @@ The permission set for comparison is the sorted, serialized permissions array (e
 | File | Action | Status | Description |
 |------|--------|--------|-------------|
 | `src/config.ts` | Modify | DONE | New types, `parseAllowedUsers()`, `resolveUserPermissions()`, `permissionKey()`, validation |
-| `src/slack-utils.ts` | Modify | DONE | `isUserAllowed()` supports mixed `AllowedUserEntry[]` format |
+| `src/adapters/slack/utils.ts` | Modify | DONE | `isUserAllowed()` supports mixed `AllowedUserEntry[]` format (moved from `src/slack-utils.ts`) |
 | `src/queue.ts` | Modify | DONE | `userName?: string` on `QueuedMessage` |
 | `src/claude.ts` | Modify | DONE | Git env helpers, `buildPermissionsEnv()`, `ClaudeOptions` extensions, persistent process `permissionKey` tracking, `killAndWait()` |
 | `src/tempdir.ts` | Modify | DONE | `ensureScratchDir()` |
 | `src/mcp.ts` | Create | DONE | `generateReadOnlyMcpConfig()`, `getMcpConfigPath()` |
 | `src/prompt.ts` | Modify | DONE | `buildAccessRestrictions()`, `appendAccessRestrictions()` |
-| `src/slack.ts` | Modify | DONE | Permission resolution in `processQueuedMessage`, botOwner bypass, userName extraction, all processor call sites |
-| `src/index.ts` | Modify | DONE | MCP readonly config generation at startup |
+| `src/adapters/slack/handler.ts` | Modify | DONE | botOwner bypass, userName extraction (split from `src/slack.ts`) |
+| `src/core/engine.ts` | Modify | DONE | Permission resolution in `processQueuedMessage`, PermissionContext (split from `src/slack.ts`) |
+| `src/adapters/slack/index.ts` | Modify | DONE | MCP readonly config generation at startup (moved from `src/index.ts`) |
 | `src/__tests__/permissions.test.ts` | Create | DONE | 37 tests |
 | `src/__tests__/mcp.test.ts` | Create | DONE | 10 tests |
 | `src/__tests__/config.test.ts` | Modify | DONE | 2 new validation tests |

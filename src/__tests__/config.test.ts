@@ -7,6 +7,8 @@ import {
   loadConfig,
   saveConfig,
   resolveFolder,
+  resolveVoiceToken,
+  interpolateEnvVars,
   DATA_DIR,
   type Config,
 } from '../config.js';
@@ -304,5 +306,143 @@ describe('resolvedChannelConfig with repos', () => {
     };
     const result = resolvedChannelConfig(config, 'C001');
     expect(result?.folder).toBe('/projects/test');
+  });
+});
+
+describe('voiceServer config', () => {
+  let tmpDir: string;
+  const originalCwd = process.cwd;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'claudeway-voice-config-'));
+    process.cwd = () => tmpDir;
+  });
+
+  afterEach(() => {
+    process.cwd = originalCwd;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('loads config with voiceServer section', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+voiceServer:
+  enabled: true
+  port: 8765
+  auth:
+    tokens:
+      - token: secret123
+        userId: U001
+        defaultChannel: C001
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    const config = loadConfig();
+    expect(config.voiceServer?.enabled).toBe(true);
+    expect(config.voiceServer?.port).toBe(8765);
+    expect(config.voiceServer?.auth.tokens).toHaveLength(1);
+    expect(config.voiceServer?.auth.tokens[0].userId).toBe('U001');
+  });
+
+  it('loads config without voiceServer (undefined, no error)', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    const config = loadConfig();
+    expect(config.voiceServer).toBeUndefined();
+  });
+});
+
+describe('resolveVoiceToken', () => {
+  const config: Config = {
+    channels: { C001: { name: 'test', folder: '/test' } },
+    defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
+    voiceServer: {
+      enabled: true,
+      port: 8765,
+      auth: {
+        tokens: [
+          { token: 'secret-abc', userId: 'U001', defaultChannel: 'C001' },
+          { token: 'secret-xyz', userId: 'U002', defaultChannel: 'C001' },
+        ],
+      },
+    },
+  };
+
+  it('returns matching token config', () => {
+    const result = resolveVoiceToken(config, 'secret-abc');
+    expect(result).toEqual({ token: 'secret-abc', userId: 'U001', defaultChannel: 'C001' });
+  });
+
+  it('returns null for non-matching token', () => {
+    expect(resolveVoiceToken(config, 'wrong-token')).toBeNull();
+  });
+
+  it('returns null when voiceServer is absent', () => {
+    const noVoice: Config = {
+      channels: { C001: { name: 'test', folder: '/test' } },
+      defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
+    };
+    expect(resolveVoiceToken(noVoice, 'anything')).toBeNull();
+  });
+});
+
+describe('interpolateEnvVars', () => {
+  it('replaces env var references', () => {
+    const orig = process.env.TEST_VOICE_VAR;
+    process.env.TEST_VOICE_VAR = 'my-secret';
+    try {
+      expect(interpolateEnvVars('${TEST_VOICE_VAR}')).toBe('my-secret');
+    } finally {
+      if (orig === undefined) delete process.env.TEST_VOICE_VAR;
+      else process.env.TEST_VOICE_VAR = orig;
+    }
+  });
+
+  it('replaces missing env vars with empty string', () => {
+    expect(interpolateEnvVars('${NONEXISTENT_VAR_12345}')).toBe('');
+  });
+
+  it('leaves strings without env var syntax unchanged', () => {
+    expect(interpolateEnvVars('plain-token')).toBe('plain-token');
+  });
+
+  it('resolves voice token with env var interpolation', () => {
+    const orig = process.env.TEST_VOICE_TOKEN;
+    process.env.TEST_VOICE_TOKEN = 'resolved-secret';
+    try {
+      const config: Config = {
+        channels: { C001: { name: 'test', folder: '/test' } },
+        defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
+        voiceServer: {
+          enabled: true,
+          port: 8765,
+          auth: {
+            tokens: [{ token: '${TEST_VOICE_TOKEN}', userId: 'U001', defaultChannel: 'C001' }],
+          },
+        },
+      };
+      const result = resolveVoiceToken(config, 'resolved-secret');
+      expect(result?.userId).toBe('U001');
+    } finally {
+      if (orig === undefined) delete process.env.TEST_VOICE_TOKEN;
+      else process.env.TEST_VOICE_TOKEN = orig;
+    }
   });
 });

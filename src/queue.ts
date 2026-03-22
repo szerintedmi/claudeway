@@ -11,6 +11,8 @@ export interface QueuedMessage {
   queuedAt: string;
   filePaths?: string[];
   userName?: string;
+  /** Which adapter enqueued this message (default: "slack") */
+  adapter?: 'slack' | 'voice';
 }
 
 import { DATA_DIR } from './config.js';

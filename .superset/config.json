@@ -1,0 +1,10 @@
+{
+  "setup": [
+    "bun install",
+    "[ ! -f .env ] && cp .env.example .env",
+    "docker compose up -d",
+    "fnm use --install-if-missing || nvm use"
+  ],
+  "teardown": [],
+  "run": []
+}

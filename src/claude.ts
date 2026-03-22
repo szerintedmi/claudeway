@@ -16,6 +16,7 @@ export interface ClaudeOptions {
   message: string;
   cwd: string;
   model: string;
+  effort?: string;
   systemPrompt: string;
   timeoutMs: number;
   channelId: string;
@@ -32,6 +33,8 @@ export interface ClaudeOptions {
 export interface ClaudeStreamingOptions extends ClaudeOptions {
   onTextDelta: (text: string) => void;
   onToolEvent?: (event: ToolEventPayload) => void;
+  /** Called after the Claude process is spawned, providing a kill function (SIGTERM) */
+  onProcessSpawned?: (kill: () => void) => void;
 }
 
 export interface ClaudeResult {
@@ -193,7 +196,14 @@ export function deriveSessionId(channelId: string, folder: string, threadTs?: st
 
 export type ToolEventPayload =
   | { phase: 'start'; toolName: string }
-  | { phase: 'complete'; toolName: string; keyArg: string | null };
+  | { phase: 'complete'; toolName: string; keyArg: string | null }
+  | { phase: 'subagent_progress'; toolName: string; description: string }
+  | {
+      phase: 'subagent_completed';
+      toolName: string;
+      description: string;
+      usage?: { toolUses: number; tokens: number; durationMs: number };
+    };
 
 export type StreamLineEvent =
   | { type: 'text_delta'; text: string }
@@ -208,6 +218,12 @@ export type StreamLineEvent =
   | { type: 'tool_start'; toolName: string; index: number }
   | { type: 'tool_input_delta'; partialJson: string; index: number }
   | { type: 'tool_stop'; index: number }
+  | { type: 'subagent_progress'; description: string; toolName: string }
+  | {
+      type: 'subagent_completed';
+      description: string;
+      usage?: { toolUses: number; tokens: number; durationMs: number };
+    }
   | null;
 
 /**
@@ -278,6 +294,37 @@ export function parseStreamLine(line: string): StreamLineEvent {
       return { type: 'tool_stop', index: obj.event.index ?? -1 };
     }
 
+    // Sub-agent progress: system events with task_progress subtype
+    if (obj.type === 'system' && obj.subtype === 'task_progress' && obj.description) {
+      return {
+        type: 'subagent_progress',
+        description: obj.description,
+        toolName: obj.last_tool_name ?? 'unknown',
+      };
+    }
+
+    // Sub-agent completed
+    if (
+      obj.type === 'system' &&
+      obj.subtype === 'task_notification' &&
+      obj.status === 'completed'
+    ) {
+      const usage = obj.usage;
+      return {
+        type: 'subagent_completed',
+        description: obj.summary ?? obj.description ?? '',
+        ...(usage
+          ? {
+              usage: {
+                toolUses: usage.tool_uses ?? 0,
+                tokens: usage.total_tokens ?? 0,
+                durationMs: usage.duration_ms ?? 0,
+              },
+            }
+          : {}),
+      };
+    }
+
     return null;
   } catch {
     return null;
@@ -296,6 +343,7 @@ const TOOL_KEY_PARAMS: Record<string, string[]> = {
   LS: ['path'],
   WebFetch: ['url'],
   WebSearch: ['query'],
+  Agent: ['description'],
 };
 
 function extractKeyArg(toolName: string, accumulatedJson: string): string | null {
@@ -342,7 +390,8 @@ function buildGitReadOnlyEnv(): Record<string, string> {
   };
 }
 
-/** Env vars that set git author/committer identity from Slack user profile. */
+// TODO: Parameterize email domain when adding non-Slack adapters (currently hardcoded .slack)
+/** Env vars that set git author/committer identity from user profile. */
 function buildGitAuthorEnv(userName: string, channelName: string): Record<string, string> {
   const email = `${userName.toLowerCase().replace(/\s+/g, '.')}@${channelName}.slack`;
   return {
@@ -375,6 +424,7 @@ function buildPermissionsEnv(options: ClaudeOptions): Record<string, string> {
   return env;
 }
 
+// TODO: Make secret stripping adapter-configurable when adding non-Slack adapters
 function spawnClaudeProcess(args: string[], cwd: string, extraEnv?: Record<string, string>) {
   const env = { ...process.env, ...extraEnv };
   delete env.CLAUDECODE;
@@ -493,9 +543,18 @@ function runClaudeStreamingProcess(
   regKey: string,
   onToolEvent?: (event: ToolEventPayload) => void,
   extraEnv?: Record<string, string>,
+  onProcessSpawned?: (kill: () => void) => void,
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
     const proc = spawnClaudeProcess(args, cwd, extraEnv);
+
+    onProcessSpawned?.(() => {
+      try {
+        proc.kill('SIGTERM');
+      } catch {
+        // Process may have already exited
+      }
+    });
 
     processRegistry.set(regKey, {
       proc,
@@ -540,6 +599,19 @@ function runClaudeStreamingProcess(
         const keyArg = extractKeyArg(toolAccum.toolName, toolAccum.partialJson);
         void onToolEvent?.({ phase: 'complete', toolName: toolAccum.toolName, keyArg });
         toolAccum = null;
+      } else if (event.type === 'subagent_progress') {
+        void onToolEvent?.({
+          phase: 'subagent_progress',
+          toolName: event.toolName,
+          description: event.description,
+        });
+      } else if (event.type === 'subagent_completed') {
+        void onToolEvent?.({
+          phase: 'subagent_completed',
+          toolName: 'Agent',
+          description: event.description,
+          usage: event.usage,
+        });
       }
     }
 
@@ -679,6 +751,7 @@ function buildClaudeArgs(
     ...(outputFormat === 'stream-json' ? ['--verbose', '--include-partial-messages'] : []),
     '--model',
     model,
+    ...(options.effort ? ['--effort', options.effort] : []),
     ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId]),
     '--append-system-prompt',
     prompt,
@@ -775,6 +848,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
       regKey,
       options.onToolEvent,
       permEnv,
+      options.onProcessSpawned,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -794,6 +868,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
         regKey,
         options.onToolEvent,
         permEnv,
+        options.onProcessSpawned,
       );
     }
     throw err;
@@ -829,6 +904,7 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
     '--replay-user-messages',
     '--model',
     model,
+    ...(options.effort ? ['--effort', options.effort] : []),
     ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId]),
     '--append-system-prompt',
     prompt,
@@ -997,6 +1073,25 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
     return;
   }
 
+  if (event.type === 'subagent_progress' && entry.currentTurn) {
+    void entry.currentTurn.onToolEvent?.({
+      phase: 'subagent_progress',
+      toolName: event.toolName,
+      description: event.description,
+    });
+    return;
+  }
+
+  if (event.type === 'subagent_completed' && entry.currentTurn) {
+    void entry.currentTurn.onToolEvent?.({
+      phase: 'subagent_completed',
+      toolName: 'Agent',
+      description: event.description,
+      usage: event.usage,
+    });
+    return;
+  }
+
   if (event.type === 'result' && entry.currentTurn) {
     entry.messageCount++;
     entry.totalCost += event.cost ?? 0;
@@ -1101,6 +1196,15 @@ export async function runClaudePersistentStreaming(
       cost: null,
       toolAccum: null,
     };
+
+    // Provide kill callback for cancellation
+    options.onProcessSpawned?.(() => {
+      try {
+        entry!.proc.kill('SIGTERM');
+      } catch {
+        // Process may have already exited
+      }
+    });
 
     entry.proc.stdin!.write(inputLine, (err) => {
       if (err) {

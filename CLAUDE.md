@@ -6,12 +6,20 @@ Always adhere to Anthropic's Terms of Service 100%. Claudeway is a personal tool
 
 ## Project Overview
 
-Claudeway is a Slack-to-Claude Code CLI gateway. Messages arrive via Slack Socket Mode, get processed by the Claude CLI (`claude -p`), and responses are posted back as threaded replies.
+Claudeway is a multi-channel Claude Code CLI gateway. Messages arrive via Slack Socket Mode or a WebSocket voice interface (with configurable STT/TTS providers), get processed by the Claude CLI (`claude -p`), and responses are delivered back through the originating channel.
 
 ## Architecture
 
-- `src/index.ts` — Entry point, Slack Bolt app setup, pidfile lock, lifecycle management
-- `src/slack.ts` — Message handling, response delivery (batch/streaming), Slack formatting
+### Server (TypeScript / Bun)
+
+- `src/index.ts` — Entry point, adapter startup, pidfile lock, lifecycle management
+- `src/core/engine.ts` — Channel-agnostic message processing, concurrency pool
+- `src/core/interfaces.ts` — `ChannelAdapter`, `ChannelResponder`, `IStreamingResponder`
+- `src/core/voice.ts` — Provider-agnostic STT/TTS interface (supports server-side, client-side, and local modes)
+- `src/core/voice-deepgram.ts` — Deepgram Nova-3 (STT) + Aura-2 (TTS) implementation
+- `src/core/prose-chunker.ts` — Sentence-boundary text chunking for TTS
+- `src/adapters/slack/` — Slack Bolt adapter (handler, responder, formatting, thread context)
+- `src/adapters/voice/` — WebSocket voice adapter (protocol, handler, responder, audio sessions, test UI) — used by Android companion app, Meta glasses, and browser test UI
 - `src/claude.ts` — Claude CLI orchestration (batch and streaming process runners)
 - `src/config.ts` — Config loading/saving, channel resolution with defaults, user permission parsing
 - `src/queue.ts` — Persistent file-based message queue
@@ -19,6 +27,15 @@ Claudeway is a Slack-to-Claude Code CLI gateway. Messages arrive via Slack Socke
 - `src/prompt.ts` — System prompt construction including access restriction injection
 - `src/tempdir.ts` — Temp and scratch directory management
 - `src/sync-repos.ts` — Git clone/pull for configured repos on startup
+
+### Android Companion App (Kotlin / Jetpack Compose)
+
+- `android/app/src/main/kotlin/com/claudeway/`
+  - `network/` — WebSocket client (OkHttp), protocol types matching server
+  - `audio/` — Bluetooth SCO routing, PCM capture (8kHz mono), playback (supports server TTS, client-side Deepgram TTS, and Android built-in TTS)
+  - `voice/` — VoiceViewModel state machine, UI state types (VoiceFlowState, ConversationMessage)
+  - `glasses/` — Meta DAT SDK integration (GlassesManager, GlassesState)
+  - `ui/` — Jetpack Compose screens (connection, conversation, settings for STT/TTS mode selection)
 
 ## Key Patterns
 
@@ -55,16 +72,36 @@ Remotes: `origin` = `szerintedmi/claudeway` (fork), `upstream` = `ktamas77/claud
 
 ## Development
 
+All targets available via `make help`. Key commands:
+
 ```bash
-bun start        # Run with bun
-bun dev          # Run with bun --watch (auto-reload)
-bun run build    # TypeScript compile
-bun run typecheck # Type check only
-bun run lint     # ESLint
-bun run format   # Prettier
-bun test         # Run tests
-bun run sync-repos # Clone/pull configured repos
+# Top-level (both server + android)
+make all              # Build everything
+make test             # Run all tests
+make lint             # Lint everything
+make clean            # Clean all build artifacts
+
+# Server (TypeScript / Bun)
+make server-build     # TypeScript compile
+make server-test      # Run tests
+make server-lint      # ESLint
+make server-format    # Prettier
+make server-typecheck # Type check only
+make server-dev       # Run with auto-reload
+make server-start     # Run server
+
+# Android
+make android-build    # Build debug + release APKs
+make android-test     # Unit tests
+make android-lint     # Android lint
+make android-install  # Build and install on connected device
 ```
+
+Direct bun/gradle commands still work — see `package.json` scripts and `android/README.md`.
+
+### Android prerequisites
+
+JDK 17+ and Android SDK (compileSdk 36, targetSdk 35, minSdk 29). See `android/README.md` for setup.
 
 ## Docker Skills
 
