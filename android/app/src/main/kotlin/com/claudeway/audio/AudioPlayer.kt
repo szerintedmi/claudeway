@@ -4,10 +4,12 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.util.Base64
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -93,15 +95,37 @@ class AudioPlayer(private val scope: CoroutineScope) {
         val queue = Channel<ByteArray>(capacity = Channel.UNLIMITED)
         audioQueue = queue
         playbackJob = scope.launch(Dispatchers.IO) {
+            var totalFramesWritten = 0L
+            var completedNormally = false
             try {
                 for (chunk in queue) {
-                    track.write(chunk, 0, chunk.size)
+                    val written = track.write(chunk, 0, chunk.size)
+                    if (written < 0) {
+                        completedNormally = false // AudioTrack error — skip drain
+                        break
+                    }
+                    totalFramesWritten += written / 2 // 16-bit = 2 bytes per frame (mono)
+                    completedNormally = true
                 }
+            } catch (_: CancellationException) {
+                throw CancellationException()
             } catch (_: Exception) {
                 // Track stopped/released during write — expected on barge-in
             } finally {
                 try {
-                    track.flush()
+                    if (completedNormally && totalFramesWritten > 0) {
+                        // Let the track keep playing (still in PLAYING state) and
+                        // wait for the hardware to actually consume all written frames.
+                        // Only call stop()+release() after the drain completes.
+                        val timeoutMs = 3_000L
+                        val deadline = System.currentTimeMillis() + timeoutMs
+                        while (track.playbackHeadPosition < totalFramesWritten &&
+                            System.currentTimeMillis() < deadline
+                        ) {
+                            delay(20)
+                        }
+                    }
+                    track.stop()
                     track.release()
                 } catch (_: IllegalStateException) {
                     // Already released
