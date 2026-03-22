@@ -62,3 +62,9 @@ To enable: uncomment `implementation(libs.dat.sdk)` in `app/build.gradle.kts` an
 gpr.user=YOUR_GITHUB_USERNAME
 gpr.key=YOUR_GITHUB_TOKEN
 ```
+
+## Debugging Audio
+
+```bash
+adb logcat -s AudioRecorder AudioRouter AudioPlayer
+```

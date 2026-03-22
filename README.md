@@ -127,6 +127,11 @@ For development with auto-reload:
 bun dev
 ```
 
+To run dev mode with a Cloudflare tunnel (e.g., for the Android companion app or Meta glasses) while preventing macOS sleep:
+```bash
+caffeinate -i bash -c 'bun run dev & cloudflared tunnel run <tunnel_name> & wait'
+```
+
 ### 4. Run as a Background Service (macOS)
 
 The included install script sets up a macOS LaunchAgent that:
