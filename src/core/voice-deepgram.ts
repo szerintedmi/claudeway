@@ -27,26 +27,44 @@ export class DeepgramVoiceProvider implements VoiceProvider {
   ): Promise<TranscriptionResult> {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-    const response = await this.client.listen.v1.media.transcribeFile(
-      audio,
-      {
-        model: this.sttModel,
-        smart_format: true,
-        ...(format.mimeType ? { mimetype: format.mimeType } : {}),
-        ...(format.sampleRate ? { sample_rate: format.sampleRate } : {}),
-        ...(format.channels ? { channels: format.channels } : {}),
-        ...(format.encoding ? { encoding: format.encoding } : {}),
-      },
-      signal ? { abortSignal: signal } : undefined,
-    );
+    // Build query params directly — the Deepgram SDK v5 transcribeFile method
+    // doesn't pass sample_rate, channels, or mimetype as query params (SDK bug),
+    // so raw PCM formats fail. Use the REST API directly for full control.
+    const params = new URLSearchParams({
+      model: this.sttModel,
+      smart_format: 'true',
+    });
 
-    // transcribeFile returns ListenV1Response | ListenV1AcceptedResponse
-    // We need the synchronous response which has 'results'
-    if (!('results' in response)) {
-      throw new Error('Deepgram returned an async response — expected synchronous transcription');
+    if (format.encoding) {
+      // Raw audio: encoding + sample_rate required, mimetype not applicable
+      params.set('encoding', format.encoding);
+      if (format.sampleRate) params.set('sample_rate', String(format.sampleRate));
+      if (format.channels) params.set('channels', String(format.channels));
+    } else if (format.mimeType) {
+      // Container format (webm, wav, etc.): let Deepgram detect from headers
+      params.set('mimetype', format.mimeType);
     }
 
-    const alternative = response.results?.channels?.[0]?.alternatives?.[0];
+    const response = await fetch(`https://api.deepgram.com/v1/listen?${params}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Token ${this.apiKey}`,
+        'Content-Type': 'application/octet-stream',
+      },
+      body: audio as unknown as BodyInit,
+      signal,
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Deepgram STT error ${response.status}: ${body}`);
+    }
+
+    const result = (await response.json()) as {
+      results?: { channels?: { alternatives?: { transcript?: string; confidence?: number }[] }[] };
+    };
+
+    const alternative = result.results?.channels?.[0]?.alternatives?.[0];
     return {
       transcript: alternative?.transcript ?? '',
       confidence: alternative?.confidence,

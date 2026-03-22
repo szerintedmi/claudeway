@@ -12,7 +12,7 @@ interface MockWs {
 function makeMockWs(): { ws: MockWs; sent: string[] } {
   const sent: string[] = [];
   const ws: MockWs = {
-    data: { userId: 'U001', defaultChannel: 'C001' },
+    data: { userId: 'U001', defaultChannel: 'C001', authenticated: true },
     send(data: string) {
       sent.push(data);
     },

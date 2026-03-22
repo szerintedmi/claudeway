@@ -393,10 +393,15 @@
     const url = document.getElementById('wsUrl').value;
     const token = document.getElementById('authToken').value;
     if (token) localStorage.setItem('glasses-auth-token', token);
-    const fullUrl = token ? url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token) : url;
     log('system', 'Connecting to ' + url + '...');
-    ws = new WebSocket(fullUrl);
-    ws.onopen = () => { setConnected(true); log('system', 'Connected'); };
+    ws = new WebSocket(url);
+    ws.onopen = () => {
+      if (token) {
+        ws.send(JSON.stringify({ type: 'auth', token: token }));
+      }
+      setConnected(true);
+      log('system', 'Connected');
+    };
     ws.onclose = () => { setConnected(false); log('system', 'Disconnected'); ws = null; stopMic(); };
     ws.onerror = (e) => { log('error', 'WebSocket error'); };
     ws.onmessage = (e) => {

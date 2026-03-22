@@ -21,7 +21,7 @@ interface MockWs {
 function makeMockWs(data?: WsData): { ws: MockWs; sent: string[] } {
   const sent: string[] = [];
   const ws: MockWs = {
-    data: data ?? { userId: 'U001', defaultChannel: 'C001' },
+    data: data ?? { userId: 'U001', defaultChannel: 'C001', authenticated: true },
     send(msg: string) {
       sent.push(msg);
     },
@@ -105,7 +105,7 @@ describe('glasses handler', () => {
   });
 
   it('different sessions get different queue keys for same requestId', () => {
-    const { ws: ws2 } = makeMockWs({ userId: 'U002', defaultChannel: 'C001' });
+    const { ws: ws2 } = makeMockWs({ userId: 'U002', defaultChannel: 'C001', authenticated: true });
     initSession(asWs(ws2), 'U002', 'C001');
 
     const session1 = getSession(asWs(ws))!;
@@ -122,8 +122,16 @@ describe('resolveResponder cross-session routing', () => {
 
   it('delivers each queued message to its owning socket, not the drain initiator', () => {
     // Set up two clients on the same channel
-    const { ws: ws1, sent: sent1 } = makeMockWs({ userId: 'U001', defaultChannel: 'C001' });
-    const { ws: ws2, sent: sent2 } = makeMockWs({ userId: 'U002', defaultChannel: 'C001' });
+    const { ws: ws1, sent: sent1 } = makeMockWs({
+      userId: 'U001',
+      defaultChannel: 'C001',
+      authenticated: true,
+    });
+    const { ws: ws2, sent: sent2 } = makeMockWs({
+      userId: 'U002',
+      defaultChannel: 'C001',
+      authenticated: true,
+    });
     initSession(asWs(ws1), 'U001', 'C001');
     initSession(asWs(ws2), 'U002', 'C001');
 
@@ -170,8 +178,12 @@ describe('resolveResponder cross-session routing', () => {
   });
 
   it('falls back to drain initiator when owner disconnected', () => {
-    const { ws: ws1 } = makeMockWs({ userId: 'U001', defaultChannel: 'C001' });
-    const { ws: ws2, sent: sent2 } = makeMockWs({ userId: 'U002', defaultChannel: 'C001' });
+    const { ws: ws1 } = makeMockWs({ userId: 'U001', defaultChannel: 'C001', authenticated: true });
+    const { ws: ws2, sent: sent2 } = makeMockWs({
+      userId: 'U002',
+      defaultChannel: 'C001',
+      authenticated: true,
+    });
     initSession(asWs(ws1), 'U001', 'C001');
     initSession(asWs(ws2), 'U002', 'C001');
 

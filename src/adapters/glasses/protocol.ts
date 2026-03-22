@@ -34,13 +34,19 @@ export interface PingMessage {
   type: 'ping';
 }
 
+export interface AuthMessage {
+  type: 'auth';
+  token: string;
+}
+
 export type GlassesClientMessage =
   | TextMessage
   | AudioStartMessage
   | AudioChunkMessage
   | AudioEndMessage
   | CancelMessage
-  | PingMessage;
+  | PingMessage
+  | AuthMessage;
 
 // --- Server -> Client ---
 
@@ -107,6 +113,7 @@ const CLIENT_MESSAGE_TYPES = new Set([
   'audio_end',
   'cancel',
   'ping',
+  'auth',
 ]);
 
 /**
@@ -133,6 +140,13 @@ export function parseClientMessage(raw: string): GlassesClientMessage {
 
   if (msg.type === 'ping') {
     return { type: 'ping' };
+  }
+
+  if (msg.type === 'auth') {
+    if (typeof msg.token !== 'string' || msg.token.length === 0) {
+      throw new Error('Missing or empty token field');
+    }
+    return { type: 'auth', token: msg.token };
   }
 
   if (typeof msg.requestId !== 'string' || msg.requestId.length === 0) {

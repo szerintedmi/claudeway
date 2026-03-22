@@ -226,7 +226,7 @@ Full voice round-trip: audio in → STT → Claude → TTS → audio out.
 
 **Test UI**: Full mic + speaker with Web Audio API playback, push-to-talk, visual status indicators.
 
-### Phase 4: Android Companion App
+### Phase 4: Android Companion App [IN PROGRESS]
 
 **Goal**: End-to-end with actual Meta Ray-Ban glasses.
 
