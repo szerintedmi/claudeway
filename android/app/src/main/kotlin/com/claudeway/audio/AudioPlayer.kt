@@ -44,6 +44,21 @@ class AudioPlayer(private val scope: CoroutineScope) {
     private var audioQueue: Channel<ByteArray>? = null
     private var currentSampleRate: Int = 0
 
+    /** Set the preferred output device (e.g. Bluetooth SCO). Rebinds the live track if changed. */
+    var preferredDevice: AudioDeviceInfo? = null
+        set(value) {
+            if (field?.id == value?.id) return
+            field = value
+            // Rebind live track when the device changes (e.g. SCO becomes available after track creation)
+            val track = audioTrack ?: return
+            val ok = track.setPreferredDevice(value)
+            if (value != null) {
+                Log.d(TAG, "Rebind to ${value.productName} (${deviceTypeName(value.type)}) -> $ok")
+            } else {
+                Log.d(TAG, "Cleared preferred device -> $ok")
+            }
+        }
+
     /** Queue a base64-encoded PCM chunk for playback. */
     fun queueAudio(base64Data: String, sampleRate: Int) {
         val pcmData = Base64.decode(base64Data, Base64.NO_WRAP)
@@ -105,6 +120,10 @@ class AudioPlayer(private val scope: CoroutineScope) {
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
 
+        preferredDevice?.let { device ->
+            val ok = track.setPreferredDevice(device)
+            Log.d(TAG, "setPreferredDevice(${device.productName} / ${deviceTypeName(device.type)}) -> $ok")
+        }
         track.play()
         audioTrack = track
         val routed = track.routedDevice

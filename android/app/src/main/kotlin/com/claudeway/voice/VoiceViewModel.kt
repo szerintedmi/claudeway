@@ -73,7 +73,7 @@ data class UiState(
 
 class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     val webSocket = ClaudewayWebSocket(viewModelScope)
-    val audioRouter = AudioRouter(application)
+    val audioRouter = AudioRouter(application, viewModelScope)
     val glassesManager = GlassesManager(application)
     private val audioRecorder = AudioRecorder()
     private val audioPlayer = AudioPlayer(viewModelScope)
@@ -116,10 +116,11 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Observe audio route state
+        // Observe audio route state and keep player's preferred device in sync
         viewModelScope.launch {
             audioRouter.state.collect { state ->
                 _uiState.update { it.copy(audioRouteState = state) }
+                audioPlayer.preferredDevice = audioRouter.routedDevice
             }
         }
 
