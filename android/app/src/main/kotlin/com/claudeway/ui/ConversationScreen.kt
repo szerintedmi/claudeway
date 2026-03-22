@@ -41,7 +41,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -50,10 +49,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.claudeway.voice.ConversationMessage
 import com.claudeway.voice.MessageRole
@@ -78,10 +75,10 @@ fun ConversationScreen(
     val listState = rememberLazyListState()
     var textInput by rememberSaveable { mutableStateOf("") }
 
-    // Auto-scroll to bottom when messages change
-    LaunchedEffect(messages.size, activeResponseText) {
+    // Auto-scroll to bottom when messages change or status updates
+    LaunchedEffect(messages.size, activeResponseText, statusText) {
         if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1)
+            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
         }
     }
 
@@ -92,21 +89,27 @@ fun ConversationScreen(
                 .padding(padding)
                 .imePadding(),
         ) {
-            // Status bar
             val isConnected = connectionState == ConnectionState.Connected
-            val effectiveStatusText = when {
-                !isConnected && connectionState == ConnectionState.Reconnecting -> "Reconnecting..."
-                !isConnected && connectionState == ConnectionState.Connecting -> "Connecting..."
-                !isConnected && statusText == null -> "Disconnected"
-                else -> statusText
+
+            // Connection status bar (only for connection issues — stays at top)
+            val connectionStatusText = when {
+                connectionState == ConnectionState.Reconnecting -> "Reconnecting..."
+                connectionState == ConnectionState.Connecting -> "Connecting..."
+                !isConnected -> "Disconnected"
+                else -> null
             }
-            if (effectiveStatusText != null) {
+            if (connectionStatusText != null) {
                 StatusBar(
-                    text = effectiveStatusText,
-                    flowState = if (!isConnected) VoiceFlowState.Error else voiceFlowState,
-                    onCancel = onCancel,
+                    text = connectionStatusText,
+                    flowState = VoiceFlowState.Error,
+                    onCancel = {},
+                    showCancel = false,
                 )
             }
+
+            // Activity status text (thinking/transcribing/speaking/tool) — shown inline at bottom
+            val activityStatusText = if (isConnected) statusText else null
+            val isActive = voiceFlowState != VoiceFlowState.Idle && voiceFlowState != VoiceFlowState.Error
 
             // Message list
             LazyColumn(
@@ -151,6 +154,17 @@ fun ConversationScreen(
                     }
                 }
 
+                // Inline activity status (below last message)
+                if (activityStatusText != null && isActive) {
+                    item {
+                        InlineStatusIndicator(
+                            text = activityStatusText,
+                            flowState = voiceFlowState,
+                            onCancel = onCancel,
+                        )
+                    }
+                }
+
                 item { Spacer(modifier = Modifier.height(8.dp)) }
             }
 
@@ -178,6 +192,7 @@ private fun StatusBar(
     text: String,
     flowState: VoiceFlowState,
     onCancel: () -> Unit,
+    showCancel: Boolean = true,
 ) {
     val bgColor = when (flowState) {
         VoiceFlowState.Recording -> Color(0xFFE53935) // Red
@@ -208,7 +223,7 @@ private fun StatusBar(
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.weight(1f),
         )
-        if (flowState != VoiceFlowState.Idle) {
+        if (showCancel && flowState != VoiceFlowState.Idle) {
             IconButton(onClick = onCancel, modifier = Modifier.size(24.dp)) {
                 Icon(
                     Icons.Default.Close,
@@ -220,10 +235,73 @@ private fun StatusBar(
     }
 }
 
+/** Inline activity status shown below the last message in the conversation. */
+@Composable
+private fun InlineStatusIndicator(
+    text: String,
+    flowState: VoiceFlowState,
+    onCancel: () -> Unit,
+) {
+    val color = when (flowState) {
+        VoiceFlowState.Recording -> Color(0xFFE53935)
+        VoiceFlowState.Transcribing -> Color(0xFFFFA726)
+        VoiceFlowState.Thinking -> Color(0xFF42A5F5)
+        VoiceFlowState.Speaking -> Color(0xFF66BB6A)
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    val infiniteTransition = rememberInfiniteTransition(label = "status-pulse")
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "status-dot-pulse",
+    )
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(color.copy(alpha = pulseAlpha))
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = color,
+            modifier = Modifier.weight(1f),
+        )
+        IconButton(onClick = onCancel, modifier = Modifier.size(24.dp)) {
+            Icon(
+                Icons.Default.Close,
+                contentDescription = "Cancel",
+                tint = color.copy(alpha = 0.6f),
+                modifier = Modifier.size(14.dp),
+            )
+        }
+    }
+}
+
 @Composable
 private fun MessageBubble(message: ConversationMessage, isPartial: Boolean = false) {
     val isUser = message.role == MessageRole.User
     val isError = message.role == MessageRole.Error
+    val isStatus = message.role == MessageRole.Status
+
+    // Status messages render inline without a bubble
+    if (isStatus) {
+        StatusMessageRow(text = message.text)
+        return
+    }
 
     val bgColor = when {
         isError -> MaterialTheme.colorScheme.errorContainer
@@ -254,6 +332,34 @@ private fun MessageBubble(message: ConversationMessage, isPartial: Boolean = fal
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
+    }
+}
+
+/** Inline status/tool event row — subtle, no bubble, left-aligned with a dot. */
+@Composable
+private fun StatusMessageRow(text: String) {
+    // Non-action statuses (e.g. "No speech detected") use muted styling
+    val isAction = !text.startsWith("No speech")
+    val dotColor = if (isAction) Color(0xFF66BB6A) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+    val textAlpha = if (isAction) 0.7f else 0.5f
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = if (isAction) "●" else "○",
+            style = MaterialTheme.typography.bodySmall,
+            color = dotColor,
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = textAlpha),
+        )
     }
 }
 

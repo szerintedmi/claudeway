@@ -264,13 +264,22 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         recordingJob?.cancel()
         recordingJob = null
         webSocket.send(CancelMessage(requestId = activeId))
+
+        // Preserve any accumulated response text in history before clearing
+        val accumulatedText = responseTextAccumulator.toString()
         currentRequestId = null
         responseTextAccumulator.clear()
         _uiState.update {
+            val updatedMessages = if (accumulatedText.isNotBlank()) {
+                it.messages + ConversationMessage(activeId, MessageRole.Assistant, accumulatedText)
+            } else {
+                it.messages
+            }
             it.copy(
                 currentRequestId = null,
                 activeTranscript = null,
                 activeResponseText = null,
+                messages = updatedMessages,
             )
         }
     }
@@ -329,14 +338,72 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     private fun handleStatus(msg: StatusServerMessage) {
         if (!isActiveRequest(msg.requestId)) return
 
+        // Add completed tool/agent events as inline status messages
+        if (msg.status == "tool") {
+            when (msg.phase) {
+                "complete" -> {
+                    // Tool completed — add to chat history
+                    val toolText = buildString {
+                        append(msg.toolName ?: "Tool")
+                        msg.keyArg?.let {
+                            val truncated = if (it.length > 60) it.take(57) + "..." else it
+                            append("($truncated)")
+                        }
+                    }
+                    _uiState.update { state ->
+                        state.copy(
+                            voiceFlowState = VoiceFlowState.Thinking,
+                            statusText = "Thinking...",
+                            messages = state.messages + ConversationMessage(
+                                msg.requestId, MessageRole.Status, toolText
+                            ),
+                        )
+                    }
+                    return
+                }
+                "subagent_completed" -> {
+                    // Agent completed — add with usage stats
+                    val agentText = buildString {
+                        append(msg.toolName ?: "Agent")
+                        msg.description?.let { append("($it)") }
+                        msg.usage?.let { u ->
+                            append("\n└ Done")
+                            val parts = mutableListOf<String>()
+                            if (u.toolUses > 0) parts.add("${u.toolUses} tool use${if (u.toolUses != 1) "s" else ""}")
+                            if (u.tokens > 0) {
+                                val k = if (u.tokens >= 1000) "${"%.1f".format(u.tokens / 1000.0)}k" else "${u.tokens}"
+                                parts.add("$k tokens")
+                            }
+                            if (u.durationMs > 0) parts.add("${u.durationMs / 1000}s")
+                            if (parts.isNotEmpty()) append(" (${parts.joinToString(" · ")})")
+                        }
+                    }
+                    _uiState.update { state ->
+                        state.copy(
+                            voiceFlowState = VoiceFlowState.Thinking,
+                            statusText = "Thinking...",
+                            messages = state.messages + ConversationMessage(
+                                msg.requestId, MessageRole.Status, agentText
+                            ),
+                        )
+                    }
+                    return
+                }
+            }
+        }
+
         val statusText = when (msg.status) {
             "transcribing" -> "Transcribing..."
             "thinking" -> "Thinking..."
             "speaking" -> "Speaking..."
             "tool" -> buildString {
-                append("Using tool")
-                msg.toolName?.let { append(": $it") }
-                msg.keyArg?.let { append(" ($it)") }
+                if (msg.phase == "subagent_progress" && msg.description != null) {
+                    append("Agent: ${msg.description}")
+                } else {
+                    append("Using tool")
+                    msg.toolName?.let { append(": $it") }
+                    msg.keyArg?.let { append(" ($it)") }
+                }
             }
             else -> msg.status
         }
@@ -433,6 +500,18 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
                     voiceFlowState = VoiceFlowState.Idle,
                     currentRequestId = null,
                     statusText = null,
+                )
+            }
+        } else if (msg.message == "No speech detected") {
+            // Subtle status — not a prominent error
+            _uiState.update { state ->
+                state.copy(
+                    voiceFlowState = VoiceFlowState.Idle,
+                    currentRequestId = null,
+                    statusText = null,
+                    messages = state.messages + ConversationMessage(
+                        msg.requestId ?: "", MessageRole.Status, "No speech detected"
+                    ),
                 )
             }
         } else {

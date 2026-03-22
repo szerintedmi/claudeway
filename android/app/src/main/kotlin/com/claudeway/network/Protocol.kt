@@ -81,6 +81,12 @@ class PingMessage : ClientMessage {
 
 sealed interface ServerMessage
 
+data class ToolUsage(
+    val toolUses: Int = 0,
+    val tokens: Int = 0,
+    val durationMs: Long = 0,
+)
+
 data class StatusServerMessage(
     val requestId: String,
     val status: String,
@@ -88,6 +94,7 @@ data class StatusServerMessage(
     val keyArg: String? = null,
     val phase: String? = null,
     val description: String? = null,
+    val usage: ToolUsage? = null,
 ) : ServerMessage
 
 data class TranscriptServerMessage(
@@ -128,14 +135,25 @@ object ProtocolAdapters {
         return try {
             val obj = JSONObject(json)
             when (obj.optString("type")) {
-                "status" -> StatusServerMessage(
-                    requestId = obj.getString("requestId"),
-                    status = obj.getString("status"),
-                    toolName = obj.optStringOrNull("toolName"),
-                    keyArg = obj.optStringOrNull("keyArg"),
-                    phase = obj.optStringOrNull("phase"),
-                    description = obj.optStringOrNull("description"),
-                )
+                "status" -> {
+                    val usageObj = obj.optJSONObject("usage")
+                    val usage = if (usageObj != null) {
+                        ToolUsage(
+                            toolUses = usageObj.optInt("toolUses", 0),
+                            tokens = usageObj.optInt("tokens", 0),
+                            durationMs = usageObj.optLong("durationMs", 0),
+                        )
+                    } else null
+                    StatusServerMessage(
+                        requestId = obj.getString("requestId"),
+                        status = obj.getString("status"),
+                        toolName = obj.optStringOrNull("toolName"),
+                        keyArg = obj.optStringOrNull("keyArg"),
+                        phase = obj.optStringOrNull("phase"),
+                        description = obj.optStringOrNull("description"),
+                        usage = usage,
+                    )
+                }
                 "transcript" -> TranscriptServerMessage(
                     requestId = obj.getString("requestId"),
                     text = obj.getString("text"),

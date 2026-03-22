@@ -58,6 +58,7 @@ export interface StatusMessage {
   keyArg?: string;
   phase?: string;
   description?: string;
+  usage?: { toolUses: number; tokens: number; durationMs: number };
 }
 
 export interface ResponseTextMessage {
