@@ -36,6 +36,8 @@ import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Hearing
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -48,6 +50,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -87,6 +92,7 @@ import com.claudeway.voice.MessageRole
 import com.claudeway.voice.VoiceFlowState
 import kotlinx.coroutines.flow.SharedFlow
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConversationScreen(
     connectionState: ConnectionState,
@@ -101,12 +107,16 @@ fun ConversationScreen(
     availableRoutes: List<AudioDevice>,
     activeRouteId: Int?,
     selectedRouteId: Int,
+    channelName: String?,
+    channelRepo: String?,
     onSendText: (String) -> Unit,
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit,
     onCancel: () -> Unit,
     onSetInputMode: (InputMode) -> Unit,
     onApplyAudioRoute: (routeId: Int) -> Unit,
+    onNavigateToSettings: () -> Unit,
+    onRetryConnection: () -> Unit,
     deviceToasts: SharedFlow<DeviceToast>,
 ) {
     val listState = rememberLazyListState()
@@ -129,6 +139,39 @@ fun ConversationScreen(
     Scaffold(
         containerColor = ObsidianTokens.Background,
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(
+                            text = channelName ?: "Claudeway",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = ObsidianTokens.OnSurface,
+                        )
+                        if (channelRepo != null) {
+                            Text(
+                                text = channelRepo,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = ObsidianTokens.OnSurfaceVariant.copy(alpha = 0.7f),
+                            )
+                        }
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onNavigateToSettings) {
+                        Icon(
+                            Icons.Default.Settings,
+                            contentDescription = "Settings",
+                            tint = ObsidianTokens.OnSurfaceVariant,
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = ObsidianTokens.SurfaceContainerLowest,
+                ),
+            )
+        },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -144,12 +187,20 @@ fun ConversationScreen(
                 else -> null
             }
             if (connectionStatusText != null) {
-                StatusBar(
-                    text = connectionStatusText,
-                    flowState = VoiceFlowState.Error,
-                    onCancel = {},
-                    showCancel = false,
-                )
+                if (connectionState == ConnectionState.Error || connectionState == ConnectionState.Disconnected) {
+                    ConnectionRetryBanner(
+                        text = connectionStatusText,
+                        onRetry = onRetryConnection,
+                        onSettings = onNavigateToSettings,
+                    )
+                } else {
+                    StatusBar(
+                        text = connectionStatusText,
+                        flowState = VoiceFlowState.Error,
+                        onCancel = {},
+                        showCancel = false,
+                    )
+                }
             }
 
             val activityStatusText = if (isConnected) statusText else null
@@ -291,6 +342,52 @@ private fun StatusBar(
                     modifier = Modifier.size(16.dp),
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun ConnectionRetryBanner(
+    text: String,
+    onRetry: () -> Unit,
+    onSettings: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFE53935).copy(alpha = 0.15f))
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(Color(0xFFE53935))
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onRetry) {
+            Icon(
+                Icons.Default.Refresh,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("Retry", style = MaterialTheme.typography.labelMedium)
+        }
+        TextButton(onClick = onSettings) {
+            Icon(
+                Icons.Default.Settings,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("Settings", style = MaterialTheme.typography.labelMedium)
         }
     }
 }

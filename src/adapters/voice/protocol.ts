@@ -94,6 +94,14 @@ export interface ErrorMessage {
   message: string;
 }
 
+export interface ChannelInfoMessage {
+  type: 'channel_info';
+  channelId: string;
+  channelName: string;
+  repo: string | null;
+  model: string;
+}
+
 export interface PongMessage {
   type: 'pong';
 }
@@ -105,6 +113,7 @@ export type VoiceServerMessage =
   | ResponseAudioEndMessage
   | TranscriptMessage
   | ErrorMessage
+  | ChannelInfoMessage
   | PongMessage;
 
 const CLIENT_MESSAGE_TYPES = new Set([

@@ -7,8 +7,10 @@ import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.annotation.SuppressLint
 import android.os.Build
 import android.os.Handler
+import androidx.annotation.RequiresApi
 import android.os.Looper
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
@@ -74,6 +76,7 @@ data class AudioDevice(
 
 data class DeviceToast(val message: String)
 
+@SuppressLint("InlinedApi") // TYPE_BLE_HEADSET is an int constant, safe on all API levels
 private fun AudioDeviceInfo.isBtDevice(): Boolean =
     type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || type == AudioDeviceInfo.TYPE_BLE_HEADSET
 
@@ -211,6 +214,7 @@ class AudioRouter(context: Context, private val scope: CoroutineScope) {
         }
     }
 
+    @SuppressLint("NewApi") // Guarded by Build.VERSION.SDK_INT check below
     private fun applySelectedRouting() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
 
@@ -245,6 +249,7 @@ class AudioRouter(context: Context, private val scope: CoroutineScope) {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.S)
     private fun clearCommunicationRoute(commDevices: List<AudioDeviceInfo>) {
         audioManager.clearCommunicationDevice()
         audioManager.mode = AudioManager.MODE_NORMAL
@@ -254,6 +259,7 @@ class AudioRouter(context: Context, private val scope: CoroutineScope) {
         updateActiveRoute()
     }
 
+    @RequiresApi(Build.VERSION_CODES.S)
     private fun routeToBuiltIn(commDevices: List<AudioDeviceInfo>, deviceType: Int, routeId: Int) {
         val target = commDevices.firstOrNull { it.type == deviceType }
         if (target == null) {
@@ -277,6 +283,7 @@ class AudioRouter(context: Context, private val scope: CoroutineScope) {
         updateActiveRoute()
     }
 
+    @SuppressLint("NewApi") // Guarded by Build.VERSION.SDK_INT check below
     private fun refreshState() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
 
@@ -312,11 +319,13 @@ class AudioRouter(context: Context, private val scope: CoroutineScope) {
         applySelectedRouting()
     }
 
+    @SuppressLint("NewApi") // Guarded by Build.VERSION.SDK_INT check below
     fun findScoDevice(): AudioDeviceInfo? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
         return audioManager.availableCommunicationDevices.firstOrNull { it.isBtDevice() }
     }
 
+    @RequiresApi(Build.VERSION_CODES.S)
     private fun routeToBluetoothOrPhone() {
         val btDevice = findScoDevice()
         if (btDevice == null) {
@@ -330,6 +339,7 @@ class AudioRouter(context: Context, private val scope: CoroutineScope) {
         }
     }
 
+    @SuppressLint("NewApi") // Guarded by Build.VERSION.SDK_INT check below
     fun routeToDevice(device: AudioDeviceInfo) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
             _state.value = AudioRouteState.UnsupportedApi

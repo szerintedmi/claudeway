@@ -49,8 +49,8 @@ fun ConnectionScreen(
     onDisconnect: () -> Unit,
     onNavigateToConversation: () -> Unit,
 ) {
-    var url by rememberSaveable { mutableStateOf(savedUrl) }
-    var token by rememberSaveable { mutableStateOf(savedToken) }
+    var url by rememberSaveable(savedUrl) { mutableStateOf(savedUrl) }
+    var token by rememberSaveable(savedToken) { mutableStateOf(savedToken) }
 
     Scaffold { padding ->
         Column(

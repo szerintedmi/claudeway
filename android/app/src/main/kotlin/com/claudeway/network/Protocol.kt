@@ -125,6 +125,13 @@ data class ErrorServerMessage(
     val message: String,
 ) : ServerMessage
 
+data class ChannelInfoServerMessage(
+    val channelId: String,
+    val channelName: String,
+    val repo: String?,
+    val model: String,
+) : ServerMessage
+
 class PongServerMessage : ServerMessage
 
 // --- Serialization helpers ---
@@ -176,6 +183,12 @@ object ProtocolAdapters {
                 "error" -> ErrorServerMessage(
                     requestId = if (obj.isNull("requestId")) null else obj.getString("requestId"),
                     message = obj.getString("message"),
+                )
+                "channel_info" -> ChannelInfoServerMessage(
+                    channelId = obj.getString("channelId"),
+                    channelName = obj.getString("channelName"),
+                    repo = if (obj.isNull("repo")) null else obj.optString("repo", null),
+                    model = obj.getString("model"),
                 )
                 "pong" -> PongServerMessage()
                 else -> null

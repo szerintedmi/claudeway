@@ -19,6 +19,7 @@ import com.claudeway.network.CancelMessage
 import com.claudeway.network.ClaudewayWebSocket
 import com.claudeway.network.ConnectionError
 import com.claudeway.network.ConnectionState
+import com.claudeway.network.ChannelInfoServerMessage
 import com.claudeway.network.ErrorServerMessage
 import com.claudeway.network.ResponseAudioEndServerMessage
 import com.claudeway.network.ResponseAudioServerMessage
@@ -74,6 +75,10 @@ data class UiState(
     val activeTranscript: String? = null,
     val activeResponseText: String? = null,
     val inputMode: InputMode = InputMode.Voice,
+    val channelId: String? = null,
+    val channelName: String? = null,
+    val channelRepo: String? = null,
+    val channelModel: String? = null,
 )
 
 // --- ViewModel ---
@@ -179,6 +184,9 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     fun disconnect() {
         webSocket.disconnect()
         audioRouter.endSession()
+        _uiState.update {
+            it.copy(channelId = null, channelName = null, channelRepo = null, channelModel = null)
+        }
     }
 
     // --- Text input ---
@@ -358,6 +366,7 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
             is ResponseAudioServerMessage -> handleResponseAudio(msg)
             is ResponseAudioEndServerMessage -> handleResponseAudioEnd(msg)
             is ErrorServerMessage -> handleError(msg)
+            is ChannelInfoServerMessage -> handleChannelInfo(msg)
             else -> {} // pong etc.
         }
     }
@@ -365,6 +374,17 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     /** Check if a requestId-bearing message belongs to the current active request. */
     private fun isActiveRequest(requestId: String): Boolean =
         requestId == currentRequestId
+
+    private fun handleChannelInfo(msg: ChannelInfoServerMessage) {
+        _uiState.update {
+            it.copy(
+                channelId = msg.channelId,
+                channelName = msg.channelName,
+                channelRepo = msg.repo,
+                channelModel = msg.model,
+            )
+        }
+    }
 
     private fun handleStatus(msg: StatusServerMessage) {
         if (!isActiveRequest(msg.requestId)) return

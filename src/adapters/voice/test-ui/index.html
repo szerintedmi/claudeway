@@ -8,7 +8,14 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+  .channel-bar { padding: 10px 16px; background: #16213e; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 12px; }
+  .channel-bar .channel-info { display: flex; flex-direction: column; flex: 1; }
+  .channel-bar .channel-name { font-size: 15px; font-weight: 600; color: #e0e0e0; }
+  .channel-bar .channel-repo { font-size: 12px; color: #888; margin-top: 1px; }
+  .btn-settings { background: none; border: none; color: #888; cursor: pointer; font-size: 18px; padding: 4px 8px; border-radius: 4px; }
+  .btn-settings:hover { background: #0f3460; color: #e0e0e0; }
   .header { padding: 12px 16px; background: #16213e; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .header.collapsed { display: none; }
   .header input { background: #0f3460; border: 1px solid #444; color: #e0e0e0; padding: 6px 10px; border-radius: 4px; font-size: 13px; }
   .header input.url { flex: 1; min-width: 200px; }
   .header input.token { width: 180px; }
@@ -54,7 +61,15 @@
 </style>
 </head>
 <body>
-<div class="header">
+<div class="channel-bar" id="channelBar" style="display:none">
+  <span class="status-dot connected" id="channelDot"></span>
+  <div class="channel-info">
+    <div class="channel-name" id="channelName">Channel</div>
+    <div class="channel-repo" id="channelRepo"></div>
+  </div>
+  <button class="btn-settings" id="settingsBtn" onclick="toggleSettings()" title="Connection settings">&#9881;</button>
+</div>
+<div class="header" id="connectionHeader">
   <span class="status-dot disconnected" id="statusDot"></span>
   <input class="url" id="wsUrl" value="ws://localhost:8765/ws" placeholder="WebSocket URL">
   <input class="token" id="authToken" type="password" placeholder="Auth token">
@@ -71,6 +86,29 @@
   let reqCounter = 0;
   let mediaRecorder = null;
   let audioRequestId = null;
+  let channelInfo = null;
+  let settingsVisible = true;
+
+  function updateChannelBar() {
+    const bar = document.getElementById('channelBar');
+    if (channelInfo && ws && ws.readyState === 1) {
+      bar.style.display = '';
+      document.getElementById('channelName').textContent = channelInfo.channelName;
+      document.getElementById('channelRepo').textContent = channelInfo.repo || '';
+      // Collapse connection header when connected with channel info
+      if (settingsVisible) toggleSettings();
+    } else {
+      bar.style.display = 'none';
+      const hdr = document.getElementById('connectionHeader');
+      if (hdr.classList.contains('collapsed')) toggleSettings();
+    }
+  }
+
+  function toggleSettings() {
+    const hdr = document.getElementById('connectionHeader');
+    settingsVisible = hdr.classList.contains('collapsed');
+    hdr.classList.toggle('collapsed');
+  }
   // Track active streaming response divs and status divs by requestId
   const streamingDivs = new Map();
   const statusDivs = new Map();
@@ -402,7 +440,7 @@
       setConnected(true);
       log('system', 'Connected');
     };
-    ws.onclose = () => { setConnected(false); log('system', 'Disconnected'); ws = null; stopMic(); };
+    ws.onclose = () => { setConnected(false); channelInfo = null; updateChannelBar(); log('system', 'Disconnected'); ws = null; stopMic(); };
     ws.onerror = (e) => { log('error', 'WebSocket error'); };
     ws.onmessage = (e) => {
       try {
@@ -427,6 +465,10 @@
           removeStatus(msg.requestId);
           stopAudioPlayback(msg.requestId);
           log('error', 'Error: ' + msg.message);
+        } else if (msg.type === 'channel_info') {
+          channelInfo = msg;
+          updateChannelBar();
+          log('system', 'Channel: ' + msg.channelName + (msg.repo ? ' (' + msg.repo + ')' : ''));
         } else {
           log('received', JSON.stringify(msg));
         }

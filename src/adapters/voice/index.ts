@@ -1,6 +1,12 @@
 import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
-import { loadConfig, resolveVoiceToken, interpolateEnvVars, type Config } from '../../config.js';
+import {
+  loadConfig,
+  resolveVoiceToken,
+  resolvedChannelConfig,
+  interpolateEnvVars,
+  type Config,
+} from '../../config.js';
 import { initSession, handleMessage, handleClose } from './handler.js';
 import { parseClientMessage, serializeServerMessage } from './protocol.js';
 import type { VoiceProvider, TtsOptions } from '../../core/voice.js';
@@ -61,6 +67,26 @@ function buildTtsOptions(cfg: Config): TtsOptions | undefined {
     encoding: 'linear16',
     sampleRate: cfg.voice.deepgram.ttsSampleRate ?? 24000,
   };
+}
+
+/** Look up channel config and send channel_info to the client. */
+function sendChannelInfo(ws: { send: (msg: string) => void }, channelId: string): void {
+  const cfg = loadConfig();
+  const ch = cfg.channels[channelId];
+  if (!ch) return;
+  const resolved = resolvedChannelConfig(cfg, channelId);
+  if (!resolved) return;
+  // Use the raw repo field from config (display-friendly name), not the resolved folder
+  // path which may expose server filesystem paths to clients
+  ws.send(
+    serializeServerMessage({
+      type: 'channel_info',
+      channelId,
+      channelName: resolved.name,
+      repo: ch.repo ?? null,
+      model: resolved.model,
+    }),
+  );
 }
 
 export function startVoiceAdapter(config?: Config): void {
@@ -156,6 +182,7 @@ export function startVoiceAdapter(config?: Config): void {
       open(ws) {
         if (ws.data.authenticated) {
           initSession(ws, ws.data.userId, ws.data.defaultChannel);
+          sendChannelInfo(ws, ws.data.defaultChannel);
           console.log(
             `[voice] Client connected: userId=${ws.data.userId} channel=${ws.data.defaultChannel}`,
           );
@@ -211,6 +238,7 @@ export function startVoiceAdapter(config?: Config): void {
             ws.data.defaultChannel = tokenConfig.defaultChannel;
             ws.data.authenticated = true;
             initSession(ws, tokenConfig.userId, tokenConfig.defaultChannel);
+            sendChannelInfo(ws, tokenConfig.defaultChannel);
             console.log(
               `[voice] Client authenticated: userId=${tokenConfig.userId} channel=${tokenConfig.defaultChannel}`,
             );
