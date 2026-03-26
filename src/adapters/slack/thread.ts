@@ -1,4 +1,5 @@
 import type { WebClient } from '@slack/web-api';
+import { extractTextFromAttachments, type SlackAttachment } from './attachments.js';
 import { warnInThread } from './utils.js';
 
 export interface ThreadMessage {
@@ -52,6 +53,7 @@ export async function fetchThreadContext(
       bot_id?: string;
       text?: string;
       username?: string;
+      attachments?: SlackAttachment[];
     }> = [];
 
     let cursor: string | undefined;
@@ -78,7 +80,8 @@ export async function fetchThreadContext(
           ? await resolveUserName(client, botUserId)
           : 'Claude'
         : await resolveUserName(client, m.user ?? 'unknown');
-      const text = (m.text ?? '').trim();
+      const attachmentText = extractTextFromAttachments(m.attachments);
+      const text = [m.text, attachmentText].filter(Boolean).join('\n\n').trim();
       if (!text) continue;
       resolved.push({ authorName, isBot, text });
     }
