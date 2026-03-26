@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.23.0] - 2026-03-26
+
+### Added
+- **Slack shared/forwarded messages**: Messages shared via Slack's "Share message to channel" feature are now processed — extracts text and files from attachment payloads, fixes mention-mode gating, and includes shared message content in thread history context
+
 ## [0.22.0] - 2026-03-22
 
 ### Added
