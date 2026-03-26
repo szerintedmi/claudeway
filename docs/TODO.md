@@ -10,8 +10,9 @@
 [ ] set atlassion creds for readonly / jirawrite users to allow them to write to JIRA with own creds?
 [ ] inject channel name to claude?
 [ ] persistent mode-> do we need it? how it handles long threads? test with new features (eg. permissions)
+[ ] Persistent mode: avoid reinjecting full Slack thread on every turn when the same Claude process is already carrying context
 [ ] I'm on the main branch in the copilot-spike repo.
-[ ] Bug: CopilotBrain cannot see content of forwarded Slack messages attached to a user's message (only sees attached files/images, not forwarded message text)
+[x] Bug: CopilotBrain cannot see content of forwarded Slack messages attached to a user's message (only sees attached files/images, not forwarded message text)
 [ ] more generalized permissioning somehow ? eg. jiraWrite , git maybe somekind of plugin structure?
 [ ] Voice UI: parse `assistant` events with tool_result content to show Bash command output as sub-detail (like Claude CLI does)
 [ ] expose new TTS SST to capabilities to all channales (e.g receive voice from slack / generate )

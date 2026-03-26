@@ -12,6 +12,7 @@ import { handleMagicCommand } from './commands.js';
 import { isUserAllowed, safeReact, warnInThread } from './utils.js';
 import { shouldRespond, buildPrompt, extractMentionedUserIds } from '../../prompt.js';
 import { fetchThreadContext, resolveUserName } from './thread.js';
+import { extractTextFromAttachments, type SlackAttachment } from './attachments.js';
 import { downloadSlackFiles, type SlackFile } from './files.js';
 import { SlackChannelResponder } from './responder.js';
 import { drainChannel, channelBusy, isMessageProcessing } from '../../core/engine.js';
@@ -42,6 +43,7 @@ interface SlackMessage {
   files?: SlackFile[];
   deleted_ts?: string;
   message?: { ts?: string; text?: string };
+  attachments?: SlackAttachment[];
 }
 
 /**
@@ -115,8 +117,21 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
       return;
     }
 
-    const hasText = !!msg.text;
-    const hasFiles = !!(msg.files && msg.files.some((f) => f.url_private_download));
+    const attachmentText = extractTextFromAttachments(msg.attachments);
+    // Collect files from both top-level msg.files and inside shared-message attachments
+    const attachmentFiles: SlackFile[] = (msg.attachments ?? [])
+      .flatMap((a) => a.files ?? [])
+      .filter((f) => f.id && f.name)
+      .map((f) => ({
+        id: f.id!,
+        name: f.name!,
+        mimetype: f.mimetype ?? '',
+        size: f.size ?? 0,
+        url_private_download: f.url_private_download,
+      }));
+    const allFiles: SlackFile[] = [...(msg.files ?? []), ...attachmentFiles];
+    const hasText = !!(msg.text || attachmentText);
+    const hasFiles = allFiles.some((f) => f.url_private_download);
     // Require at least text or files
     if (!hasText && !hasFiles) return;
 
@@ -160,7 +175,9 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
     }
 
     // Trigger mode check — in 'mention' mode, ignore messages without @bot
-    if (!shouldRespond(msg.text, botUserId, triggerMode)) return;
+    // Check both direct text and attachment text (shared/forwarded messages)
+    const combinedText = [msg.text, attachmentText].filter(Boolean).join('\n');
+    if (!shouldRespond(combinedText || undefined, botUserId, triggerMode)) return;
 
     // Reject unauthorized users (botOwner always allowed)
     const userId = msg.user ?? 'unknown';
@@ -174,11 +191,11 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
       return;
     }
 
-    // Download file attachments before enqueueing
+    // Download file attachments before enqueueing (includes files from shared messages)
     let filePaths: string[] = [];
-    if (hasFiles && msg.files) {
+    if (hasFiles) {
       const token = context.botToken ?? process.env.SLACK_BOT_TOKEN ?? '';
-      const result = await downloadSlackFiles(msg.files, token, msg.channel);
+      const result = await downloadSlackFiles(allFiles, token, msg.channel);
       filePaths = result.paths;
       if (result.failedCount > 0) {
         const threadTs = msg.thread_ts ?? msg.ts;
@@ -192,7 +209,7 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
     }
 
     // If files were expected but all exceeded the size limit, and there's no text — abort
-    if (!msg.text && hasFiles && filePaths.length === 0) return;
+    if (!hasText && hasFiles && filePaths.length === 0) return;
 
     // Fetch thread context if this is a thread reply
     const threadTs = msg.thread_ts ?? msg.ts;
@@ -208,7 +225,9 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
         )
       : [];
 
-    const rawText = msg.text || (filePaths.length > 0 ? 'Please review the attached file(s).' : '');
+    const rawText =
+      [msg.text, attachmentText].filter(Boolean).join('\n\n') ||
+      (filePaths.length > 0 ? 'Please review the attached file(s).' : '');
 
     // Build a user directory so the bot knows who <@UXXXXXX> mentions refer to
     // Always include the bot and the message sender, plus any mentioned users
