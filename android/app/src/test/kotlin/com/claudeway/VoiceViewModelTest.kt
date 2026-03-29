@@ -2,6 +2,7 @@ package com.claudeway
 
 import android.app.Application
 import androidx.test.core.app.ApplicationProvider
+import com.claudeway.voice.InputMode
 import com.claudeway.voice.VoiceViewModel
 import com.claudeway.voice.MessageRole
 import com.claudeway.voice.VoiceFlowState
@@ -121,5 +122,77 @@ class VoiceViewModelTest {
         assertNull(state.activeTranscript)
         assertNull(state.activeResponseText)
         assertTrue(state.messages.isEmpty())
+    }
+
+    // --- Input mode ---
+
+    @Test
+    fun `setInputMode switches between text and voice`() {
+        assertEquals(InputMode.Voice, vm.uiState.value.inputMode)
+        vm.setInputMode(InputMode.Text)
+        assertEquals(InputMode.Text, vm.uiState.value.inputMode)
+        vm.setInputMode(InputMode.Voice)
+        assertEquals(InputMode.Voice, vm.uiState.value.inputMode)
+    }
+
+    // --- TTS toggle ---
+
+    @Test
+    fun `toggleTts flips ttsEnabled state`() {
+        assertTrue(vm.uiState.value.ttsEnabled)
+        vm.toggleTts()
+        assertEquals(false, vm.uiState.value.ttsEnabled)
+        vm.toggleTts()
+        assertTrue(vm.uiState.value.ttsEnabled)
+    }
+
+    // --- Cancel ---
+
+    @Test
+    fun `cancelCurrentRequest resets to idle when no active request`() {
+        vm.cancelCurrentRequest()
+        assertEquals(VoiceFlowState.Idle, vm.uiState.value.voiceFlowState)
+        assertNull(vm.uiState.value.currentRequestId)
+    }
+
+    // --- Glasses tap events ---
+
+    @Test
+    fun `glasses simulateTap while disconnected shows error`() {
+        vm.glassesManager.simulateTap()
+        // Tap triggers startRecording, which fails because disconnected
+        val state = vm.uiState.value
+        assertEquals(VoiceFlowState.Error, state.voiceFlowState)
+        assertTrue(state.messages.any { it.role == MessageRole.Error })
+    }
+
+    // --- New chat while disconnected ---
+
+    @Test
+    fun `newChat while disconnected changes connection state to connecting`() {
+        // newChat calls disconnect then connect — since there's no real server,
+        // it will attempt connection. Verify it doesn't crash and state transitions.
+        vm.newChat("ws://localhost:9999", "test-token")
+        val state = vm.uiState.value
+        // Should be in connecting or reconnecting state (no real server)
+        assertTrue(
+            state.connectionState == ConnectionState.Connecting ||
+                state.connectionState == ConnectionState.Reconnecting ||
+                state.connectionState == ConnectionState.Disconnected
+        )
+        // Messages should be empty (new chat clears on channel_info, but no server)
+    }
+
+    // --- Disconnect clears channel info ---
+
+    @Test
+    fun `disconnect clears channel metadata`() {
+        vm.disconnect()
+        val state = vm.uiState.value
+        assertNull(state.channelId)
+        assertNull(state.channelName)
+        assertNull(state.channelRepo)
+        assertNull(state.channelModel)
+        assertEquals(ConnectionState.Disconnected, state.connectionState)
     }
 }

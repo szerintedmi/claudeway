@@ -8,14 +8,14 @@
 
 Add a voice-driven channel to Claudeway using Meta Ray-Ban smart glasses. Users speak to Claude through the glasses and hear responses through the glasses speaker. This requires: (1) modularizing the existing Slack-coupled codebase into a channel-agnostic core, (2) building a voice pipeline (STT/TTS), (3) a WebSocket server adapter, and (4) an Android companion app using Meta's DAT SDK.
 
-**Voice model (MVP)**: Push-to-talk with post-stop transcription. The user taps to start, speaks, and releases/stops. Audio is buffered and transcribed after `audio_end`. This is not real-time streaming STT — it's a simpler, more reliable model for MVP. Streaming STT (transcribe while speaking) is Phase 5, after the batch path is proven end-to-end.
+**Voice model (MVP)**: Push-to-talk with post-stop transcription. The user taps to start, speaks, and releases/stops. Audio is buffered and transcribed after `audio_end`. This is not real-time streaming STT — it's a simpler, more reliable model for MVP. Streaming STT (transcribe while speaking) is Phase 6, after the batch path is proven end-to-end.
 
 ## E2E User Journey (MVP)
 
 1. User puts on Ray-Ban Meta glasses; they auto-connect to the companion Android app via Bluetooth
 2. User **taps the touchpad** to activate listening
 3. User speaks: *"What's the status of the queue refactor in claudeway?"*
-4. Glasses mic streams **8kHz mono audio** over Bluetooth HFP to companion app
+4. Glasses mic streams **16kHz mono audio** to companion app for the current Android client path
 5. Companion app streams audio over **WebSocket** to Claudeway server
 6. Server runs **STT** (Deepgram Nova-3) to transcribe speech to text
 7. Text enters the core pipeline: queue -> config/permissions -> `claude -p` -> response
@@ -136,7 +136,7 @@ voice:
     sttModel: nova-3
     ttsModel: aura-2-thalia-en
     ttsVoice: thalia
-    ttsSampleRate: 24000       # 24kHz for browser testing; 8000 for glasses hardware
+    ttsSampleRate: 24000       # 24kHz default for current browser / Android client testing
 
 # Glasses channels work the same as Slack channels
 channels:
@@ -161,7 +161,7 @@ sequenceDiagram
 
     User->>App: Tap touchpad to activate
     activate App
-    App->>WS: audio_start {8kHz mono PCM}
+    App->>WS: audio_start {16kHz mono PCM}
     activate WS
 
     loop Voice streaming
@@ -198,77 +198,43 @@ sequenceDiagram
     deactivate App
 ```
 
-**Audio resampling**: The glasses mic outputs 8kHz mono (Bluetooth HFP limitation). Deepgram Nova-3 accepts 8kHz natively (no upsample needed -- it handles it). TTS output sample rate is config-driven (`voice.deepgram.ttsSampleRate`, default 24000). Phase 3 uses 24kHz for browser test UI quality; Phase 4 switches to 8kHz to match the glasses Bluetooth HFP speaker path.
+**Audio format**: The current Android client records **16kHz mono PCM Int16** and sends that directly to the server. Deepgram Nova-3 accepts 16kHz input natively, so no resampling is required on the server path. TTS output sample rate is config-driven (`voice.deepgram.ttsSampleRate`, default 24000). Phase 4 keeps the Android input path at 16kHz; any glasses-specific routing constraints are validated in Phase 5 during DAT integration and hardware E2E.
 
 ## Implementation Phases
 
-### Phase 0: Modularize Core [COMPLETE]
+### Phases 0–3: Server Foundation [COMPLETE]
 
-Extracted `src/core/engine.ts` and `src/core/interfaces.ts` from Slack-coupled code. All Slack-specific code moved to `src/adapters/slack/`. Zero Slack imports in `src/core/`.
+Core modularization (`src/core/engine.ts`, `src/core/interfaces.ts`), Slack adapter extraction, WebSocket voice adapter (`src/adapters/voice/`), batch STT (Deepgram Nova-3), TTS (Deepgram Aura-2 over native WS), prose chunker for sentence-boundary TTS, cancellation across all states, per-channel effort/model config, browser test UI.
 
-### Phase 1: WebSocket Server + Text Pipeline [COMPLETE]
+### Phase 4: Android Companion App [COMPLETE]
 
-Built `src/adapters/glasses/` — protocol, handler (session management, queue key namespacing), responder, WS server with token auth. Added browser test UI.
+Full Android voice client working end-to-end against the Claudeway voice server without DAT SDK or glasses hardware.
 
-### Phase 2: STT Integration (Audio In) [COMPLETE]
+**App structure**: `android/app/src/main/kotlin/com/claudeway/` — `network/` (OkHttp WS client, protocol types), `audio/` (BT SCO routing, 16kHz mono PCM capture, AudioTrack playback), `voice/` (VoiceViewModel state machine, ConversationSessionController), `glasses/` (GlassesManager stub mode), `ui/` (Jetpack Compose screens).
 
-Push-to-talk audio: chunks buffered until `audio_end`, then batch STT via Deepgram Nova-3 prerecorded API. Voice provider interface in `src/core/voice.ts`, Deepgram implementation in `src/core/voice-deepgram.ts`. Audio session management with size limits. Dual format support (WebM/Opus from browser, raw PCM from device).
+**Key details**: `AudioManager.setCommunicationDevice()` for BT routing with phone fallback. Push-to-talk + text input dual mode. `GlassesManager.simulateTap()` wired to toggle recording via VoiceViewModel. `startDiscovery()`/`startGestureListening()` are abstraction-only stubs until Phase 5.
 
-### Phase 3: TTS + Full Voice Loop + Cancellation [COMPLETE]
+**Tests (105 total, 7 classes)**:
+- `ConversationSessionControllerTest` (24) — connected push-to-talk flow, transcript/response handling, cancel mid-flow, new-chat round-trip, TTS toggle, consecutive request interruption
+- `ProtocolTest` (29) — serialization/deserialization + inline JSON snapshot checks against TypeScript protocol shape
+- `AudioRouterTest` (15) — SCO discovery, communication-device routing, session lifecycle, fallback
+- `VoiceViewModelTest` (14) — disconnected error paths, input mode, TTS toggle, glasses tap wiring
+- `AudioRecorderTest` (11) — format constants, buffer sizing, base64 round-trip
+- `AudioPlayerTest` (8) — queue/stop/cycle lifecycle
+- `ClaudewayWebSocketTest` (4) — initial state, send-when-disconnected
 
-Full voice round-trip: audio in → STT → Claude → TTS → audio out.
+### Phase 5: Meta DAT Integration + Real Glasses E2E
 
-**TTS**: Deepgram Aura-2 over native WebSocket (not the SDK — SDK's `JSON.parse()` drops binary audio frames). Prose chunker (`src/core/prose-chunker.ts`) splits streaming text at sentence boundaries for incremental TTS. Flush coalescing to stay within Deepgram's 20/60s rate limit.
-
-**Cancellation** across all states: transcribing (AbortSignal), thinking (process kill via `onProcessSpawned` callback), speaking (TTS stream clear/abort). Tracked per-requestId in session.
-
-**Config additions**: Per-channel `effort` level (low/medium/high/max) passed as `--effort` to Claude CLI. Per-channel `model` override. Voice-optimized `systemPrompt` for glasses (plain spoken language, no markdown). Note: Deepgram `speed` param is REST-only, not available on WebSocket TTS.
-
-**Test UI**: Full mic + speaker with Web Audio API playback, push-to-talk, visual status indicators.
-
-### Phase 4: Android Companion App [IN PROGRESS]
-
-**Goal**: End-to-end with actual Meta Ray-Ban glasses.
-
-**Structure**:
-```
-android/
-  app/
-    build.gradle.kts
-    src/main/
-      AndroidManifest.xml
-      kotlin/com/claudeway/glasses/
-        ClaudewayApp.kt          # Application class, DAT SDK init
-        MainActivity.kt           # Single-activity app
-        glasses/
-          GlassesViewModel.kt     # DAT SDK device connection state
-          GlassesManager.kt       # Device discovery, registration, permissions
-        audio/
-          AudioRouter.kt          # Bluetooth HFP routing (mic + speaker)
-          AudioRecorder.kt        # PCM capture from glasses mic
-          AudioPlayer.kt          # PCM playback to glasses speaker
-        network/
-          ClaudewayWebSocket.kt   # WS client (OkHttp or Ktor)
-          Protocol.kt             # Message types matching server protocol
-        ui/
-          ConnectionScreen.kt     # Jetpack Compose: server URL, connection status
-          ConversationScreen.kt   # Transcript display, manual text input fallback
-      res/
-        ...
-  build.gradle.kts
-  settings.gradle.kts
-  gradle/
-    libs.versions.toml            # DAT SDK, OkHttp, Compose versions
-```
+**Goal**: Replace the mocked glasses layer with the actual Meta DAT SDK and prove end-to-end operation on physical Ray-Ban Meta hardware.
 
 **Key implementation details**:
 
-1. **DAT SDK setup**: `Wearables.initialize()` in `Application.onCreate()`, registration flow via Meta AI companion app
-2. **Audio routing**: Standard Android `AudioManager.setCommunicationDevice()` to route to Bluetooth SCO device. Must configure HFP **before** any DAT camera sessions.
-3. **Audio capture**: `AudioRecord` with Bluetooth SCO source, 8kHz mono PCM Int16
-4. **Audio playback**: `AudioTrack` routed to Bluetooth SCO device, matching format from TTS
-5. **WebSocket**: OkHttp's WS client, auto-reconnect, auth via bearer token
-6. **Activation**: Touchpad tap detected via DAT SDK gesture events, or a simple "hold to talk" UI button as fallback
+1. **DAT SDK setup**: Enable the DAT dependency and call `Wearables.initialize()` in `Application.onCreate()`
+2. **Registration flow**: Pair through the Meta AI companion app and handle the DAT registration / permission lifecycle
+3. **Device discovery**: Discover supported glasses devices and reflect connection state in the app
+4. **Gesture input**: Subscribe to touchpad gesture events and map tap-to-talk onto the existing push-to-talk flow
+5. **Audio routing**: Confirm Bluetooth HFP routing works correctly with the actual glasses mic/speaker path and is established before any DAT camera sessions
+6. **Hardware validation**: Verify real-world end-to-end latency, stability, and cancellation behavior on glasses hardware
 
 **DAT SDK requirements**:
 - Android 10+ (API 29+)
@@ -278,29 +244,23 @@ android/
 - Supported: Ray-Ban Meta Gen 1 & Gen 2
 
 **Tests (Android, JUnit + MockK)**:
-- `ClaudewayWebSocketTest` -- WebSocket client:
-  - Connects with auth token, receives `pong` on `ping`
-  - Reconnects automatically on connection drop
-  - Serializes/deserializes protocol messages correctly
-- `AudioRouterTest` -- Bluetooth HFP routing:
-  - Finds SCO device from `AudioManager.availableCommunicationDevices`
-  - Sets communication device correctly
-  - Handles missing SCO device (no glasses connected) gracefully
-- `AudioRecorderTest` -- PCM capture:
-  - Produces 8kHz mono Int16 PCM buffers
-  - Stops cleanly on release
-- `ProtocolTest` -- shared protocol types:
-  - Kotlin message types match TypeScript protocol definition (snapshot test against JSON fixtures)
 - **Integration** (requires DAT MockDeviceKit, no physical glasses):
   - `GlassesManagerTest` -- device discovery and registration flow using `MockDeviceKit`
   - Full pipeline mock: simulated touchpad event → audio capture → WS send → mock server response → audio playback
 - **Manual E2E**: put on glasses, tap touchpad, speak, hear response
 
-### Phase 5: Streaming STT
+**Exit criteria**:
+- DAT SDK is enabled in the Android build and initializes successfully on a supported phone
+- Glasses can be discovered and connected through the app
+- Touchpad tap triggers the existing push-to-talk pipeline
+- User can speak through Ray-Ban Meta glasses and hear the response back through the glasses speaker
+- Manual E2E on physical hardware is repeatable and stable enough to use as the base for latency work
+
+### Phase 6: Streaming STT
 
 **Goal**: Replace batch transcription with real-time streaming STT for lower perceived latency. Partial transcripts appear while the user is still speaking.
 
-**Prerequisite**: Phases 0–4 complete and stable. Batch voice path working end-to-end with glasses hardware.
+**Prerequisite**: Phases 0–5 complete and stable. Batch voice path working end-to-end with glasses hardware.
 
 **Changes**:
 
@@ -335,19 +295,19 @@ android/
 
 **Design constraint**: Streaming STT adds a persistent WebSocket connection to Deepgram per active recording session. This is fine for single-user MVP but would need connection pooling for multi-user. The `VoiceProvider` interface already has the `transcribeStream()` method stubbed — this phase implements it.
 
-### Phase 6: Voice Activity Detection (Hands-Free Mode)
+### Phase 7: Voice Activity Detection (Hands-Free Mode)
 
-**Status**: Post-MVP / experimental. Not part of the initial delivery target (Phases 0–5).
+**Status**: Post-MVP / experimental. Not part of the initial delivery target (Phases 0–6).
 
 **Goal**: Replace push-to-talk with automatic speech detection — the user just speaks and the system figures out when they started and stopped.
 
-**Prerequisite**: Phase 5 (Streaming STT) complete and stable. Streaming STT provides the real-time audio stream and Deepgram's `utterance_end` events that VAD builds on.
+**Prerequisite**: Phase 6 (Streaming STT) complete and stable. Streaming STT provides the real-time audio stream and Deepgram's `utterance_end` events that VAD builds on.
 
-**Approach**: Client-side energy-based VAD on the companion app. The app runs a lightweight amplitude-threshold detector locally. On speech detection, sends `audio_start` and begins streaming to the server. On local silence timeout, sends `audio_end`. Server-side uses streaming STT (Phase 5) with Deepgram's `utterance_end` for precise end-of-speech detection, overriding the client's coarse silence timeout when they disagree.
+**Approach**: Client-side energy-based VAD on the companion app. The app runs a lightweight amplitude-threshold detector locally. On speech detection, sends `audio_start` and begins streaming to the server. On local silence timeout, sends `audio_end`. Server-side uses streaming STT (Phase 6) with Deepgram's `utterance_end` for precise end-of-speech detection, overriding the client's coarse silence timeout when they disagree.
 
 This preserves the existing `audio_start`/`audio_end` protocol framing — the server doesn't need to know whether the client used push-to-talk or auto-detection. The only change is who triggers start/stop: user's finger vs. the VAD.
 
-**Why not always-on server streaming**: Keeping a Deepgram STT WebSocket open continuously per session has unbounded API cost and battery drain on the phone (continuous audio capture + network). Client-side energy detection is near-zero cost during silence and only opens the server path when speech is likely. If Phase 5 soak testing reveals that Deepgram's per-connection cost is negligible, always-on could be revisited as a simplification.
+**Why not always-on server streaming**: Keeping a Deepgram STT WebSocket open continuously per session has unbounded API cost and battery drain on the phone (continuous audio capture + network). Client-side energy detection is near-zero cost during silence and only opens the server path when speech is likely. If Phase 6 soak testing reveals that Deepgram's per-connection cost is negligible, always-on could be revisited as a simplification.
 
 **Changes**:
 
@@ -363,13 +323,13 @@ This preserves the existing `audio_start`/`audio_end` protocol framing — the s
 - Manual: speak without tapping, verify transcription and response
 - Fallback: `vadMode: 'push-to-talk'` uses existing touchpad flow unchanged
 
-### Phase 7: Barge-In (Response Interruption)
+### Phase 8: Barge-In (Response Interruption)
 
-**Status**: Post-MVP / experimental. Depends on Phase 6 (VAD) or can be used with push-to-talk.
+**Status**: Post-MVP / experimental. Depends on Phase 7 (VAD) or can be used with push-to-talk.
 
 **Goal**: Allow the user to interrupt Claude mid-response by speaking. The current response is cancelled and the new utterance is processed.
 
-**Prerequisite**: Phase 3 cancellation plumbing (thinking/speaking abort) is the mechanical foundation. Phase 6 (VAD) makes barge-in natural (user just starts talking) but barge-in also works with push-to-talk (user taps while response is playing).
+**Prerequisite**: Phase 3 cancellation plumbing (thinking/speaking abort) is the mechanical foundation. Phase 7 (VAD) makes barge-in natural (user just starts talking) but barge-in also works with push-to-talk (user taps while response is playing).
 
 **Policy decisions** (must be resolved before implementation):
 
