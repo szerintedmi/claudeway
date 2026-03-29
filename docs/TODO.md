@@ -7,6 +7,7 @@
 [ ] checkmark emoji config
 [ ] sort out git repos mess: sync-repos.ts, 
 [ ] git ssh priv key / JIRA token hide in docker? docker secrets? envx ?
+[ ] Whitelist env vars for Claude subprocess instead of inheriting all of process.env and stripping secrets. Configure allowed env vars per-repo in config.yaml, plus a small required set (HOME, USER, PATH, CLAUDE_CODE_OAUTH_TOKEN). Would replace the brittle deny-list in spawnClaudeProcess() (src/claude.ts).
 [ ] set atlassion creds for readonly / jirawrite users to allow them to write to JIRA with own creds?
 [ ] inject channel name to claude?
 [ ] persistent mode-> do we need it? how it handles long threads? test with new features (eg. permissions)

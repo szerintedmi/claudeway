@@ -151,6 +151,19 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
         // Initialize glasses manager
         glassesManager.initialize()
 
+        // Wire glasses touchpad tap to push-to-talk toggle
+        viewModelScope.launch {
+            glassesManager.touchpadTapEvents.collect { timestamp ->
+                if (timestamp == 0L) return@collect // Initial value, skip
+                val state = _uiState.value.voiceFlowState
+                if (state == VoiceFlowState.Recording || state == VoiceFlowState.Preparing) {
+                    stopRecording()
+                } else {
+                    startRecording()
+                }
+            }
+        }
+
         // Reconnect immediately when app returns to foreground
         ProcessLifecycleOwner.get().lifecycle.addObserver(lifecycleObserver)
     }
