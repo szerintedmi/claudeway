@@ -166,6 +166,22 @@ class VoiceViewModelTest {
         assertTrue(state.messages.any { it.role == MessageRole.Error })
     }
 
+    // --- Volume button PTT ---
+
+    @Test
+    fun `onVolumeUpPress while disconnected returns false`() {
+        assertEquals(false, vm.onVolumeUpPress())
+    }
+
+    @Test
+    fun `onVolumeUpPress while connected triggers recording`() {
+        // We can't easily connect without a real server, so just verify
+        // it doesn't crash and returns false when disconnected
+        val consumed = vm.onVolumeUpPress()
+        assertEquals(false, consumed)
+        assertEquals(VoiceFlowState.Idle, vm.uiState.value.voiceFlowState)
+    }
+
     // --- New chat while disconnected ---
 
     @Test

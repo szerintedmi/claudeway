@@ -23,6 +23,11 @@ android {
             .standardOutput.asText.get().trim()
         buildConfigField("String", "GIT_HASH", "\"$gitHash\"")
         buildConfigField("String", "BUILD_TIME", "\"$buildTime\"")
+
+        // Meta DAT SDK application ID (from Wearables Developer Center)
+        manifestPlaceholders["MWDAT_APP_ID"] = providers.gradleProperty("mwdat.appId")
+            .orElse(providers.environmentVariable("MWDAT_APP_ID"))
+            .getOrElse("")
     }
 
     buildTypes {
@@ -79,8 +84,15 @@ dependencies {
     // org.json is provided by Android runtime; add for unit tests
     testImplementation(libs.org.json)
 
-    // Meta DAT SDK — comment out if not available yet
-    // implementation(libs.dat.sdk)
+    // Meta Wearables DAT SDK — requires GITHUB_TOKEN or gpr.key in local.properties.
+    // When token is absent, SDK deps are skipped and GlassesManager runs in standalone mode.
+    if (providers.gradleProperty("gpr.key").isPresent ||
+        providers.environmentVariable("GITHUB_TOKEN").map { it.isNotEmpty() }.getOrElse(false)
+    ) {
+        implementation(libs.mwdat.core)
+        implementation(libs.mwdat.camera)
+        testImplementation(libs.mwdat.mockdevice)
+    }
 
     // Test
     testImplementation(libs.junit)

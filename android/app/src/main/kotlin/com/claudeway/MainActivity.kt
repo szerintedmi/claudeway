@@ -4,7 +4,9 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
+import androidx.activity.viewModels
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,6 +18,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
+import android.app.Activity
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -29,6 +32,8 @@ import com.claudeway.ui.ConnectionScreen
 import com.claudeway.ui.ConversationScreen
 
 class MainActivity : ComponentActivity() {
+    private val voiceViewModel: VoiceViewModel by viewModels()
+
     private val requiredPermissions = buildList {
         add(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -41,6 +46,13 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { /* Permissions handled — UI adapts based on state */ }
 
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            if (voiceViewModel.onVolumeUpPress()) return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -51,6 +63,9 @@ class MainActivity : ComponentActivity() {
         if (missingPermissions.isNotEmpty()) {
             permissionLauncher.launch(missingPermissions.toTypedArray())
         }
+
+        // Use the activity-scoped ViewModel so onKeyDown can reach it
+        // (Compose's viewModel() will return the same instance)
 
         setContent {
             ClaudewayTheme {
@@ -105,6 +120,9 @@ private fun ClaudewayNavHost() {
                 },
                 onDisconnect = { viewModel.disconnect() },
                 onNavigateToConversation = { navController.navigate("conversation") },
+                onRegisterGlasses = {
+                    (context as? Activity)?.let { viewModel.registerGlasses(it) }
+                },
             )
         }
 

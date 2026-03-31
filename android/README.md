@@ -55,13 +55,20 @@ ui/          — Jetpack Compose (connection + conversation screens)
 
 ## DAT SDK (optional)
 
-The Meta Device Access Toolkit SDK is required only for glasses-specific features (touchpad gestures, device discovery). Without it, the app works as a standalone voice client using the phone mic/speaker.
+The Meta Wearables Device Access Toolkit (MWDAT v0.5.0) is required only for glasses-specific features (device discovery, registration, camera). Without it, the app works as a standalone voice client using the phone mic/speaker. The DAT SDK does **not** expose touchpad gesture events; push-to-talk uses the volume-up key or on-screen button.
 
-To enable: uncomment `implementation(libs.dat.sdk)` in `app/build.gradle.kts` and add GitHub Packages credentials to `local.properties`:
+The DAT SDK dependency is **conditionally included** — it's only pulled when GitHub Packages credentials are present. To enable, add to `local.properties`:
 ```properties
 gpr.user=YOUR_GITHUB_USERNAME
-gpr.key=YOUR_GITHUB_TOKEN
+gpr.key=YOUR_GITHUB_TOKEN_WITH_READ_PACKAGES_SCOPE
 ```
+Or set environment variables `GITHUB_USERNAME` and `GITHUB_TOKEN`.
+
+You also need a DAT application ID from the [Wearables Developer Center](https://wearables.developer.meta.com/). Set it via:
+```properties
+mwdat.appId=YOUR_APP_ID
+```
+Or the `MWDAT_APP_ID` environment variable.
 
 ## Debugging Audio
 

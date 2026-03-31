@@ -72,7 +72,7 @@ data class UiState(
 class VoiceViewModel(application: Application) : AndroidViewModel(application) {
     val webSocket = ClaudewayWebSocket(viewModelScope)
     val audioRouter = AudioRouter(application, viewModelScope)
-    val glassesManager = GlassesManager(application)
+    val glassesManager = GlassesManager(application, viewModelScope)
     private val audioRecorder = AudioRecorder()
     private val audioPlayer = AudioPlayer(viewModelScope)
 
@@ -232,6 +232,35 @@ class VoiceViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cancelCurrentRequest() {
         sessionController.cancelCurrentRequest()
+    }
+
+    // --- Glasses registration ---
+
+    /**
+     * Trigger DAT SDK registration flow. Requires an Activity context
+     * because the SDK opens the Meta AI app for consent.
+     */
+    fun registerGlasses(activity: android.app.Activity) {
+        glassesManager.startRegistration(activity)
+    }
+
+    // --- Volume button PTT ---
+
+    /**
+     * Handle a hardware volume-up key press as a push-to-talk toggle.
+     * Returns true if the event was consumed (recording toggled).
+     */
+    fun onVolumeUpPress(): Boolean {
+        val state = _uiState.value
+        if (state.connectionState != ConnectionState.Connected) return false
+        if (state.voiceFlowState == VoiceFlowState.Recording ||
+            state.voiceFlowState == VoiceFlowState.Preparing
+        ) {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+        return true
     }
 
     // --- Cleanup ---

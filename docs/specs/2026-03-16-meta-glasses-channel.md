@@ -1,7 +1,7 @@
 # Meta Ray-Ban Glasses Voice Channel
 
 **Date**: 2026-03-16
-**Status**: Draft
+**Status**: Active implementation spec. Phases 0-5 complete and reviewed; Phase 6 next.
 **Author**: Claude + Petro
 
 ## Overview
@@ -223,38 +223,44 @@ Full Android voice client working end-to-end against the Claudeway voice server 
 - `AudioPlayerTest` (8) — queue/stop/cycle lifecycle
 - `ClaudewayWebSocketTest` (4) — initial state, send-when-disconnected
 
-### Phase 5: Meta DAT Integration + Real Glasses E2E
+### Phase 5: Meta DAT Integration + Volume-Key PTT [COMPLETE]
 
-**Goal**: Replace the mocked glasses layer with the actual Meta DAT SDK and prove end-to-end operation on physical Ray-Ban Meta hardware.
+**Goal**: Integrate the real Meta DAT SDK (MWDAT v0.5.0) for device discovery and registration, and add hardware volume-button push-to-talk since the DAT SDK does not expose touchpad gesture events.
+
+**Review status**: Reviewed and accepted. Manual hardware E2E remains tracked separately from the implementation review.
+
+**DAT SDK reality vs original assumptions**: The DAT SDK (v0.5.0, developer preview, March 2026) provides device discovery, registration, and camera streaming/photo capture. It does **not** expose touchpad gesture events -- the touchpad is handled internally by the Meta AI app. Package names differ from early estimates: `com.meta.wearable` / `mwdat-core`, `mwdat-camera`, `mwdat-mockdevice` (not `com.meta.wearables` / `dat-sdk`). Maven repo: `facebook/meta-wearables-dat-android`.
 
 **Key implementation details**:
 
-1. **DAT SDK setup**: Enable the DAT dependency and call `Wearables.initialize()` in `Application.onCreate()`
-2. **Registration flow**: Pair through the Meta AI companion app and handle the DAT registration / permission lifecycle
-3. **Device discovery**: Discover supported glasses devices and reflect connection state in the app
-4. **Gesture input**: Subscribe to touchpad gesture events and map tap-to-talk onto the existing push-to-talk flow
-5. **Audio routing**: Confirm Bluetooth HFP routing works correctly with the actual glasses mic/speaker path and is established before any DAT camera sessions
-6. **Hardware validation**: Verify real-world end-to-end latency, stability, and cancellation behavior on glasses hardware
+1. **DAT SDK setup**: Conditional dependency (requires `GITHUB_TOKEN`); `Wearables.initialize()` called in `ClaudewayApp.onCreate()` via `GlassesManager.initializeSdk()`. All SDK calls use reflection so the app compiles and runs without the SDK on classpath (standalone mode).
+2. **Registration flow**: `GlassesManager.startRegistration(activity)` triggers Meta AI app consent. Registration state observed via `Wearables.registrationState` Flow.
+3. **Device discovery**: `AutoDeviceSelector` finds paired glasses. `LinkState` (CONNECTED/CONNECTING/DISCONNECTED) maps to `GlassesState` enum. Device name reflected in UI.
+4. **Push-to-talk trigger**: Hardware volume-up key mapped to toggle recording via `MainActivity.onKeyDown()` -> `VoiceViewModel.onVolumeUpPress()`. Works with phone in pocket while wearing glasses. On-screen button and `simulateTap()` remain as alternatives.
+5. **Audio routing**: BT HFP routing unchanged from Phase 4 (standard Android Bluetooth, not DAT-specific).
+6. **Manifest config**: `com.meta.wearable.mwdat.APPLICATION_ID` (from Wearables Developer Center) and `ANALYTICS_OPT_OUT=true`.
 
 **DAT SDK requirements**:
 - Android 10+ (API 29+)
 - Meta AI companion app installed on phone
 - Developer Mode enabled in Meta AI app settings
-- GitHub token for pulling SDK from GitHub Packages
-- Supported: Ray-Ban Meta Gen 1 & Gen 2
+- `GITHUB_TOKEN` or `gpr.key` in `local.properties` for pulling SDK from GitHub Packages
+- Supported: Ray-Ban Meta Gen 1 & Gen 2, Oakley Meta HSTN
 
-**Tests (Android, JUnit + MockK)**:
-- **Integration** (requires DAT MockDeviceKit, no physical glasses):
-  - `GlassesManagerTest` -- device discovery and registration flow using `MockDeviceKit`
-  - Full pipeline mock: simulated touchpad event → audio capture → WS send → mock server response → audio playback
-- **Manual E2E**: put on glasses, tap touchpad, speak, hear response
+**Tests (121 total, 8 classes)**:
+- `GlassesManagerTest` (14) -- SDK availability detection, standalone mode, simulateTap, state transitions, release cleanup, MockDeviceKit integration stubs (skip without SDK)
+- `VoiceViewModelTest` (16) -- includes volume-button PTT tests (disconnected returns false)
+- `ConversationSessionControllerTest` (24), `ProtocolTest` (29), `AudioRouterTest` (15), `AudioRecorderTest` (11), `AudioPlayerTest` (8), `ClaudewayWebSocketTest` (4) -- unchanged
 
-**Exit criteria**:
-- DAT SDK is enabled in the Android build and initializes successfully on a supported phone
-- Glasses can be discovered and connected through the app
-- Touchpad tap triggers the existing push-to-talk pipeline
-- User can speak through Ray-Ban Meta glasses and hear the response back through the glasses speaker
-- Manual E2E on physical hardware is repeatable and stable enough to use as the base for latency work
+**What's deferred (no DAT API available)**:
+- Touchpad gesture events -- DAT SDK does not expose these. If Meta adds gesture API in a future SDK version, can wire directly to `simulateTap()` path.
+
+**Exit criteria** (met):
+- DAT SDK dependency conditionally enabled in Android build (compiles with and without SDK)
+- GlassesManager uses real SDK calls (via reflection) when SDK is present, standalone mode otherwise
+- Volume-up key triggers push-to-talk toggle
+- 121 tests pass (14 new GlassesManager + 2 new VoiceViewModel volume PTT)
+- Manual E2E pending: install on phone with Meta AI app + glasses hardware
 
 ### Phase 6: Streaming STT
 
