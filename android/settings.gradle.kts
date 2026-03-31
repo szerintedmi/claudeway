@@ -11,9 +11,9 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // Meta DAT SDK from GitHub Packages
+        // Meta Wearables DAT SDK from GitHub Packages
         maven {
-            url = uri("https://maven.pkg.github.com/meta-llama/device-access-toolkit-android")
+            url = uri("https://maven.pkg.github.com/facebook/meta-wearables-dat-android")
             credentials {
                 username = providers.gradleProperty("gpr.user")
                     .orElse(providers.environmentVariable("GITHUB_USERNAME"))

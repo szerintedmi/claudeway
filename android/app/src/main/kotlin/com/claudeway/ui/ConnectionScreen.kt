@@ -48,6 +48,7 @@ fun ConnectionScreen(
     onConnect: (url: String, token: String) -> Unit,
     onDisconnect: () -> Unit,
     onNavigateToConversation: () -> Unit,
+    onRegisterGlasses: () -> Unit = {},
 ) {
     var url by rememberSaveable(savedUrl) { mutableStateOf(savedUrl) }
     var token by rememberSaveable(savedToken) { mutableStateOf(savedToken) }
@@ -121,6 +122,17 @@ fun ConnectionScreen(
                 state = audioRouteState.displayText,
                 color = audioRouteState.indicatorColor,
             )
+
+            // Register glasses button when DAT SDK reports NotRegistered
+            if (glassesState == GlassesState.NotRegistered) {
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onRegisterGlasses,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Register Glasses")
+                }
+            }
 
             Spacer(modifier = Modifier.height(24.dp))
 
@@ -237,8 +249,9 @@ private val AudioRouteState.indicatorColor: Color
 private val GlassesState.displayText: String
     get() = when (this) {
         GlassesState.NotInitialized -> "Not initialized"
+        GlassesState.NotRegistered -> "Not registered"
         GlassesState.Searching -> "Searching..."
-        GlassesState.Found -> "Found"
+        GlassesState.Connecting -> "Connecting..."
         GlassesState.Connected -> "Connected"
         GlassesState.Disconnected -> "Disconnected"
         GlassesState.Error -> "Error"
@@ -248,8 +261,9 @@ private val GlassesState.displayText: String
 private val GlassesState.indicatorColor: Color
     get() = when (this) {
         GlassesState.NotInitialized -> Color.Gray
+        GlassesState.NotRegistered -> Color.Yellow
         GlassesState.Searching -> Color.Yellow
-        GlassesState.Found -> Color.Yellow
+        GlassesState.Connecting -> Color.Yellow
         GlassesState.Connected -> Color(0xFF4CAF50)
         GlassesState.Disconnected -> Color.Gray
         GlassesState.Error -> Color.Red
