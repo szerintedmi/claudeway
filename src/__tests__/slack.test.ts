@@ -1,6 +1,12 @@
-import { markdownToSlackMrkdwn, splitMessage } from '../adapters/slack/formatting.js';
+import {
+  markdownToSlackMrkdwn,
+  splitMessage,
+  FILE_THRESHOLD,
+} from '../adapters/slack/formatting.js';
 import { isUserAllowed } from '../adapters/slack/utils.js';
 import { formatDuration, formatTimeout, formatChannelConfig } from '../adapters/slack/commands.js';
+import { getSnippetType, SlackChannelResponder } from '../adapters/slack/responder.js';
+import type { WebClient } from '@slack/web-api';
 
 describe('markdownToSlackMrkdwn', () => {
   describe('links', () => {
@@ -280,6 +286,52 @@ describe('formatChannelConfig', () => {
   });
 });
 
+describe('getSnippetType', () => {
+  it('returns "markdown" for .md files', () => {
+    expect(getSnippetType('response.md')).toBe('markdown');
+  });
+
+  it('returns "markdown" for .markdown files', () => {
+    expect(getSnippetType('notes.markdown')).toBe('markdown');
+  });
+
+  it('returns "python" for .py files', () => {
+    expect(getSnippetType('script.py')).toBe('python');
+  });
+
+  it('returns "javascript" for .js files', () => {
+    expect(getSnippetType('app.js')).toBe('javascript');
+  });
+
+  it('returns "javascript" for .ts files', () => {
+    expect(getSnippetType('index.ts')).toBe('javascript');
+  });
+
+  it('returns "text" for .txt files', () => {
+    expect(getSnippetType('readme.txt')).toBe('text');
+  });
+
+  it('returns "json" for .json files', () => {
+    expect(getSnippetType('config.json')).toBe('json');
+  });
+
+  it('returns "yaml" for .yml files', () => {
+    expect(getSnippetType('config.yml')).toBe('yaml');
+  });
+
+  it('is case-insensitive', () => {
+    expect(getSnippetType('README.MD')).toBe('markdown');
+  });
+
+  it('returns undefined for unknown extensions', () => {
+    expect(getSnippetType('image.png')).toBeUndefined();
+  });
+
+  it('returns undefined for files without extensions', () => {
+    expect(getSnippetType('Makefile')).toBeUndefined();
+  });
+});
+
 describe('isUserAllowed', () => {
   it('allows any user when allowedUsers is undefined', () => {
     expect(isUserAllowed(undefined, 'U123')).toBe(true);
@@ -299,5 +351,86 @@ describe('isUserAllowed', () => {
 
   it('denies unknown user when allowedUsers is set', () => {
     expect(isUserAllowed(['U123'], 'unknown')).toBe(false);
+  });
+});
+
+describe('SlackChannelResponder.uploadFile payload', () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function createMockClient(): { client: WebClient; uploadCalls: any[] } {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const uploadCalls: any[] = [];
+    const client = {
+      files: {
+        uploadV2: async (args: unknown) => {
+          uploadCalls.push(args);
+          return {};
+        },
+      },
+      chat: { postMessage: async () => ({}) },
+      reactions: { add: async () => ({}), remove: async () => ({}) },
+    } as unknown as WebClient;
+    return { client, uploadCalls };
+  }
+
+  it('passes snippet_type "markdown" for .md files', async () => {
+    const { client, uploadCalls } = createMockClient();
+    const responder = new SlackChannelResponder(client, 'C123', 'ts1', 'ts2', 'batch', 'U1');
+    await responder.uploadFile('/tmp/output/response.md');
+
+    expect(uploadCalls).toHaveLength(1);
+    expect(uploadCalls[0]).toEqual({
+      channel_id: 'C123',
+      thread_ts: 'ts1',
+      file: '/tmp/output/response.md',
+      filename: 'response.md',
+      title: 'response.md',
+      snippet_type: 'markdown',
+    });
+  });
+
+  it('passes snippet_type "python" for .py files', async () => {
+    const { client, uploadCalls } = createMockClient();
+    const responder = new SlackChannelResponder(client, 'C123', 'ts1', 'ts2', 'batch', 'U1');
+    await responder.uploadFile('/tmp/script.py');
+
+    expect(uploadCalls).toHaveLength(1);
+    expect(uploadCalls[0].snippet_type).toBe('python');
+    expect(uploadCalls[0].filename).toBe('script.py');
+  });
+
+  it('omits snippet_type for binary files like .png', async () => {
+    const { client, uploadCalls } = createMockClient();
+    const responder = new SlackChannelResponder(client, 'C123', 'ts1', 'ts2', 'batch', 'U1');
+    await responder.uploadFile('/tmp/image.png');
+
+    expect(uploadCalls).toHaveLength(1);
+    expect(uploadCalls[0]).not.toHaveProperty('snippet_type');
+    expect(uploadCalls[0].filename).toBe('image.png');
+  });
+});
+
+describe('SlackChannelResponder.sendResponse file upload payload', () => {
+  it('passes snippet_type "markdown" for oversized responses', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const uploadCalls: any[] = [];
+    const client = {
+      files: {
+        uploadV2: async (args: unknown) => {
+          uploadCalls.push(args);
+          return {};
+        },
+      },
+      chat: { postMessage: async () => ({}) },
+      reactions: { add: async () => ({}), remove: async () => ({}) },
+    } as unknown as WebClient;
+
+    const responder = new SlackChannelResponder(client, 'C123', 'ts1', 'ts2', 'batch', 'U1');
+    const longText = 'x'.repeat(FILE_THRESHOLD + 1);
+    await responder.sendResponse(longText);
+
+    expect(uploadCalls).toHaveLength(1);
+    expect(uploadCalls[0].content).toBe(longText);
+    expect(uploadCalls[0].filename).toBe('response.md');
+    expect(uploadCalls[0].snippet_type).toBe('markdown');
   });
 });

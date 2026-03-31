@@ -18,6 +18,33 @@ import {
 } from './formatting.js';
 import { safeReact, warnInThread } from './utils.js';
 
+/** Map file extensions to Slack snippet_type values for inline preview. */
+const SNIPPET_TYPE_MAP: Record<string, string> = {
+  md: 'markdown',
+  markdown: 'markdown',
+  txt: 'text',
+  csv: 'csv',
+  json: 'json',
+  yaml: 'yaml',
+  yml: 'yaml',
+  xml: 'xml',
+  html: 'html',
+  css: 'css',
+  js: 'javascript',
+  ts: 'javascript',
+  py: 'python',
+  sh: 'shell',
+  log: 'text',
+  toml: 'toml',
+  ini: 'text',
+  sql: 'sql',
+};
+
+export function getSnippetType(filename: string): string | undefined {
+  const ext = filename.match(/\.(\w+)$/)?.[1]?.toLowerCase();
+  return ext ? SNIPPET_TYPE_MAP[ext] : undefined;
+}
+
 class StreamingResponder implements IStreamingResponder {
   private client: WebClient;
   private channel: string;
@@ -285,6 +312,7 @@ async function sendResponse(
       thread_ts: threadTs,
       content: text,
       filename: 'response.md',
+      snippet_type: 'markdown',
       title: 'Response',
     });
     return;
@@ -396,6 +424,7 @@ export class SlackChannelResponder implements ChannelResponder {
           thread_ts: this.threadTs,
           content: fullText,
           filename: 'response.md',
+          snippet_type: 'markdown',
           title: 'Response',
         });
       }
@@ -419,6 +448,7 @@ export class SlackChannelResponder implements ChannelResponder {
         thread_ts: this.threadTs,
         content: fullText,
         filename: 'response.md',
+        snippet_type: 'markdown',
         title: 'Response',
       });
     } else if (fullText.length > MAX_MESSAGE_LENGTH) {
@@ -450,12 +480,14 @@ export class SlackChannelResponder implements ChannelResponder {
 
   async uploadFile(filePath: string): Promise<void> {
     const filename = basename(filePath);
+    const snippetType = getSnippetType(filename);
     await this.client.files.uploadV2({
       channel_id: this.channelId,
       thread_ts: this.threadTs,
       file: filePath,
       filename,
       title: filename,
+      ...(snippetType ? { snippet_type: snippetType } : {}),
     });
   }
 
