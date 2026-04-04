@@ -16,15 +16,20 @@ export interface RepoConfig {
 
 export type AllowedUserEntry = string | Record<string, string[]>;
 
-export interface UserPermissions {
-  git: boolean;
-  jiraWrite: boolean;
+/** A user's granted permissions — set of permission names from config.permissions keys. */
+export type UserPermissions = Set<string>;
+
+/** Empty permission set (read-only). */
+export const READ_ONLY_PERMISSIONS: UserPermissions = new Set<string>();
+
+/** All permissions defined in config. */
+export function fullPermissions(config: Config): UserPermissions {
+  return new Set(Object.keys(config.permissions ?? {}));
 }
 
-export const FULL_PERMISSIONS: UserPermissions = { git: true, jiraWrite: true };
-export const READ_ONLY_PERMISSIONS: UserPermissions = { git: false, jiraWrite: false };
-
-const VALID_PERMISSIONS = new Set(['git', 'jiraWrite']);
+export interface PermissionDef {
+  env?: string[];
+}
 
 /**
  * Parse mixed allowedUsers entries into a map of userId → permissions.
@@ -34,13 +39,10 @@ export function parseAllowedUsers(entries: AllowedUserEntry[]): Map<string, User
   const map = new Map<string, UserPermissions>();
   for (const entry of entries) {
     if (typeof entry === 'string') {
-      map.set(entry, { ...READ_ONLY_PERMISSIONS });
+      map.set(entry, new Set());
     } else {
       for (const [userId, perms] of Object.entries(entry)) {
-        map.set(userId, {
-          git: perms.includes('git'),
-          jiraWrite: perms.includes('jiraWrite'),
-        });
+        map.set(userId, new Set(perms));
       }
     }
   }
@@ -65,8 +67,7 @@ export function resolveUserPermissions(
 ): UserPermissions {
   const ch = config.channels[channelId];
   if (!ch?.allowedUsers || ch.allowedUsers.length === 0) {
-    // No allowedUsers list — botOwner gets full, others read-only
-    return userId === config.botOwner ? { ...FULL_PERMISSIONS } : { ...READ_ONLY_PERMISSIONS };
+    return userId === config.botOwner ? fullPermissions(config) : new Set();
   }
 
   const parsed = parseAllowedUsers(ch.allowedUsers);
@@ -74,19 +75,16 @@ export function resolveUserPermissions(
   if (explicit !== undefined) return explicit;
 
   // Not listed — botOwner gets full access, others read-only
-  return userId === config.botOwner ? { ...FULL_PERMISSIONS } : { ...READ_ONLY_PERMISSIONS };
+  return userId === config.botOwner ? fullPermissions(config) : new Set();
 }
 
 /**
- * Compute a stable string key from permissions for comparison.
+ * Compute a stable string key from permissions for comparison/logging.
  * Undefined permissions are treated as full access.
  */
 export function permissionKey(p: UserPermissions | undefined): string {
-  if (!p) return 'git,jiraWrite';
-  const parts: string[] = [];
-  if (p.git) parts.push('git');
-  if (p.jiraWrite) parts.push('jiraWrite');
-  return parts.join(',');
+  if (!p) return '*';
+  return [...p].sort().join(',');
 }
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
@@ -114,6 +112,7 @@ export interface Defaults {
   processMode?: ProcessMode;
   triggerMode?: TriggerMode;
   tempDir?: string;
+  tempMaxAgeDays?: number;
 }
 
 export interface VoiceTokenConfig {
@@ -149,6 +148,8 @@ export interface Config {
   botOwner?: string;
   voiceServer?: VoiceServerConfig;
   voice?: VoiceConfig;
+  env?: string[];
+  permissions?: Record<string, PermissionDef>;
 }
 
 export function getConfigPath(): string {
@@ -156,6 +157,7 @@ export function getConfigPath(): string {
 }
 
 const DEFAULT_TEMP_DIR = '.claudeway-tmp';
+export const DEFAULT_TEMP_MAX_AGE_DAYS = 90;
 
 export function resolvedTempDir(config: Config): string {
   return resolve(process.cwd(), config.defaults.tempDir ?? DEFAULT_TEMP_DIR);
@@ -189,22 +191,41 @@ export function loadConfig(): Config {
     config.defaults.processMode = 'oneshot';
   }
 
-  // Validate permission strings in allowedUsers
+  // Validate permissions config
+  const validPermissions = new Set(Object.keys(config.permissions ?? {}));
+
+  // Validate permission names in allowedUsers reference defined permissions
   for (const [chId, ch] of Object.entries(config.channels)) {
     if (ch.allowedUsers) {
       for (const entry of ch.allowedUsers) {
         if (typeof entry === 'object') {
           for (const [, perms] of Object.entries(entry)) {
             for (const perm of perms) {
-              if (!VALID_PERMISSIONS.has(perm)) {
+              if (!validPermissions.has(perm)) {
                 throw new Error(
-                  `${configPath}: channel ${chId} has unknown permission "${perm}". Valid: ${[...VALID_PERMISSIONS].join(', ')}`,
+                  `${configPath}: channel ${chId} has unknown permission "${perm}". Defined: ${[...validPermissions].join(', ') || '(none)'}`,
                 );
               }
             }
           }
         }
       }
+    }
+  }
+
+  // Warn about env vars in permissions not present in process.env
+  for (const [permName, def] of Object.entries(config.permissions ?? {})) {
+    for (const v of def.env ?? []) {
+      if (!process.env[v]) {
+        console.warn(`[config] permissions.${permName}.env references "${v}" which is not set`);
+      }
+    }
+  }
+
+  // Warn about global env vars not present in process.env
+  for (const v of config.env ?? []) {
+    if (!process.env[v]) {
+      console.warn(`[config] env references "${v}" which is not set`);
     }
   }
 

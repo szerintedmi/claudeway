@@ -12,6 +12,24 @@ repos:
     url: https://github.com/org/my-project.git
     branch: main  # optional, defaults to repo default branch
 
+# Global env vars — every Claude subprocess gets these (regardless of permissions)
+env: [CLAUDE_CODE_OAUTH_TOKEN]
+
+# Permission definitions — each bundles env vars exposed when the permission is granted.
+# "git" and "jiraWrite" are known names with built-in enforcement:
+#   git: enables git credentials + author identity; without it, git auth is blocked
+#   jiraWrite: enables full MCP config; without it, MCP is read-only
+# Any other name is custom — purely controls env var exposure.
+permissions:
+  git:
+    env: []
+    # env: [GIT_SSH_KEY_PATH]  # uncomment if git access needs an SSH key env var
+  jiraWrite:
+    env: []
+    # env: [JIRA_API_TOKEN, JIRA_URL, JIRA_EMAIL]
+  # langfuse:                  # custom permission example — env-only, no enforcement
+  #   env: [LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_HOST]
+
 channels:
   C0123456789:
     name: my-project
@@ -20,9 +38,9 @@ channels:
     # If omitted, all channel members can interact with the bot (read-only).
     # botOwner always has full access regardless of listing.
     # allowedUsers:
-    #   - "U0ADMIN001": [git, jiraWrite]  # full access (git push + Jira write)
-    #   - "U0DEV00002": [git]              # git access, Jira read-only
-    #   - "U0VIEW0003"                     # read-only (default)
+    #   - "U0ADMIN001": [git, jiraWrite]  # git + Jira write + their env vars
+    #   - "U0DEV00002": [git]              # git only, Jira read-only
+    #   - "U0VIEW0003"                     # read-only, global env only
 
   # Voice channel (used by the WebSocket voice adapter)
   # The systemPrompt should be optimized for spoken output (TTS via Deepgram Aura-2).
@@ -104,6 +122,7 @@ defaults:
       the `markitdown` skill BEFORE telling the user you can't process it. Only report
       failure if the conversion itself fails.
   tempDir: .claudeway-tmp # Temp directory for per-request file attachments (relative to project root)
+  # tempMaxAgeDays: 90  # Delete temp files older than N days on startup (default: 90, 0 to disable)
   timeoutMs: 300000
   processMode: oneshot # oneshot = new session per message; persistent = reuse session
   responseMode: batch # batch | stream-update | stream-native

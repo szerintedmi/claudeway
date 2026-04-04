@@ -3,10 +3,10 @@ import {
   extractAllowedUserIds,
   resolveUserPermissions,
   permissionKey,
+  fullPermissions,
+  READ_ONLY_PERMISSIONS,
   type AllowedUserEntry,
   type Config,
-  FULL_PERMISSIONS,
-  READ_ONLY_PERMISSIONS,
 } from '../config.js';
 import { isUserAllowed } from '../adapters/slack/utils.js';
 import { buildAccessRestrictions, appendAccessRestrictions } from '../prompt.js';
@@ -15,32 +15,32 @@ describe('parseAllowedUsers', () => {
   it('handles plain string entries as read-only', () => {
     const entries: AllowedUserEntry[] = ['U001', 'U002'];
     const result = parseAllowedUsers(entries);
-    expect(result.get('U001')).toEqual({ git: false, jiraWrite: false });
-    expect(result.get('U002')).toEqual({ git: false, jiraWrite: false });
+    expect(result.get('U001')).toEqual(new Set());
+    expect(result.get('U002')).toEqual(new Set());
   });
 
   it('handles object entries with permissions', () => {
     const entries: AllowedUserEntry[] = [{ U001: ['git', 'jiraWrite'] }];
     const result = parseAllowedUsers(entries);
-    expect(result.get('U001')).toEqual({ git: true, jiraWrite: true });
+    expect(result.get('U001')).toEqual(new Set(['git', 'jiraWrite']));
   });
 
   it('handles git-only permission', () => {
     const entries: AllowedUserEntry[] = [{ U001: ['git'] }];
     const result = parseAllowedUsers(entries);
-    expect(result.get('U001')).toEqual({ git: true, jiraWrite: false });
+    expect(result.get('U001')).toEqual(new Set(['git']));
   });
 
   it('handles jiraWrite-only permission', () => {
     const entries: AllowedUserEntry[] = [{ U001: ['jiraWrite'] }];
     const result = parseAllowedUsers(entries);
-    expect(result.get('U001')).toEqual({ git: false, jiraWrite: true });
+    expect(result.get('U001')).toEqual(new Set(['jiraWrite']));
   });
 
   it('handles empty permission array as read-only', () => {
     const entries: AllowedUserEntry[] = [{ U001: [] }];
     const result = parseAllowedUsers(entries);
-    expect(result.get('U001')).toEqual({ git: false, jiraWrite: false });
+    expect(result.get('U001')).toEqual(new Set());
   });
 
   it('handles mixed entries', () => {
@@ -52,10 +52,16 @@ describe('parseAllowedUsers', () => {
     ];
     const result = parseAllowedUsers(entries);
     expect(result.size).toBe(4);
-    expect(result.get('U001')).toEqual({ git: true, jiraWrite: true });
-    expect(result.get('U002')).toEqual({ git: true, jiraWrite: false });
-    expect(result.get('U003')).toEqual({ git: false, jiraWrite: false });
-    expect(result.get('U004')).toEqual({ git: false, jiraWrite: false });
+    expect(result.get('U001')).toEqual(new Set(['git', 'jiraWrite']));
+    expect(result.get('U002')).toEqual(new Set(['git']));
+    expect(result.get('U003')).toEqual(new Set());
+    expect(result.get('U004')).toEqual(new Set());
+  });
+
+  it('handles custom permissions', () => {
+    const entries: AllowedUserEntry[] = [{ U001: ['git', 'langfuse'] }];
+    const result = parseAllowedUsers(entries);
+    expect(result.get('U001')).toEqual(new Set(['git', 'langfuse']));
   });
 
   it('handles empty array', () => {
@@ -95,19 +101,22 @@ describe('resolveUserPermissions', () => {
     },
     defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
     botOwner: 'U_OWNER',
+    permissions: {
+      git: { env: [] },
+      jiraWrite: { env: [] },
+    },
   };
 
   it('returns full permissions for botOwner', () => {
-    expect(resolveUserPermissions(config, 'C001', 'U_OWNER')).toEqual(FULL_PERMISSIONS);
+    expect(resolveUserPermissions(config, 'C001', 'U_OWNER')).toEqual(fullPermissions(config));
   });
 
   it('returns full permissions for botOwner even in open channels', () => {
-    expect(resolveUserPermissions(config, 'C002', 'U_OWNER')).toEqual(FULL_PERMISSIONS);
+    expect(resolveUserPermissions(config, 'C002', 'U_OWNER')).toEqual(fullPermissions(config));
   });
 
   it('returns full permissions for botOwner when not listed in allowedUsers', () => {
-    // U_OWNER is not listed in C001's allowedUsers — defaults to full
-    expect(resolveUserPermissions(config, 'C001', 'U_OWNER')).toEqual(FULL_PERMISSIONS);
+    expect(resolveUserPermissions(config, 'C001', 'U_OWNER')).toEqual(fullPermissions(config));
   });
 
   it('uses explicit permissions when botOwner is listed in allowedUsers', () => {
@@ -121,22 +130,19 @@ describe('resolveUserPermissions', () => {
       },
       defaults: config.defaults,
       botOwner: 'U_OWNER',
+      permissions: config.permissions,
     };
-    expect(resolveUserPermissions(cfg, 'C003', 'U_OWNER')).toEqual({ git: true, jiraWrite: false });
+    expect(resolveUserPermissions(cfg, 'C003', 'U_OWNER')).toEqual(new Set(['git']));
   });
 
   it('returns configured permissions for admin user', () => {
-    expect(resolveUserPermissions(config, 'C001', 'U_ADMIN')).toEqual({
-      git: true,
-      jiraWrite: true,
-    });
+    expect(resolveUserPermissions(config, 'C001', 'U_ADMIN')).toEqual(
+      new Set(['git', 'jiraWrite']),
+    );
   });
 
   it('returns git-only for dev user', () => {
-    expect(resolveUserPermissions(config, 'C001', 'U_DEV')).toEqual({
-      git: true,
-      jiraWrite: false,
-    });
+    expect(resolveUserPermissions(config, 'C001', 'U_DEV')).toEqual(new Set(['git']));
   });
 
   it('returns read-only for view-only user', () => {
@@ -158,23 +164,27 @@ describe('resolveUserPermissions', () => {
 
 describe('permissionKey', () => {
   it('returns empty string for read-only', () => {
-    expect(permissionKey({ git: false, jiraWrite: false })).toBe('');
+    expect(permissionKey(new Set())).toBe('');
   });
 
   it('returns git for git-only', () => {
-    expect(permissionKey({ git: true, jiraWrite: false })).toBe('git');
+    expect(permissionKey(new Set(['git']))).toBe('git');
   });
 
   it('returns jiraWrite for jiraWrite-only', () => {
-    expect(permissionKey({ git: false, jiraWrite: true })).toBe('jiraWrite');
+    expect(permissionKey(new Set(['jiraWrite']))).toBe('jiraWrite');
   });
 
-  it('returns git,jiraWrite for full permissions', () => {
-    expect(permissionKey({ git: true, jiraWrite: true })).toBe('git,jiraWrite');
+  it('returns sorted permissions for full', () => {
+    expect(permissionKey(new Set(['jiraWrite', 'git']))).toBe('git,jiraWrite');
   });
 
-  it('returns git,jiraWrite for undefined (full access default)', () => {
-    expect(permissionKey(undefined)).toBe('git,jiraWrite');
+  it('returns * for undefined (full access default)', () => {
+    expect(permissionKey(undefined)).toBe('*');
+  });
+
+  it('handles custom permissions', () => {
+    expect(permissionKey(new Set(['git', 'langfuse']))).toBe('git,langfuse');
   });
 });
 
@@ -206,35 +216,35 @@ describe('buildAccessRestrictions', () => {
   const scratchDir = '/tmp/scratch/C001';
 
   it('returns empty string for full permissions', () => {
-    expect(buildAccessRestrictions({ git: true, jiraWrite: true }, scratchDir)).toBe('');
+    expect(buildAccessRestrictions(new Set(['git', 'jiraWrite']), scratchDir)).toBe('');
   });
 
-  it('includes git restrictions when git is false', () => {
-    const result = buildAccessRestrictions({ git: false, jiraWrite: true }, scratchDir);
+  it('includes git restrictions when git is missing', () => {
+    const result = buildAccessRestrictions(new Set(['jiraWrite']), scratchDir);
     expect(result).toContain('Do NOT modify, create, or delete any files');
     expect(result).toContain('git commit');
     expect(result).not.toContain('Do NOT create, update, or delete Jira');
   });
 
-  it('includes jira restrictions when jiraWrite is false', () => {
-    const result = buildAccessRestrictions({ git: true, jiraWrite: false }, scratchDir);
+  it('includes jira restrictions when jiraWrite is missing', () => {
+    const result = buildAccessRestrictions(new Set(['git']), scratchDir);
     expect(result).toContain('Do NOT create, update, or delete Jira');
     expect(result).not.toContain('Do NOT modify, create, or delete any files');
   });
 
   it('includes both restrictions for read-only', () => {
-    const result = buildAccessRestrictions({ git: false, jiraWrite: false }, scratchDir);
+    const result = buildAccessRestrictions(new Set(), scratchDir);
     expect(result).toContain('Do NOT modify, create, or delete any files');
     expect(result).toContain('Jira');
   });
 
   it('includes scratch dir path', () => {
-    const result = buildAccessRestrictions({ git: false, jiraWrite: false }, scratchDir);
+    const result = buildAccessRestrictions(new Set(), scratchDir);
     expect(result).toContain(scratchDir);
   });
 
   it('includes READ-ONLY mode header', () => {
-    const result = buildAccessRestrictions({ git: false, jiraWrite: false }, scratchDir);
+    const result = buildAccessRestrictions(new Set(), scratchDir);
     expect(result).toContain('READ-ONLY mode');
   });
 });
@@ -242,18 +252,14 @@ describe('buildAccessRestrictions', () => {
 describe('appendAccessRestrictions', () => {
   it('returns original prompt for full permissions', () => {
     const prompt = 'You are a helpful assistant.';
-    expect(appendAccessRestrictions(prompt, { git: true, jiraWrite: true }, '/tmp/scratch')).toBe(
+    expect(appendAccessRestrictions(prompt, new Set(['git', 'jiraWrite']), '/tmp/scratch')).toBe(
       prompt,
     );
   });
 
   it('appends restrictions for read-only', () => {
     const prompt = 'You are a helpful assistant.';
-    const result = appendAccessRestrictions(
-      prompt,
-      { git: false, jiraWrite: false },
-      '/tmp/scratch',
-    );
+    const result = appendAccessRestrictions(prompt, new Set(), '/tmp/scratch');
     expect(result).toContain(prompt);
     expect(result).toContain('READ-ONLY mode');
   });

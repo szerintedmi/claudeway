@@ -200,7 +200,9 @@ Docker provides filesystem isolation — Claude CLI can only access repos define
    docker compose up -d
    ```
 
-Session state, repos, queue, and files are persisted in named Docker volumes across restarts. Slack tokens are stripped from the environment before spawning the Claude CLI.
+Session state, repos, queue, and files are persisted in named Docker volumes across restarts.
+
+**Env var security:** `docker-compose.yml` lists env vars explicitly (what enters the container). The `env` and `permissions` sections in `config.yaml` then control which of those reach the Claude subprocess (see [Permissions](#permissions) below).
 
 ## Config Options
 
@@ -213,6 +215,9 @@ Session state, repos, queue, and files are persisted in named Docker volumes acr
 | `channels` | Channel-to-repo mappings | required |
 | `defaults` | Default model, prompt, timeout, and response mode | required |
 | `defaults.tempDir` | Temp directory for per-request file attachments (relative to project root) | `.claudeway-tmp` |
+| `defaults.tempMaxAgeDays` | Delete temp files older than N days on startup (0 to disable) | `90` |
+| `env` | Global env var names for Claude subprocesses | none (baseline only) |
+| `permissions` | Permission definitions with env var bundles (see below) | none |
 
 Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutdown, and you can send magic commands (`!config`, `!ps`, etc.) in that DM as an admin console.
 
@@ -229,7 +234,22 @@ Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutd
 | `processMode` | How the Claude CLI process is managed (see below) | from defaults |
 | `triggerMode` | When to respond: `all` or `mention` (see below) | `all` |
 | `effort` | Claude CLI thinking effort (`low`, `medium`, `high`) | from defaults |
-| `allowedUsers` | Slack user IDs allowed to interact with the bot in this channel | everyone |
+| `allowedUsers` | Slack user IDs allowed to interact with the bot in this channel. Permissions also gate env var exposure. | everyone |
+
+### Permissions
+
+Each permission is defined in the top-level `permissions` section and bundles env vars that are exposed when the permission is granted. `git` and `jiraWrite` are known names with built-in enforcement; any other name is custom (env-var-only).
+
+| Field | Description |
+|-------|-------------|
+| `env` | Global env var names — every Claude subprocess gets these |
+| `permissions.<name>.env` | Env var names exposed when a user has this permission |
+
+**Built-in enforcement** for known permission names:
+- `git` — enables git credentials + author identity; without it, git auth is blocked
+- `jiraWrite` — enables full MCP config; without it, MCP is read-only
+
+See `config.example.yaml` for a full example.
 
 ### Trigger Modes
 

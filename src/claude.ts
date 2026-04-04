@@ -5,6 +5,7 @@ import { v5 as uuidv5 } from 'uuid';
 import {
   getConfigPath,
   permissionKey as permissionKeyStr,
+  type Config,
   type UserPermissions,
 } from './config.js';
 import { getMcpConfigPath } from './mcp.js';
@@ -24,7 +25,9 @@ export interface ClaudeOptions {
   filePaths?: string[];
   tempDir?: string;
   tempBaseDir?: string;
-  userPermissions?: UserPermissions;
+  config: Config;
+  userPermissions: UserPermissions;
+  userId: string;
   userName?: string;
   channelName?: string;
   scratchDir?: string;
@@ -85,6 +88,7 @@ interface PersistentProcessEntry {
   channelId: string;
   sessionId: string;
   permissionKey: string;
+  identityKey: string;
   startedAt: Date;
   lastMessage: string;
   messageCount: number;
@@ -412,7 +416,7 @@ function buildPermissionsEnv(options: ClaudeOptions): Record<string, string> {
   }
 
   // Git credential stripping for users without git permission
-  if (options.userPermissions && !options.userPermissions.git) {
+  if (options.userPermissions && !options.userPermissions.has('git')) {
     Object.assign(env, buildGitReadOnlyEnv());
   }
 
@@ -424,14 +428,100 @@ function buildPermissionsEnv(options: ClaudeOptions): Record<string, string> {
   return env;
 }
 
-// TODO: Make secret stripping adapter-configurable when adding non-Slack adapters
-function spawnClaudeProcess(args: string[], cwd: string, extraEnv?: Record<string, string>) {
-  const env = { ...process.env, ...extraEnv };
-  delete env.CLAUDECODE;
-  delete env.SLACK_BOT_TOKEN;
-  delete env.SLACK_APP_TOKEN;
+/** Env vars always passed through to Claude subprocess (safe, non-secret). */
+const BASELINE_ENV_VARS = new Set([
+  'HOME',
+  'USER',
+  'PATH',
+  'SHELL',
+  'LANG',
+  'LC_ALL',
+  'TERM',
+  'TMPDIR',
+  'NODE_PATH',
+  'XDG_CONFIG_HOME',
+  'XDG_DATA_HOME',
+]);
+
+interface AllowedEnvContext {
+  config: Config;
+  channelId: string;
+  userPermissions: UserPermissions;
+  /** Explicitly injected vars (git author, git read-only, scratch/temp dirs) */
+  extraEnv?: Record<string, string>;
+}
+
+/**
+ * Build the complete env for a Claude subprocess using an allowlist approach.
+ * Only baseline vars + global env + permission-linked env + injected vars are included.
+ */
+export function buildAllowedEnv(ctx: AllowedEnvContext): Record<string, string> {
+  const env: Record<string, string> = {};
+
+  // 1. Baseline vars from process.env
+  for (const key of BASELINE_ENV_VARS) {
+    if (process.env[key]) env[key] = process.env[key]!;
+  }
+
+  // 2. Global env vars
+  for (const varName of ctx.config.env ?? []) {
+    if (process.env[varName]) env[varName] = process.env[varName]!;
+  }
+
+  // 3. Permission-linked env vars
+  for (const permName of ctx.userPermissions) {
+    for (const varName of ctx.config.permissions?.[permName]?.env ?? []) {
+      if (process.env[varName]) env[varName] = process.env[varName]!;
+    }
+  }
+
+  // 4. Explicit injected vars (git author, git read-only enforcement, CLAUDEWAY_* spawn vars)
+  if (ctx.extraEnv) Object.assign(env, ctx.extraEnv);
+
+  // 5. HOME fallback
   if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
 
+  return env;
+}
+
+/**
+ * Compute the resolved env var names that would be exposed to Claude,
+ * without including secret values. Used for restart key comparison.
+ */
+function resolveExposedEnvVarNames(
+  config: Config,
+  _channelId: string,
+  permissions: UserPermissions,
+): string[] {
+  const vars = new Set<string>();
+
+  // Global env
+  for (const v of config.env ?? []) vars.add(v);
+
+  // Permission-linked env
+  for (const permName of permissions) {
+    for (const v of config.permissions?.[permName]?.env ?? []) vars.add(v);
+  }
+
+  return [...vars].sort();
+}
+
+/**
+ * Compute a composite identity key for persistent process restart comparison.
+ * Includes user identity, permissions, and resolved env var names.
+ */
+export function processIdentityKey(
+  userId: string,
+  permissions: UserPermissions,
+  config: Config,
+  channelId: string,
+): string {
+  const permPart = permissionKeyStr(permissions);
+  const envPart = resolveExposedEnvVarNames(config, channelId, permissions).join(',');
+  return `${userId}|${permPart}|${envPart}`;
+}
+
+function spawnClaudeProcess(args: string[], cwd: string, env: Record<string, string>) {
   return spawn('claude', args, {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -447,10 +537,10 @@ function runClaudeProcess(
   sessionId: string,
   message: string,
   regKey: string,
-  extraEnv?: Record<string, string>,
+  env: Record<string, string>,
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
-    const proc = spawnClaudeProcess(args, cwd, extraEnv);
+    const proc = spawnClaudeProcess(args, cwd, env);
 
     processRegistry.set(regKey, {
       proc,
@@ -542,11 +632,11 @@ function runClaudeStreamingProcess(
   message: string,
   regKey: string,
   onToolEvent?: (event: ToolEventPayload) => void,
-  extraEnv?: Record<string, string>,
+  env?: Record<string, string>,
   onProcessSpawned?: (kill: () => void) => void,
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
-    const proc = spawnClaudeProcess(args, cwd, extraEnv);
+    const proc = spawnClaudeProcess(args, cwd, env ?? {});
 
     onProcessSpawned?.(() => {
       try {
@@ -772,7 +862,11 @@ function makeFreshArgs(args: string[], sessionId: string): string[] {
   return args.map((a, i) => (a === '--resume' && args[i + 1] === sessionId ? '--session-id' : a));
 }
 
-function buildExtraEnv(options: ClaudeOptions): Record<string, string> | undefined {
+/**
+ * Build injected env vars (temp dirs, permissions) — these go through extraEnv,
+ * not from process.env passthrough.
+ */
+function buildInjectedEnv(options: ClaudeOptions): Record<string, string> {
   const env: Record<string, string> = {};
 
   if (options.tempDir) {
@@ -782,12 +876,25 @@ function buildExtraEnv(options: ClaudeOptions): Record<string, string> | undefin
 
   Object.assign(env, buildPermissionsEnv(options));
 
-  return Object.keys(env).length > 0 ? env : undefined;
+  return env;
+}
+
+/**
+ * Build the complete env for a Claude subprocess using the allowlist approach.
+ * Only baseline vars + configured secret groups + explicit injected vars are included.
+ */
+function buildSpawnEnv(options: ClaudeOptions): Record<string, string> {
+  return buildAllowedEnv({
+    config: options.config,
+    channelId: options.channelId,
+    userPermissions: options.userPermissions,
+    extraEnv: buildInjectedEnv(options),
+  });
 }
 
 export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
   const { args, sessionId, cwd, resuming } = buildClaudeArgs(options, 'json');
-  const permEnv = buildExtraEnv(options);
+  const spawnEnv = buildSpawnEnv(options);
   const regKey = registryKey(options.channelId, options.threadTs);
 
   console.log(
@@ -803,7 +910,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
       sessionId,
       options.message,
       regKey,
-      permEnv,
+      spawnEnv,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -820,7 +927,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
         sessionId,
         options.message,
         regKey,
-        permEnv,
+        spawnEnv,
       );
     }
     throw err;
@@ -829,7 +936,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
 
 export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promise<ClaudeResult> {
   const { args, sessionId, cwd, resuming } = buildClaudeArgs(options, 'stream-json');
-  const permEnv = buildExtraEnv(options);
+  const spawnEnv = buildSpawnEnv(options);
   const regKey = registryKey(options.channelId, options.threadTs);
 
   console.log(
@@ -847,7 +954,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
       options.message,
       regKey,
       options.onToolEvent,
-      permEnv,
+      spawnEnv,
       options.onProcessSpawned,
     );
   } catch (err) {
@@ -867,7 +974,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
         options.message,
         regKey,
         options.onToolEvent,
-        permEnv,
+        spawnEnv,
         options.onProcessSpawned,
       );
     }
@@ -930,18 +1037,20 @@ function createPersistentProcess(
     `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} persistent session ${sessionId} [${permissionKeyStr(options.userPermissions) || 'read-only'}]`,
   );
 
-  const env = { ...process.env };
-  delete env.CLAUDECODE;
-  delete env.SLACK_BOT_TOKEN;
-  delete env.SLACK_APP_TOKEN;
-  if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
-  // Persistent mode: inject channel ID + temp base dir for pointer file lookup, and scripts PATH
-  env.CLAUDEWAY_CHANNEL_ID = options.channelId;
+  // Build injected vars specific to persistent mode
+  const injected = buildInjectedEnv(options);
+  injected.CLAUDEWAY_CHANNEL_ID = options.channelId;
   if (options.tempBaseDir) {
-    env.CLAUDEWAY_TEMP_BASE = options.tempBaseDir;
+    injected.CLAUDEWAY_TEMP_BASE = options.tempBaseDir;
   }
-  // Inject permission-related env vars (git author, credential stripping, scratch dir)
-  Object.assign(env, buildPermissionsEnv(options));
+
+  // Build complete env via allowlist
+  const env = buildAllowedEnv({
+    config: options.config,
+    channelId: options.channelId,
+    userPermissions: options.userPermissions,
+    extraEnv: injected,
+  });
 
   const proc = spawn('claude', args, {
     cwd,
@@ -949,11 +1058,19 @@ function createPersistentProcess(
     env,
   });
 
+  const idKey = processIdentityKey(
+    options.userId,
+    options.userPermissions,
+    options.config,
+    options.channelId,
+  );
+
   const entry: PersistentProcessEntry = {
     proc,
     channelId: options.channelId,
     sessionId,
     permissionKey: permissionKeyStr(options.userPermissions),
+    identityKey: idKey,
     startedAt: new Date(),
     lastMessage: '',
     messageCount: 0,
@@ -1145,12 +1262,15 @@ export async function runClaudePersistentStreaming(
 
   let entry = persistentRegistry.get(regKey);
 
-  // Kill and respawn if user's permission set differs from the running process
-  const incomingKey = permissionKeyStr(options.userPermissions);
-  if (entry && !entry.proc.killed && entry.permissionKey !== incomingKey) {
-    console.log(
-      `[${channelId}] Permission set changed (${entry.permissionKey || 'read-only'} → ${incomingKey || 'read-only'}) — respawning persistent process`,
-    );
+  // Kill and respawn if user identity, permissions, or env exposure changed
+  const incomingIdentityKey = processIdentityKey(
+    options.userId,
+    options.userPermissions,
+    options.config,
+    channelId,
+  );
+  if (entry && !entry.proc.killed && entry.identityKey !== incomingIdentityKey) {
+    console.log(`[${channelId}] Process identity changed — respawning persistent process`);
     // Clear currentTurn before killing to prevent the close handler from
     // rejecting a stale turn's promise with a spurious error
     if (entry.currentTurn) {

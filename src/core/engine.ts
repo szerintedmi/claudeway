@@ -53,7 +53,9 @@ function releaseProcessSlot(): void {
 }
 
 interface PermissionContext {
+  config: import('../config.js').Config;
   userPermissions: UserPermissions;
+  userId: string;
   userName?: string;
   channelName: string;
   scratchDir: string;
@@ -124,7 +126,9 @@ export async function processQueuedMessage(
 
   // Permission context passed through to Claude spawn
   const permCtx: PermissionContext = {
+    config,
     userPermissions: permissions,
+    userId: queued.userId,
     userName: queued.userName,
     channelName: channelConfig.name,
     scratchDir,

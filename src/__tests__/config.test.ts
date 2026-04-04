@@ -231,6 +231,9 @@ channels:
     folder: /test
     allowedUsers:
       - "U001": [git, jireWrite]
+permissions:
+  git:
+    env: []
 defaults:
   model: opus
   systemPrompt: test
@@ -250,6 +253,11 @@ channels:
     allowedUsers:
       - "U001": [git, jiraWrite]
       - "U002"
+permissions:
+  git:
+    env: []
+  jiraWrite:
+    env: []
 defaults:
   model: opus
   systemPrompt: test
@@ -258,6 +266,50 @@ defaults:
 `;
     writeFileSync(join(tmpDir, 'config.yaml'), yaml);
     expect(() => loadConfig()).not.toThrow();
+  });
+
+  it('accepts custom permissions in allowedUsers', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+    allowedUsers:
+      - "U001": [git, langfuse]
+permissions:
+  git:
+    env: []
+  langfuse:
+    env: [LANGFUSE_KEY]
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    expect(() => loadConfig()).not.toThrow();
+  });
+
+  it('rejects permission not defined in permissions section', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+    allowedUsers:
+      - "U001": [git, undefined_perm]
+permissions:
+  git:
+    env: []
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    expect(() => loadConfig()).toThrow('unknown permission "undefined_perm"');
   });
 });
 
