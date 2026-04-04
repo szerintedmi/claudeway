@@ -45,22 +45,26 @@ Claudeway is a multi-channel Claude Code CLI gateway. Messages arrive via Slack 
 - One message processed at a time per channel (serialized via `channelBusy` set)
 - Bot does NOT programmatically join Slack channels — requires manual `/invite` + config entry
 - Magic commands (`!kill`, `!killall`, `!nudge`, `!config`, `!ps`) have authorization checks via `isMagicCommandAllowed()` — `botOwner` for global commands, channel `allowedUsers` for channel-scoped commands
+- Subprocess env vars are allowlisted via `permissions` config — `buildAllowedEnv()` in `src/claude.ts`. Only baseline vars (`HOME`, `PATH`, etc.) + global `env` + permission-linked env vars + explicitly injected vars reach the subprocess.
 
 ## User Roles & Permissions
 
 Every user is **read-only by default**. Permissions are additive. The `botOwner` has full access implicitly unless explicitly listed in `allowedUsers` (useful for testing).
 
-- `allowedUsers` supports mixed entries: plain string (read-only) or `"userId": [git, jiraWrite]`
-- `git` — enables git push/commit and file modification
-- `jiraWrite` — uses full MCP config instead of read-only MCP config
+- `allowedUsers` supports mixed entries: plain string (read-only) or `"userId": [git, jiraWrite, ...]`
+- Permission names are defined in `config.permissions` — each bundles env vars exposed to Claude
+- `git` — known name: enables git push/commit, file modification, and git credential access
+- `jiraWrite` — known name: uses full MCP config instead of read-only MCP config
+- Custom permissions (e.g., `langfuse`) — env-var-only, no built-in enforcement
 
 Enforcement layers:
 1. **System prompt injection** — read-only restrictions appended per user (soft guard)
 2. **Git credential stripping** — env vars disable git auth for non-`git` users (hard)
 3. **Git author identity** — commits attributed to Slack user profile (all users)
 4. **MCP read-only config** — `mcp-readonly.json` auto-generated with `READ_ONLY_MODE: "true"` (hard)
+5. **Env var allowlist** — `permissions.<name>.env` gates which env vars (API keys, tokens) reach the subprocess based on user permissions
 
-In persistent mode, the process is killed and respawned with `--resume` when the incoming user's permission set differs from the running process.
+In persistent mode, the process is killed and respawned with `--resume` when the incoming user's identity, permission set, or resolved env var exposure differs from the running process.
 
 ## Branch Strategy (Fork)
 

@@ -72,19 +72,19 @@ export function buildPrompt(
  * Returns '' if the user has full access (both git and jiraWrite).
  */
 export function buildAccessRestrictions(permissions: UserPermissions, scratchDir: string): string {
-  if (permissions.git && permissions.jiraWrite) return '';
+  if (permissions.has('git') && permissions.has('jiraWrite')) return '';
 
   const lines: string[] = ['## Access restrictions for this user', ''];
   lines.push('You are operating in READ-ONLY mode for this user.');
 
-  if (!permissions.git) {
+  if (!permissions.has('git')) {
     lines.push('- Do NOT modify, create, or delete any files in the repository');
     lines.push(
       '- Do NOT run git commit, git push, git checkout, git stash, or any git commands that modify state',
     );
   }
 
-  if (!permissions.jiraWrite) {
+  if (!permissions.has('jiraWrite')) {
     lines.push('- Do NOT create, update, or delete Jira tickets or Confluence pages');
   }
 

@@ -47,7 +47,7 @@ export function getMcpConfigPath(
   permissions: UserPermissions | undefined,
   cwd: string,
 ): string | null {
-  const jiraWrite = permissions?.jiraWrite ?? true;
+  const jiraWrite = permissions?.has('jiraWrite') ?? true;
   const fullPath = resolve(cwd, 'mcp.json');
   const readonlyPath = resolve(cwd, 'mcp-readonly.json');
 
