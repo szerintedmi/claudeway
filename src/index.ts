@@ -1,40 +1,14 @@
-import { writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync, statSync } from 'fs';
+import { writeFileSync, readFileSync, unlinkSync, existsSync, statSync } from 'fs';
 import { execSync } from 'child_process';
-import { resolve, join } from 'path';
-import { loadConfig } from './config.js';
+import { resolve } from 'path';
+import { loadConfig, resolvedTempDir, DEFAULT_TEMP_MAX_AGE_DAYS } from './config.js';
 import { ensureQueueDir } from './queue.js';
 import { syncRepos } from './sync-repos.js';
 import { generateReadOnlyMcpConfig } from './mcp.js';
 import { FILE_TEMP_BASE } from './adapters/slack/files.js';
+import { cleanupStaleTempFiles } from './tempdir.js';
 
 // --- Shared startup utilities ---
-
-function cleanupOldTempFiles(): void {
-  if (!existsSync(FILE_TEMP_BASE)) return;
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  try {
-    for (const channelDir of readdirSync(FILE_TEMP_BASE)) {
-      const channelPath = join(FILE_TEMP_BASE, channelDir);
-      try {
-        for (const name of readdirSync(channelPath)) {
-          const filepath = join(channelPath, name);
-          try {
-            if (statSync(filepath).mtimeMs < cutoff) {
-              unlinkSync(filepath);
-              console.log(`[cleanup] Removed old temp file: ${channelDir}/${name}`);
-            }
-          } catch {
-            // ignore per-file errors
-          }
-        }
-      } catch {
-        // not a directory or read failed, skip
-      }
-    }
-  } catch {
-    // base dir read failed, ignore
-  }
-}
 
 const PIDFILE = resolve(process.cwd(), 'claudeway.pid');
 
@@ -94,7 +68,11 @@ function shutdown(): void {
 
 acquireLock();
 killOrphanProcesses();
-cleanupOldTempFiles();
+
+const config = loadConfig();
+const tempMaxAgeDays = config.defaults.tempMaxAgeDays ?? DEFAULT_TEMP_MAX_AGE_DAYS;
+cleanupStaleTempFiles(tempMaxAgeDays, resolvedTempDir(config), FILE_TEMP_BASE);
+
 process.on('exit', releaseLock);
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
@@ -127,7 +105,6 @@ if (existsSync(mcpPath) && statSync(mcpPath).isFile()) {
 // --- Conditional adapter boot ---
 
 const hasSlack = !!(process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN);
-const config = loadConfig();
 const voiceEnabled = config.voiceServer?.enabled;
 
 if (!hasSlack && !voiceEnabled) {

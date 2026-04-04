@@ -102,11 +102,13 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
     }
 
     // Handle magic commands (!ps, !kill, !killall) — bypass queue and Claude processing
+    // Strip bot mention prefix so commands work in mention-trigger channels (e.g. "@bot !nudge")
+    const magicText = msg.text?.replace(new RegExp(`^\\s*<@${botUserId}>\\s*`), '') ?? '';
     if (
-      msg.text &&
+      magicText &&
       msg.user &&
       (await handleMagicCommand(
-        msg.text,
+        magicText,
         msg.channel,
         msg.thread_ts ?? msg.ts,
         msg.ts,
