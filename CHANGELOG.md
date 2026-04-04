@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.25.0] - 2026-04-04
+
+### Added
+- **Unified permissions model**: Permission names are now config-defined in `permissions` section — each bundles env vars exposed to the Claude subprocess. `git` and `jiraWrite` are known names with built-in enforcement; custom names (e.g. `langfuse`) are env-var-only
+- **Env var allowlist**: Claude subprocesses only see baseline vars (`HOME`, `PATH`, etc.) + global `env` + permission-linked env vars. Replaces the brittle 3-item denylist
+- **Persistent process identity key**: Process restart comparison now includes user identity + resolved env exposure, fixing a bug where different users with the same permissions shared a process (leaking git author identity)
+
+### Changed
+- `UserPermissions` changed from `{ git: boolean; jiraWrite: boolean }` to `Set<string>` — permission names come from config, not a hardcoded enum
+- `docker-compose.yml` uses explicit `environment:` entries instead of blanket `env_file: .env`
+
+## [0.24.0] - 2026-04-04
+
+### Added
+- **Configurable temp file cleanup**: `tempMaxAgeDays` config option (default 90, 0 to disable) replaces hardcoded 24h cleanup. Covers Slack download files, orphaned request dirs, pointer files, and scratch dirs
+
+### Fixed
+- **Magic commands in mention mode**: `@bot !nudge` and similar commands now work in mention-trigger channels — bot mention prefix is stripped before matching command pattern
+
+## [0.23.2] - 2026-03-31
+
+### Added
+- **Meta DAT SDK integration**: Reflection-based Meta Wearables DAT SDK (MWDAT v0.5.0) integration for glasses discovery — app compiles and runs with or without SDK on classpath
+- **Volume-key push-to-talk**: Hardware volume-up key mapped to PTT toggle on Android, since DAT SDK does not expose touchpad gesture events
+
+### Fixed
+- **Slack file attachment previews**: Add `snippet_type` to `files.uploadV2` calls so text-based files (`.md`, `.py`, etc.) render with inline preview instead of showing as binary downloads
+
+## [0.23.1] - 2026-03-29
+
+### Added
+- **Android companion app tests**: 105 tests across 7 classes (protocol snapshots, AudioRouter, AudioRecorder, ConversationSessionController, VoiceViewModel)
+- **Glasses tap wiring**: GlassesManager touchpad tap events wired into VoiceViewModel push-to-talk toggle
+
 ## [0.23.0] - 2026-03-26
 
 ### Added
