@@ -845,13 +845,16 @@ function buildClaudeArgs(
     ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId]),
     '--append-system-prompt',
     prompt,
-    '--dangerously-skip-permissions',
   ];
 
+  // --mcp-config is variadic (<configs...>) — it greedily consumes every
+  // following non-flag arg. Insert it before another flag so the variadic
+  // terminates and the trailing positional user message isn't slurped in.
   const mcpConfigPath = getMcpConfigPath(options.userPermissions, process.cwd());
   if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath);
   }
+  args.push('--dangerously-skip-permissions');
 
   args.push(buildMessageWithFiles(message, options.filePaths));
 
@@ -1015,13 +1018,15 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
     ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId]),
     '--append-system-prompt',
     prompt,
-    '--dangerously-skip-permissions',
   ];
 
+  // See note on the batch path: --mcp-config is variadic, so put another flag
+  // after it to terminate the variadic.
   const mcpConfigPath = getMcpConfigPath(options.userPermissions, process.cwd());
   if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath);
   }
+  args.push('--dangerously-skip-permissions');
 
   return { args, sessionId, cwd, resuming };
 }
