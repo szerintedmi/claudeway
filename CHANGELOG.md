@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.25.1] - 2026-05-08
+
+### Fixed
+- **MCP config not loading on recent Claude Code CLI**: Reordered `--mcp-config` to sit before `--dangerously-skip-permissions` instead of immediately before the positional user message. The CLI's `--mcp-config <configs...>` is variadic and was greedily consuming the trailing user message as a second config path, causing `Invalid MCP configuration: Failed to read file: Error: ENAMETOOLONG`. Reproduced on `claude` 2.1.123
+
 ## [0.25.0] - 2026-04-04
 
 ### Added
