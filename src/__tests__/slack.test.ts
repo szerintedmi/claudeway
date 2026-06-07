@@ -1,11 +1,19 @@
+import { describe, it, expect, jest, beforeEach } from 'bun:test';
 import {
   markdownToSlackMrkdwn,
   splitMessage,
   FILE_THRESHOLD,
+  STREAM_NATIVE_FLUSH_INTERVAL_MS,
+  STREAM_NATIVE_KEEPALIVE_MS,
+  STREAM_KEEPALIVE_TOKEN,
 } from '../adapters/slack/formatting.js';
 import { isUserAllowed } from '../adapters/slack/utils.js';
 import { formatDuration, formatTimeout, formatChannelConfig } from '../adapters/slack/commands.js';
-import { getSnippetType, SlackChannelResponder } from '../adapters/slack/responder.js';
+import {
+  getSnippetType,
+  SlackChannelResponder,
+  __resetAppendRateLimiterForTest,
+} from '../adapters/slack/responder.js';
 import type { WebClient } from '@slack/web-api';
 
 describe('markdownToSlackMrkdwn', () => {
@@ -406,6 +414,291 @@ describe('SlackChannelResponder.uploadFile payload', () => {
     expect(uploadCalls).toHaveLength(1);
     expect(uploadCalls[0]).not.toHaveProperty('snippet_type');
     expect(uploadCalls[0].filename).toBe('image.png');
+  });
+});
+
+describe('SlackChannelResponder native streaming fallback', () => {
+  // Drain the responder's internal promise chains (thinking message → inner init →
+  // append flush) without advancing timers — these settle on microtasks.
+  async function microtasks(times = 30): Promise<void> {
+    for (let i = 0; i < times; i++) await Promise.resolve();
+  }
+
+  // The appendStream rate limiter is module-level state shared across streams;
+  // reset it so token budget from one case can't starve the next.
+  beforeEach(() => __resetAppendRateLimiterForTest());
+
+  interface Send {
+    kind: 'start' | 'append' | 'stop';
+    text?: string;
+  }
+
+  interface Calls {
+    posts: Record<string, unknown>[];
+    updates: Record<string, unknown>[];
+    deletes: Record<string, unknown>[];
+    uploads: Record<string, unknown>[];
+    sends: Send[];
+    sequence: string[];
+  }
+
+  interface MockSpec {
+    /** start/append calls at this 1-based index and later throw a terminal error. */
+    failFrom?: number;
+    /** The start/append call at this 1-based index throws one transient error. */
+    transientAt?: number;
+    /** stopStream throws a terminal error. */
+    failStop?: boolean;
+    /** uploadV2 rejects. */
+    failUpload?: boolean;
+  }
+
+  const TERMINAL = { data: { error: 'message_not_in_streaming_state' } };
+  const TRANSIENT = { data: { error: 'ratelimited' } };
+
+  // Models the direct startStream/appendStream/stopStream API the responder now
+  // drives — there is no hidden SDK buffer, so `sends` is the exact wire history.
+  function createMockClient(spec: MockSpec = {}): { client: WebClient; calls: Calls } {
+    const calls: Calls = {
+      posts: [],
+      updates: [],
+      deletes: [],
+      uploads: [],
+      sends: [],
+      sequence: [],
+    };
+    let n = 0; // counts startStream + appendStream calls
+    const maybeThrow = (): void => {
+      if (spec.transientAt === n) throw TRANSIENT;
+      if (spec.failFrom != null && n >= spec.failFrom) throw TERMINAL;
+    };
+    const client = {
+      chat: {
+        postMessage: async (a: Record<string, unknown>) => {
+          calls.posts.push(a);
+          return { ts: `posted-${calls.posts.length}` };
+        },
+        update: async (a: Record<string, unknown>) => {
+          calls.updates.push(a);
+          calls.sequence.push('update');
+          return {};
+        },
+        delete: async (a: Record<string, unknown>) => {
+          calls.deletes.push(a);
+          calls.sequence.push(`delete:${a.ts}`);
+          return {};
+        },
+        startStream: async (a: Record<string, unknown>) => {
+          n += 1;
+          calls.sends.push({ kind: 'start', text: a.markdown_text as string });
+          calls.sequence.push('start');
+          maybeThrow();
+          return { ts: 'stream-ts' };
+        },
+        appendStream: async (a: Record<string, unknown>) => {
+          n += 1;
+          calls.sends.push({ kind: 'append', text: a.markdown_text as string });
+          calls.sequence.push('append');
+          maybeThrow();
+          return {};
+        },
+        stopStream: async (a: Record<string, unknown>) => {
+          calls.sends.push({ kind: 'stop', text: a.markdown_text as string | undefined });
+          calls.sequence.push('stop');
+          if (spec.failStop) throw TERMINAL;
+          return { ts: 'stream-ts' };
+        },
+      },
+      reactions: { add: async () => ({}), remove: async () => ({}) },
+      files: {
+        uploadV2: async (a: Record<string, unknown>) => {
+          calls.uploads.push(a);
+          calls.sequence.push('upload');
+          if (spec.failUpload) throw new Error('upload failed');
+          return {};
+        },
+      },
+    } as unknown as WebClient;
+    return { client, calls };
+  }
+
+  const appendsOf = (calls: Calls): Send[] => calls.sends.filter((s) => s.kind === 'append');
+  const stopsOf = (calls: Calls): Send[] => calls.sends.filter((s) => s.kind === 'stop');
+
+  function makeResponder(client: WebClient): SlackChannelResponder {
+    return new SlackChannelResponder(
+      client,
+      'C123',
+      'thread-ts',
+      'msg-ts',
+      'stream-native',
+      'U1',
+      'T1',
+    );
+  }
+
+  it('repairs the partial message with the full text when the stream finalizes early', async () => {
+    const { client, calls } = createMockClient({ failFrom: 2 });
+    const responder = makeResponder(client);
+    jest.useFakeTimers();
+    try {
+      const sr = responder.createStreamingResponder();
+
+      sr.onTextDelta('Hello '); // first flush (startStream) succeeds, captures ts
+      await microtasks();
+      sr.onTextDelta('world'); // batched into pending
+      jest.advanceTimersByTime(STREAM_NATIVE_FLUSH_INTERVAL_MS); // timer flushes it
+      await microtasks(); // appendStream rejects (terminal) → stream marked broken mid-flight
+      await sr.finish();
+      await responder.onStreamComplete('Hello world', sr);
+
+      // The finalized message is overwritten in place with the complete text — no duplicate bubble.
+      expect(calls.updates).toHaveLength(1);
+      expect(calls.updates[0].ts).toBe('stream-ts');
+      expect(calls.updates[0].text).toBe('Hello world');
+      // No file upload for a small response.
+      expect(calls.uploads).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not re-deliver when the native stream completes cleanly', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    sr.onTextDelta('Hello ');
+    await microtasks();
+    sr.onTextDelta('world');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('Hello world', sr);
+
+    // Clean finish → native display already showed everything; no repair update/post/upload.
+    expect(calls.updates).toHaveLength(0);
+    expect(calls.uploads).toHaveLength(0);
+    // Only the initial thinking message was posted (later deleted when the stream started).
+    expect(calls.posts).toHaveLength(1);
+    expect(stopsOf(calls)).toHaveLength(1);
+    // The tail that arrived after the first flush rode along on stopStream.
+    expect(stopsOf(calls)[0].text).toBe('world');
+  });
+
+  it('deletes a tool-status message posted mid-stream on a clean finish', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    sr.onTextDelta('Looking into it'); // startStream → thinking message (posted-1) deleted
+    await microtasks();
+    sr.onToolEvent({ phase: 'start', toolName: 'Bash' }); // posts a new status message (posted-2)
+    await microtasks();
+    sr.onTextDelta(' — done'); // more text appended to the stream
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('Looking into it — done', sr);
+
+    // The mid-stream tool-status message must be cleaned up even though the
+    // stream finished cleanly (streamTs set, not broken).
+    const toolStatusTs = (calls.posts[1] as { ts?: string } | undefined)?.ts ?? 'posted-2';
+    expect(calls.deletes.some((d) => d.ts === toolStatusTs)).toBe(true);
+    // Sanity: a tool-status message was actually posted (thinking + tool status).
+    expect(calls.posts).toHaveLength(2);
+  });
+
+  it('retries a transient append exactly once, without doubling the text', async () => {
+    // transientAt: 2 → the first appendStream (call #2 after startStream) fails once.
+    const { client, calls } = createMockClient({ transientAt: 2 });
+    const responder = makeResponder(client);
+    jest.useFakeTimers();
+    try {
+      const sr = responder.createStreamingResponder();
+
+      sr.onTextDelta('Hello '); // startStream ok
+      await microtasks();
+      sr.onTextDelta('world'); // pending
+      jest.advanceTimersByTime(STREAM_NATIVE_FLUSH_INTERVAL_MS);
+      await microtasks(); // appendStream('world') throws transient → pending kept, NOT broken
+      jest.advanceTimersByTime(STREAM_NATIVE_FLUSH_INTERVAL_MS);
+      await microtasks(); // appendStream('world') retried successfully
+      await sr.finish();
+      await responder.onStreamComplete('Hello world', sr);
+
+      // Stream survived the transient error: no fallback delivery.
+      expect(calls.updates).toHaveLength(0);
+      expect(calls.uploads).toHaveLength(0);
+      // Each appendStream carried 'world' exactly once — never the doubled
+      // 'worldworld' that a second buffer would have produced.
+      const appends = appendsOf(calls);
+      expect(appends).toHaveLength(2);
+      expect(appends.every((a) => a.text === 'world')).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('uploads a file BEFORE dropping the partial message for a huge early-finalized response', async () => {
+    const { client, calls } = createMockClient({ failStop: true });
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+    const huge = 'x'.repeat(FILE_THRESHOLD + 1);
+
+    sr.onTextDelta('partial ');
+    await microtasks();
+    sr.onTextDelta('more');
+    await microtasks();
+    await sr.finish(); // stopStream fails → broken
+    await responder.onStreamComplete(huge, sr);
+
+    expect(calls.uploads).toHaveLength(1);
+    expect(calls.uploads[0].content).toBe(huge);
+    expect(calls.uploads[0].snippet_type).toBe('markdown');
+    // The partial message is dropped only AFTER a successful upload.
+    expect(calls.deletes.some((d) => d.ts === 'stream-ts')).toBe(true);
+    expect(calls.sequence.indexOf('upload')).toBeLessThan(
+      calls.sequence.indexOf('delete:stream-ts'),
+    );
+  });
+
+  it('keeps the partial message if the huge-response upload fails', async () => {
+    const { client, calls } = createMockClient({ failStop: true, failUpload: true });
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+    const huge = 'x'.repeat(FILE_THRESHOLD + 1);
+
+    sr.onTextDelta('partial ');
+    await microtasks();
+    await sr.finish();
+    await expect(responder.onStreamComplete(huge, sr)).rejects.toThrow();
+
+    // Upload was attempted but failed — the partial streamed message must NOT be dropped.
+    expect(calls.uploads).toHaveLength(1);
+    expect(calls.deletes.some((d) => d.ts === 'stream-ts')).toBe(false);
+  });
+
+  it('sends an invisible keepalive append during an idle gap', async () => {
+    jest.useFakeTimers();
+    try {
+      const { client, calls } = createMockClient();
+      const responder = makeResponder(client);
+      const sr = responder.createStreamingResponder();
+
+      sr.onTextDelta('Working on it');
+      await microtasks(); // inner init + first append (resets the idle clock)
+
+      // No further text — advance past the keepalive window so an idle tick fires.
+      jest.advanceTimersByTime(STREAM_NATIVE_KEEPALIVE_MS + STREAM_NATIVE_FLUSH_INTERVAL_MS);
+      await microtasks(); // queued keepalive flush runs
+
+      expect(appendsOf(calls).some((a) => a.text === STREAM_KEEPALIVE_TOKEN)).toBe(true);
+      // The keepalive token is zero-width — it must not be visible content.
+      expect(STREAM_KEEPALIVE_TOKEN).toBe('\u200b');
+
+      await sr.finish(); // clears the flush interval
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

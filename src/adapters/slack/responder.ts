@@ -1,6 +1,5 @@
 import { basename } from 'path';
 import type { WebClient } from '@slack/web-api';
-import type { ChatStreamer } from '@slack/web-api';
 import type {
   ChannelResponder,
   IStreamingResponder,
@@ -15,6 +14,11 @@ import {
   FILE_THRESHOLD,
   STREAM_UPDATE_INTERVAL_MS,
   STREAMING_INDICATOR,
+  STREAM_NATIVE_FLUSH_INTERVAL_MS,
+  STREAM_NATIVE_KEEPALIVE_MS,
+  STREAM_KEEPALIVE_TOKEN,
+  STREAM_NATIVE_APPEND_RATE_PER_MIN,
+  STREAM_NATIVE_APPEND_BURST,
 } from './formatting.js';
 import { safeReact, warnInThread } from './utils.js';
 
@@ -43,6 +47,55 @@ const SNIPPET_TYPE_MAP: Record<string, string> = {
 export function getSnippetType(filename: string): string | undefined {
   const ext = filename.match(/\.(\w+)$/)?.[1]?.toLowerCase();
   return ext ? SNIPPET_TYPE_MAP[ext] : undefined;
+}
+
+/**
+ * Slack errors that mean the stream is permanently gone (no further appends or
+ * stop will ever succeed). Anything else — rate limits, network blips, 5xx — is
+ * treated as transient: we keep the stream open and retry rather than tearing
+ * it down and triggering the full-text fallback.
+ */
+const STREAM_CLOSED_ERROR_CODES = new Set(['message_not_in_streaming_state', 'stopped_by_user']);
+
+function slackErrorCode(err: unknown): string | undefined {
+  return (err as { data?: { error?: string } } | undefined)?.data?.error;
+}
+
+function isStreamClosedError(err: unknown): boolean {
+  const code = slackErrorCode(err);
+  return code != null && STREAM_CLOSED_ERROR_CODES.has(code);
+}
+
+/**
+ * Shared token bucket for `chat.appendStream` across every active stream.
+ * appendStream is Tier 4 (100+/min) and the budget is per workspace token, not
+ * per message — so all NativeStreamingResponder instances draw from this one
+ * bucket. Callers check `tryConsumeAppendToken()` before appending; when it
+ * returns false they defer to their next flush tick instead of calling the API.
+ */
+const appendBucket = { tokens: STREAM_NATIVE_APPEND_BURST, lastRefillMs: 0 };
+
+function tryConsumeAppendToken(nowMs: number): boolean {
+  if (appendBucket.lastRefillMs === 0) appendBucket.lastRefillMs = nowMs;
+  const elapsed = nowMs - appendBucket.lastRefillMs;
+  if (elapsed > 0) {
+    appendBucket.tokens = Math.min(
+      STREAM_NATIVE_APPEND_BURST,
+      appendBucket.tokens + (elapsed / 60_000) * STREAM_NATIVE_APPEND_RATE_PER_MIN,
+    );
+    appendBucket.lastRefillMs = nowMs;
+  }
+  if (appendBucket.tokens >= 1) {
+    appendBucket.tokens -= 1;
+    return true;
+  }
+  return false;
+}
+
+/** Test-only: reset the shared appendStream rate limiter between cases. */
+export function __resetAppendRateLimiterForTest(): void {
+  appendBucket.tokens = STREAM_NATIVE_APPEND_BURST;
+  appendBucket.lastRefillMs = 0;
 }
 
 class StreamingResponder implements IStreamingResponder {
@@ -166,13 +219,35 @@ class NativeStreamingResponder implements IStreamingResponder {
   private threadTs: string;
   private recipientTeamId?: string;
   private recipientUserId?: string;
-  private streamer: ChatStreamer | null = null;
   private fullText = '';
   private thinkingTs: string | null;
   private statusTs: string | null = null;
   private finished = false;
-  private appendChain: Promise<void> = Promise.resolve();
   private toolEventChain: Promise<void> = Promise.resolve();
+  /** Whether the stream lifecycle has been kicked off (timer + first flush). */
+  private started = false;
+  /** ts of the streamed message, set from the startStream response. */
+  private streamTs: string | null = null;
+  /**
+   * Set once Slack finalizes the stream out from under us (idle-timeout →
+   * `message_not_in_streaming_state`). Once broken, we stop calling appendStream
+   * and let finish()/onStreamComplete deliver the full text instead.
+   */
+  private streamBroken = false;
+  /**
+   * The single source of truth for un-acked text. Text is removed only after a
+   * successful send, so a transient failure simply retries the same bytes on the
+   * next tick — there is no second buffer that could double it.
+   */
+  private pending = '';
+  /** Timer that flushes pending text and sends idle keepalives. */
+  private flushTimer: ReturnType<typeof setInterval> | null = null;
+  /** Timestamp (ms) of the last successful append/keepalive — drives keepalive. */
+  private lastWriteAt = 0;
+  /** At most one flush is scheduled/in-flight at a time (no unbounded queue). */
+  private flushing = false;
+  /** The latest in-flight flush, awaited by finish(). */
+  private currentFlush: Promise<void> = Promise.resolve();
 
   constructor(
     client: WebClient,
@@ -225,51 +300,153 @@ class NativeStreamingResponder implements IStreamingResponder {
 
   onTextDelta(text: string): void {
     this.fullText += text;
-    if (!this.streamer && !this.finished) {
-      // Use buffer_size: 1 so the stream message appears immediately on first delta
-      this.streamer = this.client.chatStream({
-        channel: this.channel,
-        thread_ts: this.threadTs,
-        buffer_size: 1,
-        ...(this.recipientTeamId ? { recipient_team_id: this.recipientTeamId } : {}),
-        ...(this.recipientUserId ? { recipient_user_id: this.recipientUserId } : {}),
-      });
-      // Delete the status/thinking message now that the real stream has started
-      if (this.statusTs) {
-        const ts = this.statusTs;
-        this.statusTs = null;
-        this.client.chat.delete({ channel: this.channel, ts }).catch(() => {});
-      } else if (this.thinkingTs) {
-        const ts = this.thinkingTs;
-        this.thinkingTs = null;
-        this.client.chat.delete({ channel: this.channel, ts }).catch(() => {});
-      }
-      // Feed the accumulated text as the first append
-      this.appendChain = this.appendChain
-        .then(async () => {
-          await this.streamer!.append({ markdown_text: text });
-        })
-        .catch((err) => {
-          console.error('[native-stream] Failed to append initial text:', err);
-          if (err?.data)
-            console.error('[native-stream] Response data:', JSON.stringify(err.data, null, 2));
-        });
-    } else if (this.streamer) {
-      this.appendChain = this.appendChain
-        .then(async () => {
-          await this.streamer!.append({ markdown_text: text });
-        })
-        .catch((err) => {
-          console.error('[native-stream] Failed to append text:', err);
-          if (err?.data)
-            console.error('[native-stream] Response data:', JSON.stringify(err.data, null, 2));
-        });
+    // Text always accumulates in fullText above; once the stream is finalized
+    // (or we've finished), stop touching the streaming API and let the full text
+    // be delivered by onStreamComplete.
+    if (this.streamBroken || this.finished) return;
+    this.pending += text;
+    if (!this.started) {
+      this.started = true;
+      this.lastWriteAt = Date.now();
+      this.startFlushLoop();
+      // Flush the first chunk immediately (this opens the stream via startStream)
+      // so the message appears without waiting a full interval; later deltas are
+      // batched by the timer.
+      this.kickFlush(false);
     }
   }
 
+  private startFlushLoop(): void {
+    if (this.flushTimer) return;
+    this.flushTimer = setInterval(() => this.onFlushTick(), STREAM_NATIVE_FLUSH_INTERVAL_MS);
+  }
+
+  private stopFlushLoop(): void {
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
+  }
+
+  private onFlushTick(): void {
+    if (this.streamBroken || this.finished) {
+      this.stopFlushLoop();
+      return;
+    }
+    // Only one flush in flight at a time — if the previous Slack call is still
+    // pending, skip this tick rather than queue another (and burn a token).
+    if (this.flushing) return;
+    const now = Date.now();
+    const wantKeepalive =
+      this.pending.length === 0 && now - this.lastWriteAt >= STREAM_NATIVE_KEEPALIVE_MS;
+    if (this.pending.length === 0 && !wantKeepalive) return;
+    // Consume a token from the shared appendStream budget only when we are
+    // actually about to call the API; defer to the next tick if exhausted.
+    if (!tryConsumeAppendToken(now)) return;
+    this.kickFlush(wantKeepalive);
+  }
+
+  private kickFlush(keepalive: boolean): void {
+    this.flushing = true;
+    this.currentFlush = this.flushPending(keepalive).finally(() => {
+      this.flushing = false;
+    });
+  }
+
+  private async flushPending(keepalive: boolean): Promise<void> {
+    if (this.streamBroken) return;
+    const text = this.pending; // single source of truth — cleared only on success
+    if (!text && !keepalive) return;
+    const toSend = text.length > 0 ? text : STREAM_KEEPALIVE_TOKEN;
+    try {
+      if (this.streamTs === null) {
+        const res = await this.client.chat.startStream({
+          channel: this.channel,
+          thread_ts: this.threadTs,
+          markdown_text: toSend,
+          ...(this.recipientTeamId ? { recipient_team_id: this.recipientTeamId } : {}),
+          ...(this.recipientUserId ? { recipient_user_id: this.recipientUserId } : {}),
+        });
+        if (!res?.ts) {
+          // Shouldn't happen; bail rather than retry (a retry would start a 2nd
+          // stream message). onStreamComplete delivers the full text instead.
+          this.streamBroken = true;
+          this.stopFlushLoop();
+          console.error('[native-stream] startStream returned no ts');
+          return;
+        }
+        this.streamTs = res.ts;
+        // The stream message now exists — drop the thinking/status placeholder.
+        this.deleteThinkingMessage();
+      } else {
+        await this.client.chat.appendStream({
+          channel: this.channel,
+          ts: this.streamTs,
+          markdown_text: toSend,
+        });
+      }
+      // Remove only the bytes we sent; keep any deltas that arrived mid-flight.
+      if (text.length > 0) this.pending = this.pending.slice(text.length);
+      this.lastWriteAt = Date.now();
+    } catch (err) {
+      const code = slackErrorCode(err);
+      if (isStreamClosedError(err)) {
+        // Slack finalized the stream (e.g. idle timeout during a long tool call):
+        // every further append/stop will fail too. Tear down and let
+        // onStreamComplete deliver the full text.
+        this.streamBroken = true;
+        this.stopFlushLoop();
+        console.error('[native-stream] stream finalized early:', code);
+      } else {
+        // Transient (rate limit, network, 5xx — already SDK-retried). pending is
+        // left untouched, so the next tick retries exactly the same bytes once.
+        console.error('[native-stream] append failed, will retry:', code ?? err);
+      }
+    }
+  }
+
+  private deleteThinkingMessage(): void {
+    const ts = this.statusTs ?? this.thinkingTs;
+    this.statusTs = null;
+    this.thinkingTs = null;
+    if (ts) this.client.chat.delete({ channel: this.channel, ts }).catch(() => {});
+  }
+
   async finish(): Promise<void> {
+    if (this.finished) return; // idempotent — engine cleanup may call this twice
     this.finished = true;
-    // Clean up thinking/status message if stream never started (empty response)
+    this.stopFlushLoop();
+    // Let the in-flight flush settle (it keeps the stream alive while pending),
+    // so `pending` is final before we finalize.
+    await this.currentFlush.catch(() => {});
+
+    // Finalize the stream FIRST. The keepalive timer is already stopped, so any
+    // delay here (e.g. a slow/retrying status-message delete below) would leave
+    // the stream idle long enough for Slack to expire it — finalize before that
+    // window opens.
+    if (this.streamTs !== null && !this.streamBroken) {
+      const tail = this.pending; // flush the tail as part of stopStream
+      this.pending = '';
+      try {
+        await this.client.chat.stopStream({
+          channel: this.channel,
+          ts: this.streamTs,
+          ...(tail ? { markdown_text: tail } : {}),
+        });
+      } catch (err) {
+        // stopStream failed (terminal or transient). Either way we're done, so
+        // hand off to onStreamComplete, which delivers the complete text (and its
+        // in-place repair re-posts fresh if the message is somehow still live).
+        this.streamBroken = true;
+        console.error('[native-stream] failed to stop stream:', slackErrorCode(err) ?? err);
+      }
+    }
+
+    // Now that the stream is finalized, settle the tool-status chain and remove
+    // any lingering placeholder — the original thinking message if the stream
+    // never started, or a tool-status message posted mid-stream after the
+    // thinking one was already cleared. Either way it must not survive.
+    await this.toolEventChain.catch(() => {});
     const cleanupTs = this.statusTs ?? this.thinkingTs;
     this.statusTs = null;
     this.thinkingTs = null;
@@ -280,23 +457,20 @@ class NativeStreamingResponder implements IStreamingResponder {
         // Best effort
       }
     }
-    if (this.streamer) {
-      try {
-        await this.appendChain;
-        await this.streamer.stop();
-      } catch (err) {
-        console.error('[native-stream] Failed to stop stream:', err);
-        if ((err as Record<string, unknown>)?.data)
-          console.error(
-            '[native-stream] Response data:',
-            JSON.stringify((err as Record<string, unknown>).data, null, 2),
-          );
-      }
-    }
   }
 
   getFullText(): string {
     return this.fullText;
+  }
+
+  /** ts of the streamed message, if the stream ever started. */
+  getStreamTs(): string | null {
+    return this.streamTs;
+  }
+
+  /** True only if the stream message exists and was not finalized early by Slack. */
+  streamDeliveredOk(): boolean {
+    return this.streamTs !== null && !this.streamBroken;
   }
 }
 
@@ -417,7 +591,15 @@ export class SlackChannelResponder implements ChannelResponder {
 
   async onStreamComplete(fullText: string, responder: IStreamingResponder): Promise<void> {
     if (this.responseMode === 'stream-native') {
-      // Native streaming handles display automatically; fall back to file upload for huge responses
+      const nsr = responder as NativeStreamingResponderWithThinking;
+      // If Slack finalized the stream early (idle timeout → message_not_in_streaming_state),
+      // the live updates stopped and the post-timeout text never landed. Deliver the full
+      // text now, repairing the partial streamed message in place when we know its ts.
+      if (!nsr.streamDeliveredOk() && fullText.trim().length > 0) {
+        await this.deliverNativeFallback(fullText, nsr.getStreamTs());
+        return;
+      }
+      // Native streaming handled display; fall back to file upload for huge responses
       if (fullText.length > FILE_THRESHOLD) {
         await this.client.files.uploadV2({
           channel_id: this.channelId,
@@ -434,15 +616,8 @@ export class SlackChannelResponder implements ChannelResponder {
     // stream-update mode: handle oversized responses
     const sr = responder as StreamingResponder;
     if (fullText.length > FILE_THRESHOLD) {
-      // Delete the streamed message and upload as file instead
-      const msgTs = sr.getMessageTs();
-      if (msgTs) {
-        try {
-          await this.client.chat.delete({ channel: this.channelId, ts: msgTs });
-        } catch {
-          // Best effort — may lack permission
-        }
-      }
+      // Upload as a file, THEN delete the streamed message — upload first so a
+      // failed upload never loses the only copy of the response.
       await this.client.files.uploadV2({
         channel_id: this.channelId,
         thread_ts: this.threadTs,
@@ -451,6 +626,14 @@ export class SlackChannelResponder implements ChannelResponder {
         snippet_type: 'markdown',
         title: 'Response',
       });
+      const msgTs = sr.getMessageTs();
+      if (msgTs) {
+        try {
+          await this.client.chat.delete({ channel: this.channelId, ts: msgTs });
+        } catch {
+          // Best effort — may lack permission
+        }
+      }
     } else if (fullText.length > MAX_MESSAGE_LENGTH) {
       // Final text fits in messages but was truncated during streaming — do a final complete send
       const formatted = markdownToSlackMrkdwn(fullText);
@@ -475,6 +658,59 @@ export class SlackChannelResponder implements ChannelResponder {
           });
         }
       }
+    }
+  }
+
+  /**
+   * Deliver the complete response when the native stream was finalized early by Slack.
+   * Repairs the partial streamed message in place (no duplicate bubble) when its ts is
+   * known; otherwise posts the text as fresh threaded message(s).
+   */
+  private async deliverNativeFallback(fullText: string, streamTs: string | null): Promise<void> {
+    if (fullText.length > FILE_THRESHOLD) {
+      // Too large for a message — upload as a file, THEN drop the partial streamed
+      // message. Upload first so a failed upload never loses the only copy of the
+      // response (the partial message stays as a fallback).
+      await this.client.files.uploadV2({
+        channel_id: this.channelId,
+        thread_ts: this.threadTs,
+        content: fullText,
+        filename: 'response.md',
+        snippet_type: 'markdown',
+        title: 'Response',
+      });
+      if (streamTs) {
+        try {
+          await this.client.chat.delete({ channel: this.channelId, ts: streamTs });
+        } catch {
+          // Best effort — may lack permission
+        }
+      }
+      return;
+    }
+
+    const chunks = splitMessage(markdownToSlackMrkdwn(fullText));
+    if (chunks.length === 0) return;
+    let startIdx = 0;
+    // Overwrite the partial (auto-finalized) streamed message with the full first chunk.
+    if (streamTs) {
+      try {
+        await this.client.chat.update({
+          channel: this.channelId,
+          ts: streamTs,
+          text: chunks[0],
+        });
+        startIdx = 1;
+      } catch {
+        // Couldn't update the finalized message — post everything fresh below.
+      }
+    }
+    for (let i = startIdx; i < chunks.length; i++) {
+      await this.client.chat.postMessage({
+        channel: this.channelId,
+        thread_ts: this.threadTs,
+        text: chunks[i],
+      });
     }
   }
 
@@ -580,5 +816,13 @@ class NativeStreamingResponderWithThinking implements IStreamingResponder {
 
   getFullText(): string {
     return this.inner?.getFullText() ?? this.fullText;
+  }
+
+  getStreamTs(): string | null {
+    return this.inner?.getStreamTs() ?? null;
+  }
+
+  streamDeliveredOk(): boolean {
+    return this.inner?.streamDeliveredOk() ?? false;
   }
 }
