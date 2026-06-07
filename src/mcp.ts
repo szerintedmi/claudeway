@@ -3,6 +3,7 @@ import { resolve, dirname, join } from 'path';
 import type { UserPermissions } from './config.js';
 
 interface McpServerEntry {
+  type?: string;
   env?: Record<string, string>;
   [key: string]: unknown;
 }
@@ -13,7 +14,11 @@ interface McpConfig {
 
 /**
  * Generate a read-only MCP config from an existing mcp.json.
- * Injects READ_ONLY_MODE: "true" into each server's env.
+ * Injects READ_ONLY_MODE: "true" into each stdio server's env.
+ *
+ * Only stdio servers spawn a local process that can read env vars, so the flag
+ * is skipped for http/sse servers where `env` is inert — injecting it there
+ * would just be confusing no-op noise.
  */
 export function generateReadOnlyMcpConfig(sourcePath: string): string {
   const raw = readFileSync(sourcePath, 'utf-8');
@@ -21,7 +26,11 @@ export function generateReadOnlyMcpConfig(sourcePath: string): string {
 
   if (config.mcpServers) {
     for (const server of Object.values(config.mcpServers)) {
-      server.env = { ...server.env, READ_ONLY_MODE: 'true' };
+      // Default (no type) is stdio; http/sse have no subprocess to receive env.
+      const isStdio = server.type === undefined || server.type === 'stdio';
+      if (isStdio) {
+        server.env = { ...server.env, READ_ONLY_MODE: 'true' };
+      }
     }
   }
 
