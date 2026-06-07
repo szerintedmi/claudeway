@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y git curl && \
 # Install Claude CLI globally
 RUN npm install -g @anthropic-ai/claude-code
 
+# Install uv/uvx (used by MCP servers like mcp-atlassian)
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
 # Create non-root user
 RUN useradd -m -s /bin/bash claudeway
 

@@ -24,16 +24,33 @@ services:
     ports:
       - "${VOICE_PORT:-8765}:${VOICE_PORT:-8765}"  # Voice WebSocket server (only used when voiceServer.enabled)
     volumes:
-      # Config (read-only)
-      - ./config.yaml:/app/config.yaml:ro
-      - ./mcp.json:/app/mcp.json:ro  # optional, remove if not used
+      # Config (read-only). create_host_path: false makes the container fail to
+      # start if the source file is missing, instead of silently creating a
+      # directory at the host path (which then breaks the app at runtime).
+      - type: bind
+        source: ./config.yaml
+        target: /app/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./mcp.json
+        target: /app/mcp.json
+        read_only: true
+        bind:
+          create_host_path: false
 
       # Claude CLI session state (created at runtime, persisted across restarts)
       - claudeway-claude-state:/home/claudeway/.claude
 
-      # Git SSH key (read-only) — for cloning repos via SSH
-      # Mount your GitHub SSH private key here
-      - ~/.ssh/id_ed25519_hostaway:/home/claudeway/.ssh/id_ed25519:ro
+      # Git SSH key (read-only) — for cloning repos via SSH.
+      # Set GIT_SSH_KEY in .env to your private key path (default: ~/.ssh/id_ed25519).
+      - type: bind
+        source: ${GIT_SSH_KEY:-~/.ssh/id_ed25519}
+        target: /home/claudeway/.ssh/id_ed25519
+        read_only: true
+        bind:
+          create_host_path: false
 
       # Persistent state (repos, queue, files) — shared with host
       - ./.docker:/app/.docker

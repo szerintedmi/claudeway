@@ -142,7 +142,7 @@ class ClaudewayWebSocket(
                 // Client errors (4xx) are not retriable — surface to UI immediately
                 if (code != null && code in 400..499) {
                     shouldReconnect = false
-                    val body = try { response.body?.string()?.take(200) } catch (_: Exception) { null }
+                    val body = try { response.body.string().take(200) } catch (_: Exception) { null }
                     val msg = body?.ifBlank { null } ?: response.message.ifBlank { "HTTP $code" }
                     _connectionError.value = ConnectionError(code, msg)
                     _connectionState.value = ConnectionState.Error
