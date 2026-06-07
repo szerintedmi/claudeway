@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.27.0] - 2026-06-07
+
+### Added
+- **`uv`/`uvx` in Docker image**: installed to `/usr/local/bin` so MCP servers that run via `uvx` (e.g. `mcp-atlassian`) work inside the container
+- **Fail-fast bind mounts**: `config.yaml`, `mcp.json`, and the git SSH key now use long-form binds with `create_host_path: false`, so a missing source file stops the container from starting instead of silently creating a directory at the host path (which then broke the app at runtime)
+- **Android dependency-update check**: added the `com.github.ben-manes.versions` Gradle plugin for surfacing outdated dependencies
+
+### Changed
+- **Server dependency updates**: `@deepgram/sdk` 5.0→5.4, `@slack/bolt` 4.6→4.7.3, `uuid` 13→14, `yaml` 2.8.2→2.9, plus ESLint/Prettier/typescript-eslint/`@types/bun` dev bumps
+- **Android dependency updates**: OkHttp `5.0.0-alpha.14`→`5.3.2` (stable), Kotlin 2.3→2.4, coroutines 1.10.1→1.11, and MockK/Turbine/Robolectric/org-json bumps
+- **Migrated lockfile from npm to bun**: removed `package-lock.json` in favor of `bun.lock`
+
+### Fixed
+- **OkHttp 5 stable nullability**: `Response.body` became non-nullable in the stable release, so the `4xx` error-body read in `ClaudewayWebSocket` no longer uses the `?.` safe-call (which is now a compile warning)
+
 ## [0.26.0] - 2026-06-07
 
 ### Fixed
