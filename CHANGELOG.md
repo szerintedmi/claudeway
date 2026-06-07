@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.0] - 2026-06-07
+
+### Fixed
+- **stream-native mode lost the final Slack response on long tasks**: during long tool-execution gaps Slack finalized the streaming message, so updates stopped and no answer landed in the thread (despite the ✅). Native streaming now sends a periodic keepalive to hold the stream open, and always posts the complete response even if the stream expires anyway
+
+### Changed
+- More resilient native streaming: short replies show faster, transient Slack errors retry without duplicating text, and append rate stays within Slack's limit across concurrent channels
+
 ## [0.25.1] - 2026-05-08
 
 ### Fixed
