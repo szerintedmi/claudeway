@@ -16,7 +16,7 @@ import {
   ensureScratchDir,
   readAttachmentManifest,
 } from '../tempdir.js';
-import type { ChannelResponder } from './interfaces.js';
+import type { ChannelResponder, IStreamingResponder } from './interfaces.js';
 
 // Re-export QueuedMessage for consumers
 export type { QueuedMessage } from '../queue.js';
@@ -134,6 +134,11 @@ export async function processQueuedMessage(
     scratchDir,
   };
 
+  // Hoisted so the finally block can finalize the stream even if the runner
+  // throws — otherwise the native keepalive timer would leak and keep calling Slack.
+  let sr: IStreamingResponder | null = null;
+  let streamFinished = false;
+
   try {
     if (mode === 'batch') {
       // Batch mode — run Claude, get full response, send at once
@@ -165,7 +170,8 @@ export async function processQueuedMessage(
       }
     } else {
       // Streaming modes (stream-update or stream-native)
-      const sr = responder.createStreamingResponder();
+      const streamer = responder.createStreamingResponder();
+      sr = streamer;
 
       const claudeStreamOpts = {
         message: queued.text,
@@ -179,10 +185,11 @@ export async function processQueuedMessage(
         filePaths: queued.filePaths,
         tempDir,
         ...(processMode === 'persistent' ? { tempBaseDir: baseDir } : {}),
-        onTextDelta: (text: string) => sr.onTextDelta(text),
-        onToolEvent: (event: import('../claude.js').ToolEventPayload) => sr.onToolEvent(event),
-        onProcessSpawned: sr.onProcessSpawned
-          ? (kill: () => void) => sr.onProcessSpawned!(kill)
+        onTextDelta: (text: string) => streamer.onTextDelta(text),
+        onToolEvent: (event: import('../claude.js').ToolEventPayload) =>
+          streamer.onToolEvent(event),
+        onProcessSpawned: streamer.onProcessSpawned
+          ? (kill: () => void) => streamer.onProcessSpawned!(kill)
           : undefined,
         ...permCtx,
       };
@@ -192,10 +199,11 @@ export async function processQueuedMessage(
           ? await runClaudePersistentStreaming(claudeStreamOpts)
           : await runClaudeStreaming(claudeStreamOpts);
 
-      await sr.finish();
+      await streamer.finish();
+      streamFinished = true;
 
-      const finalText = result.response || sr.getFullText();
-      await responder.onStreamComplete(finalText, sr);
+      const finalText = result.response || streamer.getFullText();
+      await responder.onStreamComplete(finalText, streamer);
       await responder.onComplete();
 
       if (result.cost !== null) {
@@ -211,6 +219,16 @@ export async function processQueuedMessage(
       console.error('[engine] onError threw:', e);
     }
   } finally {
+    // If the runner threw before finish() ran, finalize the stream here so its
+    // keepalive timer is cleared and the open stream is stopped (best effort).
+    if (sr && !streamFinished) {
+      try {
+        await sr.finish();
+      } catch (e) {
+        console.error('[engine] stream finalize during cleanup failed:', e);
+      }
+    }
+
     // Upload any files Claude attached, then clean up
     const attachedFiles = readAttachmentManifest(tempDir);
     const failedUploads: string[] = [];

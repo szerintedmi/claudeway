@@ -66,7 +66,61 @@ function convertMarkdownText(text: string): string {
 const STREAM_UPDATE_INTERVAL_MS = 500;
 const STREAMING_INDICATOR = ' :writing_hand:';
 
-export { STREAM_UPDATE_INTERVAL_MS, STREAMING_INDICATOR };
+/**
+ * Native streaming (`chat.startStream`/`appendStream`/`stopStream`) tunables.
+ *
+ * The responder drives these methods directly and batches on a timer: text
+ * accumulated since the last flush is sent at most once per interval. This
+ * surfaces short finished responses within one interval while bounding the
+ * per-stream call rate.
+ *
+ * 700ms ≈ 86 appends/min for a single stream, just under the shared budget
+ * below so a lone stream flows without throttling.
+ */
+const STREAM_NATIVE_FLUSH_INTERVAL_MS = 700;
+
+/**
+ * Shared appendStream budget across ALL active streams. appendStream is Slack
+ * Tier 4 (100+/min) and the limit is per-token, not per-message — so with up to
+ * MAX_CONCURRENT_PROCESSES (8) streams running at once their appends must share
+ * one budget. A module-level token bucket (see responder.ts) caps the aggregate
+ * sustained rate to this value (with a small burst), keeping us under Tier 4 no
+ * matter how many streams are live. When the budget is exhausted a flush tick
+ * defers to the next tick rather than calling the API.
+ */
+const STREAM_NATIVE_APPEND_RATE_PER_MIN = 90;
+const STREAM_NATIVE_APPEND_BURST = 8;
+
+/**
+ * Idle keepalive interval. Slack auto-finalizes a streaming message after an
+ * (undocumented) idle period; once that happens every append fails with
+ * `message_not_in_streaming_state`. While a stream is open with no pending
+ * text, we append an invisible keepalive token this often to keep it alive
+ * through long tool-execution gaps.
+ *
+ * NOTE: Slack does not publish the idle-timeout value, so this is a
+ * conservative guess — tune it down if streams still die on long tasks. The
+ * onStreamComplete fallback still delivers the full text if a stream dies.
+ */
+const STREAM_NATIVE_KEEPALIVE_MS = 5000;
+
+/**
+ * Keepalive token: a zero-width space. Stream content is append-only (it can't
+ * be retracted before stopStream), so the keepalive must render invisibly in
+ * the finalized message — U+200B does, while a literal space or visible cursor
+ * would persist as noise.
+ */
+const STREAM_KEEPALIVE_TOKEN = '\u200b';
+
+export {
+  STREAM_UPDATE_INTERVAL_MS,
+  STREAMING_INDICATOR,
+  STREAM_NATIVE_FLUSH_INTERVAL_MS,
+  STREAM_NATIVE_KEEPALIVE_MS,
+  STREAM_KEEPALIVE_TOKEN,
+  STREAM_NATIVE_APPEND_RATE_PER_MIN,
+  STREAM_NATIVE_APPEND_BURST,
+};
 
 const TOOL_DISPLAY_VERBS: Record<string, string> = {
   Read: 'Reading',
