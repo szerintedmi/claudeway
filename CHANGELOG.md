@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.27.1] - 2026-06-07
+
+### Fixed
+- **No-op `READ_ONLY_MODE` on remote MCP servers**: `mcp-readonly.json` only injects the flag into stdio servers now — `http`/`sse` servers (e.g. New Relic) have no subprocess to read env, so the flag was meaningless noise
+
 ## [0.27.0] - 2026-06-07
 
 ### Added
