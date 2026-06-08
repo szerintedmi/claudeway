@@ -80,6 +80,33 @@ describe('generateReadOnlyMcpConfig', () => {
     expect(config.mcpServers.server2.env.READ_ONLY_MODE).toBe('true');
   });
 
+  it('skips READ_ONLY_MODE for http/sse servers (no subprocess to read env)', () => {
+    const mcpPath = join(tmpDir, 'mcp.json');
+    writeFileSync(
+      mcpPath,
+      JSON.stringify({
+        mcpServers: {
+          stdioServer: { type: 'stdio', command: 'a' },
+          httpServer: {
+            type: 'http',
+            url: 'https://mcp.example.com/mcp/',
+            headers: { 'Api-Key': '${SOME_KEY}' },
+          },
+          sseServer: { type: 'sse', url: 'https://sse.example.com/' },
+        },
+      }),
+    );
+
+    generateReadOnlyMcpConfig(mcpPath);
+
+    const config = JSON.parse(readFileSync(join(tmpDir, 'mcp-readonly.json'), 'utf-8'));
+    expect(config.mcpServers.stdioServer.env).toEqual({ READ_ONLY_MODE: 'true' });
+    // http/sse entries left untouched — no env injected
+    expect(config.mcpServers.httpServer.env).toBeUndefined();
+    expect(config.mcpServers.httpServer.headers).toEqual({ 'Api-Key': '${SOME_KEY}' });
+    expect(config.mcpServers.sseServer.env).toBeUndefined();
+  });
+
   it('preserves non-env fields', () => {
     const mcpPath = join(tmpDir, 'mcp.json');
     writeFileSync(
