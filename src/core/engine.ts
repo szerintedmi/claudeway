@@ -118,8 +118,9 @@ export async function processQueuedMessage(
   const logText = queued.text
     .replace(/^\[[^\]]+ reference\][\s\S]*?\n\n/, '')
     .replace(/^\[Thread context[\s\S]*?\[Current message\]\n/, '');
+  const modelSuffix = queued.modelOverride ? ` [model: ${queued.modelOverride}]` : '';
   console.log(
-    `[${effectiveConfig.name}] Processing (${processMode}/${mode}): ${logText.substring(0, 80)}...`,
+    `[${effectiveConfig.name}] Processing (${processMode}/${mode})${modelSuffix}: ${logText.substring(0, 80)}...`,
   );
 
   const tempDir = createRequestTempDir(baseDir, queued.channelId);
@@ -145,7 +146,7 @@ export async function processQueuedMessage(
       const claudeOpts = {
         message: queued.text,
         cwd: channelConfig.folder,
-        model: channelConfig.model,
+        model: queued.modelOverride ?? channelConfig.model,
         effort: effectiveConfig.effort,
         systemPrompt: effectiveConfig.systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
@@ -176,7 +177,7 @@ export async function processQueuedMessage(
       const claudeStreamOpts = {
         message: queued.text,
         cwd: channelConfig.folder,
-        model: channelConfig.model,
+        model: queued.modelOverride ?? channelConfig.model,
         effort: effectiveConfig.effort,
         systemPrompt: effectiveConfig.systemPrompt,
         timeoutMs: channelConfig.timeoutMs,

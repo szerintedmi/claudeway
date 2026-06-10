@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.28.0] - 2026-06-09
+
+### Added
+- **Per-turn model override**: start a Slack message with `!model:<name>` (e.g. `!model:opus refactor this`, `!model:claude-opus-4-8 deep review`) to run just that message with a different model. Per-turn only — the next message reverts to the channel/default model. The name is passed straight to `claude --model` (no validation), so full versioned model IDs work and CLI errors are reported in the thread. Editing a still-queued message re-parses the prefix; persistent sessions transparently respawn with `--resume`, preserving conversation context
+
+### Fixed
+- **Persistent-mode errors now include stderr**: when a persistent Claude process exits non-zero, the in-thread error includes the turn's stderr tail instead of just the exit code
+
 ## [0.27.1] - 2026-06-07
 
 ### Fixed

@@ -7,7 +7,7 @@ import {
   type AllowedUserEntry,
   type TriggerMode,
 } from '../../config.js';
-import { enqueue, dequeue, updateQueuedText, getPending } from '../../queue.js';
+import { enqueue, dequeue, updateQueuedMessage, getPending } from '../../queue.js';
 import { handleMagicCommand } from './commands.js';
 import { isUserAllowed, safeReact, warnInThread } from './utils.js';
 import { shouldRespond, buildPrompt, extractMentionedUserIds } from '../../prompt.js';
@@ -63,6 +63,31 @@ export async function resolveUserDirectory(
   return allIds.map((id, i) => ({ id, name: names[i] }));
 }
 
+// Per-turn model override: "!model:<name> <message>". First char must be alphanumeric
+// so option-like values (e.g. `--verbose`) can't become CLI args; spawn() arg arrays
+// already prevent shell injection.
+const MODEL_OVERRIDE_RE = /^\s*!model:([A-Za-z0-9][\w.\-[\]:]*)(?:\s+([\s\S]*))?$/;
+
+export function parseModelOverride(text: string): { model: string; rest: string } | null {
+  const m = text.match(MODEL_OVERRIDE_RE);
+  if (!m) return null;
+  return { model: m[1], rest: (m[2] ?? '').trim() };
+}
+
+/**
+ * Strip a leading `!model:<name>` token (after any bot mention) from message text.
+ * Keeps the mention prefix so shouldRespond() still sees it in mention-trigger channels.
+ */
+export function applyModelOverride(
+  text: string,
+  botUserId: string,
+): { text: string; modelOverride?: string } {
+  const mentionPrefix = text.match(new RegExp(`^\\s*<@${botUserId}>\\s*`))?.[0] ?? '';
+  const override = parseModelOverride(text.slice(mentionPrefix.length));
+  if (!override) return { text };
+  return { text: mentionPrefix + override.rest, modelOverride: override.model };
+}
+
 export function registerMessageHandler(app: App, botUserId: string, canResolveUsers = true): void {
   app.message(async ({ message, client, context }) => {
     const msg = message as SlackMessage;
@@ -93,7 +118,12 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
     if (msg.subtype === 'message_changed' && msg.message?.ts && msg.message?.text) {
       const origTs = msg.message.ts;
       if (!isMessageProcessing(msg.channel, origTs)) {
-        const updated = updateQueuedText(msg.channel, origTs, msg.message.text);
+        // Re-parse the model override so edits can add, change, or remove it
+        const applied = applyModelOverride(msg.message.text, botUserId);
+        const updated = updateQueuedMessage(msg.channel, origTs, {
+          text: applied.text,
+          modelOverride: applied.modelOverride,
+        });
         if (updated) {
           console.log(`[${msg.channel}] Queued message edited — updated in queue: ${origTs}`);
         }
@@ -119,6 +149,14 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
       return;
     }
 
+    // Per-turn model override — strip the "!model:<name>" token, keep the mention
+    let modelOverride: string | undefined;
+    if (msg.text) {
+      const applied = applyModelOverride(msg.text, botUserId);
+      msg.text = applied.text;
+      modelOverride = applied.modelOverride;
+    }
+
     const attachmentText = extractTextFromAttachments(msg.attachments);
     // Collect files from both top-level msg.files and inside shared-message attachments
     const attachmentFiles: SlackFile[] = (msg.attachments ?? [])
@@ -134,6 +172,19 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
     const allFiles: SlackFile[] = [...(msg.files ?? []), ...attachmentFiles];
     const hasText = !!(msg.text || attachmentText);
     const hasFiles = allFiles.some((f) => f.url_private_download);
+    // Model override with no prompt body (and nothing else to act on) — usage hint
+    if (modelOverride && !hasFiles && !attachmentText) {
+      const bodyText = msg.text?.replace(new RegExp(`^\\s*<@${botUserId}>\\s*`), '').trim();
+      if (!bodyText) {
+        await warnInThread(
+          client,
+          msg.channel,
+          msg.thread_ts ?? msg.ts,
+          'Usage: `!model:<name> <message>` — add a prompt after the model override.',
+        );
+        return;
+      }
+    }
     // Require at least text or files
     if (!hasText && !hasFiles) return;
 
@@ -252,6 +303,7 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
       queuedAt: new Date().toISOString(),
       ...(filePaths.length > 0 ? { filePaths } : {}),
       ...(senderEntry ? { userName: senderEntry.name } : {}),
+      ...(modelOverride ? { modelOverride } : {}),
     });
 
     // Acknowledge receipt immediately

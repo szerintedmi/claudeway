@@ -92,7 +92,7 @@ channels:
 #     # Note: Deepgram's `speed` param is REST-only, not supported on WebSocket streaming
 
 defaults:
-  model: opus
+  model: opus # per-message override: start a Slack message with "!model:<name>"
   systemPrompt: >-
       # Your responses
 
