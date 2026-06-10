@@ -96,6 +96,8 @@ interface PersistentProcessEntry {
   totalTokens: number;
   idleTimer: ReturnType<typeof setTimeout>;
   lineBuffer: string;
+  /** Stderr of the current turn (bounded; reset when a new turn is written to stdin) */
+  stderrBuf: string;
   currentTurn: {
     resolve: (r: ClaudeResult) => void;
     reject: (e: Error) => void;
@@ -515,10 +517,11 @@ export function processIdentityKey(
   permissions: UserPermissions,
   config: Config,
   channelId: string,
+  model: string,
 ): string {
   const permPart = permissionKeyStr(permissions);
   const envPart = resolveExposedEnvVarNames(config, channelId, permissions).join(',');
-  return `${userId}|${permPart}|${envPart}`;
+  return `${userId}|${permPart}|${envPart}|${model}`;
 }
 
 function spawnClaudeProcess(args: string[], cwd: string, env: Record<string, string>) {
@@ -1068,6 +1071,7 @@ function createPersistentProcess(
     options.userPermissions,
     options.config,
     options.channelId,
+    options.model,
   );
 
   const entry: PersistentProcessEntry = {
@@ -1083,6 +1087,7 @@ function createPersistentProcess(
     totalTokens: 0,
     idleTimer: setTimeout(() => {}, 0), // placeholder; reset immediately below
     lineBuffer: '',
+    stderrBuf: '',
     currentTurn: null,
   };
 
@@ -1109,7 +1114,10 @@ function createPersistentProcess(
 
   proc.stderr.on('data', (data: Buffer) => {
     resetIdleTimer();
-    console.error(`[${options.channelId}] Persistent stderr: ${data.toString().trim()}`);
+    const text = data.toString();
+    // Keep the tail so the close handler can include the current turn's stderr
+    entry.stderrBuf = (entry.stderrBuf + text).slice(-2048);
+    console.error(`[${options.channelId}] Persistent stderr: ${text.trim()}`);
   });
 
   proc.on('close', (code) => {
@@ -1126,7 +1134,8 @@ function createPersistentProcess(
       const turn = entry.currentTurn;
       entry.currentTurn = null;
       if (code !== 0) {
-        turn.reject(new Error(`Persistent Claude process exited with code ${code}`));
+        const stderrPart = entry.stderrBuf.trim() ? `: ${entry.stderrBuf.trim()}` : '';
+        turn.reject(new Error(`Persistent Claude process exited with code ${code}${stderrPart}`));
       } else {
         // Process ended cleanly mid-turn — resolve with what we have
         turn.resolve({
@@ -1273,6 +1282,7 @@ export async function runClaudePersistentStreaming(
     options.userPermissions,
     options.config,
     channelId,
+    options.model,
   );
   if (entry && !entry.proc.killed && entry.identityKey !== incomingIdentityKey) {
     console.log(`[${channelId}] Process identity changed — respawning persistent process`);
@@ -1311,6 +1321,7 @@ export async function runClaudePersistentStreaming(
       return;
     }
 
+    entry.stderrBuf = '';
     entry.currentTurn = {
       resolve,
       reject,

@@ -13,6 +13,8 @@ export interface QueuedMessage {
   userName?: string;
   /** Which adapter enqueued this message (default: "slack") */
   adapter?: 'slack' | 'voice';
+  /** Per-turn model override parsed from a `!model:<name>` message prefix */
+  modelOverride?: string;
 }
 
 import { DATA_DIR } from './config.js';
@@ -61,12 +63,21 @@ export function getPending(): QueuedMessage[] {
   }
 }
 
-export function updateQueuedText(channelId: string, ts: string, newText: string): boolean {
+export function updateQueuedMessage(
+  channelId: string,
+  ts: string,
+  updates: { text: string; modelOverride?: string },
+): boolean {
   const file = messageFile(channelId, ts);
   if (!existsSync(file)) return false;
   try {
     const existing = JSON.parse(readFileSync(file, 'utf-8')) as QueuedMessage;
-    existing.text = newText;
+    existing.text = updates.text;
+    if (updates.modelOverride === undefined) {
+      delete existing.modelOverride;
+    } else {
+      existing.modelOverride = updates.modelOverride;
+    }
     writeFileSync(file, JSON.stringify(existing, null, 2), 'utf-8');
     return true;
   } catch {

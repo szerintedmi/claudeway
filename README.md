@@ -313,6 +313,17 @@ Queued: 5 messages (3 recycler, 2 claudeway)
 
 Killed processes are handled gracefully — the error handler posts a message in the thread and the channel's queue continues draining.
 
+### Per-Turn Model Override
+
+Prefix a message with `!model:<name>` to run just that message with a different model:
+
+```
+@bot !model:opus refactor the queue module
+!model:claude-opus-4-8 deep review of this thread
+```
+
+Unlike magic commands, this rides the normal message queue — only the model changes. The override applies to that one message; the next message uses the channel/default model again. The model name is not validated: it's passed straight to `claude --model`, and if the CLI rejects it the error is reported in the thread. Editing a still-queued message re-parses the prefix, so you can add, change, or remove the override before processing starts. In persistent process mode the session is transparently respawned with `--resume`, so conversation context is preserved across model switches.
+
 ## Development
 
 ```bash

@@ -177,8 +177,8 @@ describe('processIdentityKey', () => {
   it('produces different keys for different users', () => {
     const config = makeConfig();
     const perms = new Set(['git']);
-    const key1 = processIdentityKey('U001', perms, config, 'C001');
-    const key2 = processIdentityKey('U002', perms, config, 'C001');
+    const key1 = processIdentityKey('U001', perms, config, 'C001', 'opus');
+    const key2 = processIdentityKey('U002', perms, config, 'C001', 'opus');
     expect(key1).not.toBe(key2);
     expect(key1).toContain('U001');
     expect(key2).toContain('U002');
@@ -186,8 +186,8 @@ describe('processIdentityKey', () => {
 
   it('produces different keys for different permissions', () => {
     const config = makeConfig();
-    const key1 = processIdentityKey('U001', new Set(['git', 'jiraWrite']), config, 'C001');
-    const key2 = processIdentityKey('U001', new Set(), config, 'C001');
+    const key1 = processIdentityKey('U001', new Set(['git', 'jiraWrite']), config, 'C001', 'opus');
+    const key2 = processIdentityKey('U001', new Set(), config, 'C001', 'opus');
     expect(key1).not.toBe(key2);
   });
 
@@ -200,9 +200,19 @@ describe('processIdentityKey', () => {
     });
 
     const perms = new Set(['git']);
-    const key1 = processIdentityKey('U001', perms, config1, 'C001');
-    const key2 = processIdentityKey('U001', perms, config2, 'C001');
+    const key1 = processIdentityKey('U001', perms, config1, 'C001', 'opus');
+    const key2 = processIdentityKey('U001', perms, config2, 'C001', 'opus');
     expect(key1).not.toBe(key2);
+  });
+
+  it('produces different keys for different models, equal keys for the same model', () => {
+    const config = makeConfig();
+    const perms = new Set(['git']);
+    const key1 = processIdentityKey('U001', perms, config, 'C001', 'opus');
+    const key2 = processIdentityKey('U001', perms, config, 'C001', 'sonnet');
+    const key3 = processIdentityKey('U001', perms, config, 'C001', 'opus');
+    expect(key1).not.toBe(key2);
+    expect(key1).toBe(key3);
   });
 
   it('includes sorted env var names in the key', () => {
@@ -212,7 +222,7 @@ describe('processIdentityKey', () => {
       },
     });
 
-    const key = processIdentityKey('U001', new Set(['jiraWrite']), config, 'C001');
+    const key = processIdentityKey('U001', new Set(['jiraWrite']), config, 'C001', 'opus');
     // Env var names should be sorted
     expect(key).toContain('JIRA_API_TOKEN,JIRA_URL');
   });
