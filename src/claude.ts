@@ -518,10 +518,11 @@ export function processIdentityKey(
   config: Config,
   channelId: string,
   model: string,
+  effort: string,
 ): string {
   const permPart = permissionKeyStr(permissions);
   const envPart = resolveExposedEnvVarNames(config, channelId, permissions).join(',');
-  return `${userId}|${permPart}|${envPart}|${model}`;
+  return `${userId}|${permPart}|${envPart}|${model}|${effort}`;
 }
 
 function spawnClaudeProcess(args: string[], cwd: string, env: Record<string, string>) {
@@ -1072,6 +1073,7 @@ function createPersistentProcess(
     options.config,
     options.channelId,
     options.model,
+    options.effort ?? '',
   );
 
   const entry: PersistentProcessEntry = {
@@ -1283,6 +1285,7 @@ export async function runClaudePersistentStreaming(
     options.config,
     channelId,
     options.model,
+    options.effort ?? '',
   );
   if (entry && !entry.proc.killed && entry.identityKey !== incomingIdentityKey) {
     console.log(`[${channelId}] Process identity changed — respawning persistent process`);

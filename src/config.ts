@@ -87,7 +87,12 @@ export function permissionKey(p: UserPermissions | undefined): string {
   return [...p].sort().join(',');
 }
 
-export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+export function isEffortLevel(value: string): value is EffortLevel {
+  return (EFFORT_LEVELS as readonly string[]).includes(value);
+}
 
 export interface ChannelConfig {
   name: string;
@@ -189,6 +194,19 @@ export function loadConfig(): Config {
   }
   if (!config.defaults.processMode) {
     config.defaults.processMode = 'oneshot';
+  }
+
+  // Validate effort levels — YAML bypasses the compile-time EffortLevel type, and the
+  // CLI silently falls back to its default on an unknown --effort value
+  for (const [where, effort] of [
+    ['defaults', config.defaults.effort] as const,
+    ...Object.entries(config.channels).map(([chId, ch]) => [`channel ${chId}`, ch.effort] as const),
+  ]) {
+    if (effort !== undefined && !isEffortLevel(effort)) {
+      throw new Error(
+        `${configPath}: ${where} has unknown effort "${effort}". Valid: ${EFFORT_LEVELS.join(', ')}`,
+      );
+    }
   }
 
   // Validate permissions config

@@ -4,7 +4,10 @@ import {
   loadConfig,
   resolvedChannelConfig,
   resolvedDmConfig,
+  EFFORT_LEVELS,
+  isEffortLevel,
   type AllowedUserEntry,
+  type EffortLevel,
   type TriggerMode,
 } from '../../config.js';
 import { enqueue, dequeue, updateQueuedMessage, getPending } from '../../queue.js';
@@ -42,7 +45,8 @@ interface SlackMessage {
   bot_id?: string;
   files?: SlackFile[];
   deleted_ts?: string;
-  message?: { ts?: string; text?: string };
+  // message_changed events carry thread_ts on the inner message, not the envelope
+  message?: { ts?: string; text?: string; thread_ts?: string };
   attachments?: SlackAttachment[];
 }
 
@@ -74,18 +78,49 @@ export function parseModelOverride(text: string): { model: string; rest: string 
   return { model: m[1], rest: (m[2] ?? '').trim() };
 }
 
+// Per-turn effort override: "!effort:<level> <message>". The token is captured freeform
+// (alphanumeric first char so it can't become a CLI flag) and validated against
+// EFFORT_LEVELS in the handler — so an unknown value is reported, not silently ignored.
+const EFFORT_OVERRIDE_RE = /^\s*!effort:([A-Za-z0-9][\w.-]*)(?:\s+([\s\S]*))?$/;
+
+export function parseEffortOverride(text: string): { effort: string; rest: string } | null {
+  const m = text.match(EFFORT_OVERRIDE_RE);
+  if (!m) return null;
+  return { effort: m[1].toLowerCase(), rest: (m[2] ?? '').trim() };
+}
+
+const unknownEffortWarning = (effort: string): string =>
+  `Unknown effort '${effort}'. Valid: ${EFFORT_LEVELS.join(', ')}.`;
+
 /**
- * Strip a leading `!model:<name>` token (after any bot mention) from message text.
- * Keeps the mention prefix so shouldRespond() still sees it in mention-trigger channels.
+ * Strip leading `!model:<name>` / `!effort:<level>` tokens (in any order, after any bot
+ * mention) from message text. Keeps the mention prefix so shouldRespond() still sees it in
+ * mention-trigger channels. The effort value is returned freeform; the caller validates it.
  */
-export function applyModelOverride(
+export function applyOverrides(
   text: string,
   botUserId: string,
-): { text: string; modelOverride?: string } {
+): { text: string; modelOverride?: string; effortOverride?: string } {
   const mentionPrefix = text.match(new RegExp(`^\\s*<@${botUserId}>\\s*`))?.[0] ?? '';
-  const override = parseModelOverride(text.slice(mentionPrefix.length));
-  if (!override) return { text };
-  return { text: mentionPrefix + override.rest, modelOverride: override.model };
+  let rest = text.slice(mentionPrefix.length);
+  let modelOverride: string | undefined;
+  let effortOverride: string | undefined;
+  for (;;) {
+    const m = parseModelOverride(rest);
+    if (m && modelOverride === undefined) {
+      modelOverride = m.model;
+      rest = m.rest;
+      continue;
+    }
+    const e = parseEffortOverride(rest);
+    if (e && effortOverride === undefined) {
+      effortOverride = e.effort;
+      rest = e.rest;
+      continue;
+    }
+    break;
+  }
+  return { text: mentionPrefix + rest, modelOverride, effortOverride };
 }
 
 export function registerMessageHandler(app: App, botUserId: string, canResolveUsers = true): void {
@@ -118,17 +153,52 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
     if (msg.subtype === 'message_changed' && msg.message?.ts && msg.message?.text) {
       const origTs = msg.message.ts;
       if (!isMessageProcessing(msg.channel, origTs)) {
-        // Re-parse the model override so edits can add, change, or remove it
-        const applied = applyModelOverride(msg.message.text, botUserId);
+        // Re-parse overrides so edits can add, change, or remove them
+        const applied = applyOverrides(msg.message.text, botUserId);
+        // On an invalid effort, still apply the rest of the edit (text/model) — discarding
+        // the whole edit would silently run the stale pre-edit prompt
+        const effortOverride =
+          applied.effortOverride && isEffortLevel(applied.effortOverride)
+            ? applied.effortOverride
+            : undefined;
         const updated = updateQueuedMessage(msg.channel, origTs, {
           text: applied.text,
           modelOverride: applied.modelOverride,
+          effortOverride,
         });
         if (updated) {
           console.log(`[${msg.channel}] Queued message edited — updated in queue: ${origTs}`);
+          // Warn only when the edit affected a still-queued message — edits of
+          // already-processed (or never-queued) messages stay silent no-ops. Queued
+          // messages have already passed the config/trigger/authorization gates.
+          if (applied.effortOverride && !effortOverride) {
+            await warnInThread(
+              client,
+              msg.channel,
+              msg.message.thread_ts ?? msg.thread_ts ?? origTs,
+              `${unknownEffortWarning(applied.effortOverride)} Edit applied without the effort override.`,
+            );
+          }
         }
       }
       return;
+    }
+
+    // Per-turn overrides — strip the "!model:<name>" / "!effort:<level>" tokens, keep the
+    // mention. Stripped BEFORE the magic-command check so an override prefix can't swallow
+    // a magic command into a Claude prompt (e.g. "!effort:high !kill" still kills).
+    // Validation feedback is deferred until after the config/trigger/authorization gates.
+    let modelOverride: string | undefined;
+    let effortOverride: EffortLevel | undefined;
+    let rawEffortOverride: string | undefined;
+    if (msg.text) {
+      const applied = applyOverrides(msg.text, botUserId);
+      msg.text = applied.text;
+      modelOverride = applied.modelOverride;
+      rawEffortOverride = applied.effortOverride;
+      if (rawEffortOverride && isEffortLevel(rawEffortOverride)) {
+        effortOverride = rawEffortOverride;
+      }
     }
 
     // Handle magic commands (!ps, !kill, !killall) — bypass queue and Claude processing
@@ -149,14 +219,6 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
       return;
     }
 
-    // Per-turn model override — strip the "!model:<name>" token, keep the mention
-    let modelOverride: string | undefined;
-    if (msg.text) {
-      const applied = applyModelOverride(msg.text, botUserId);
-      msg.text = applied.text;
-      modelOverride = applied.modelOverride;
-    }
-
     const attachmentText = extractTextFromAttachments(msg.attachments);
     // Collect files from both top-level msg.files and inside shared-message attachments
     const attachmentFiles: SlackFile[] = (msg.attachments ?? [])
@@ -172,21 +234,12 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
     const allFiles: SlackFile[] = [...(msg.files ?? []), ...attachmentFiles];
     const hasText = !!(msg.text || attachmentText);
     const hasFiles = allFiles.some((f) => f.url_private_download);
-    // Model override with no prompt body (and nothing else to act on) — usage hint
-    if (modelOverride && !hasFiles && !attachmentText) {
-      const bodyText = msg.text?.replace(new RegExp(`^\\s*<@${botUserId}>\\s*`), '').trim();
-      if (!bodyText) {
-        await warnInThread(
-          client,
-          msg.channel,
-          msg.thread_ts ?? msg.ts,
-          'Usage: `!model:<name> <message>` — add a prompt after the model override.',
-        );
-        return;
-      }
-    }
-    // Require at least text or files
-    if (!hasText && !hasFiles) return;
+    // Override with no prompt body (and nothing else to act on) — usage hint, deferred
+    // until after the gates below so the bot never replies where it would stay silent
+    const bareOverride =
+      !!(modelOverride || rawEffortOverride) && !hasFiles && !attachmentText && !magicText.trim();
+    // Require at least text or files (a bare override falls through for the usage hint)
+    if (!hasText && !hasFiles && !bareOverride) return;
 
     // Quick config check + user authorization
     let channelAllowedUsers: AllowedUserEntry[] | undefined;
@@ -241,6 +294,27 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
         thread_ts: msg.thread_ts ?? msg.ts,
         text: "Sorry, you're not authorized to use this bot in this channel.",
       });
+      return;
+    }
+
+    // Validate the effort override against the known set — block + hint on an unknown value
+    // (the CLI silently runs at the default effort otherwise, with no thread feedback)
+    if (rawEffortOverride && !effortOverride) {
+      await warnInThread(
+        client,
+        msg.channel,
+        msg.thread_ts ?? msg.ts,
+        unknownEffortWarning(rawEffortOverride),
+      );
+      return;
+    }
+    if (bareOverride) {
+      await warnInThread(
+        client,
+        msg.channel,
+        msg.thread_ts ?? msg.ts,
+        'Usage: `!model:<name>` / `!effort:<level>` — add a prompt after the override(s).',
+      );
       return;
     }
 
@@ -304,6 +378,7 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
       ...(filePaths.length > 0 ? { filePaths } : {}),
       ...(senderEntry ? { userName: senderEntry.name } : {}),
       ...(modelOverride ? { modelOverride } : {}),
+      ...(effortOverride ? { effortOverride } : {}),
     });
 
     // Acknowledge receipt immediately
