@@ -3,7 +3,11 @@ import { mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import type { WebClient } from '@slack/web-api';
-import { parseModelOverride, applyModelOverride } from '../adapters/slack/handler.js';
+import {
+  parseModelOverride,
+  parseEffortOverride,
+  applyOverrides,
+} from '../adapters/slack/handler.js';
 import { handleMagicCommand } from '../adapters/slack/commands.js';
 import {
   enqueue,
@@ -64,37 +68,105 @@ describe('parseModelOverride', () => {
   });
 });
 
-describe('applyModelOverride', () => {
-  it('strips the override and keeps the bot mention', () => {
-    expect(applyModelOverride('<@BOT> !model:opus do x', 'BOT')).toEqual({
+describe('parseEffortOverride', () => {
+  it('parses a level and message body', () => {
+    expect(parseEffortOverride('!effort:high refactor this')).toEqual({
+      effort: 'high',
+      rest: 'refactor this',
+    });
+  });
+
+  it('lowercases the level', () => {
+    expect(parseEffortOverride('!effort:HIGH do x')).toEqual({ effort: 'high', rest: 'do x' });
+  });
+
+  it('returns empty rest when there is no message body', () => {
+    expect(parseEffortOverride('!effort:max')).toEqual({ effort: 'max', rest: '' });
+  });
+
+  it('captures an unknown value freeform (validation happens in the handler)', () => {
+    expect(parseEffortOverride('!effort:turbo hi')).toEqual({ effort: 'turbo', rest: 'hi' });
+  });
+
+  it('ignores mid-message occurrences', () => {
+    expect(parseEffortOverride('please use !effort:high')).toBeNull();
+  });
+
+  it('rejects option-like values', () => {
+    expect(parseEffortOverride('!effort:--x hi')).toBeNull();
+  });
+});
+
+describe('applyOverrides', () => {
+  it('strips the model override and keeps the bot mention', () => {
+    expect(applyOverrides('<@BOT> !model:opus do x', 'BOT')).toEqual({
       text: '<@BOT> do x',
       modelOverride: 'opus',
+      effortOverride: undefined,
     });
   });
 
   it('works without a mention (direct-respond channels)', () => {
-    expect(applyModelOverride('!model:sonnet do x', 'BOT')).toEqual({
+    expect(applyOverrides('!model:sonnet do x', 'BOT')).toEqual({
       text: 'do x',
       modelOverride: 'sonnet',
+      effortOverride: undefined,
     });
   });
 
   it('leaves text unchanged when there is no override', () => {
-    expect(applyModelOverride('<@BOT> just a message', 'BOT')).toEqual({
+    expect(applyOverrides('<@BOT> just a message', 'BOT')).toEqual({
       text: '<@BOT> just a message',
+      modelOverride: undefined,
+      effortOverride: undefined,
     });
   });
 
   it('does not treat an override after other text as an override', () => {
-    expect(applyModelOverride('<@BOT> tell me about !model:opus syntax', 'BOT')).toEqual({
+    expect(applyOverrides('<@BOT> tell me about !model:opus syntax', 'BOT')).toEqual({
       text: '<@BOT> tell me about !model:opus syntax',
+      modelOverride: undefined,
+      effortOverride: undefined,
     });
   });
 
   it('keeps only the mention when the override has no body', () => {
-    expect(applyModelOverride('<@BOT> !model:opus', 'BOT')).toEqual({
+    expect(applyOverrides('<@BOT> !model:opus', 'BOT')).toEqual({
       text: '<@BOT> ',
       modelOverride: 'opus',
+      effortOverride: undefined,
+    });
+  });
+
+  it('strips an effort override', () => {
+    expect(applyOverrides('<@BOT> !effort:high do x', 'BOT')).toEqual({
+      text: '<@BOT> do x',
+      modelOverride: undefined,
+      effortOverride: 'high',
+    });
+  });
+
+  it('combines model and effort overrides (model first)', () => {
+    expect(applyOverrides('<@BOT> !model:opus !effort:high do x', 'BOT')).toEqual({
+      text: '<@BOT> do x',
+      modelOverride: 'opus',
+      effortOverride: 'high',
+    });
+  });
+
+  it('combines model and effort overrides (effort first)', () => {
+    expect(applyOverrides('!effort:high !model:opus do x', 'BOT')).toEqual({
+      text: 'do x',
+      modelOverride: 'opus',
+      effortOverride: 'high',
+    });
+  });
+
+  it('applies only the first of a duplicated token', () => {
+    expect(applyOverrides('!effort:low !effort:high x', 'BOT')).toEqual({
+      text: '!effort:high x',
+      modelOverride: undefined,
+      effortOverride: 'low',
     });
   });
 });
@@ -111,6 +183,18 @@ describe('magic-command non-interception', () => {
   it('does not intercept an override with a message', async () => {
     expect(
       await handleMagicCommand('!model:opus do x', 'C001', 'ts', 'ts', 'U001', stubClient),
+    ).toBe(false);
+  });
+
+  it('does not intercept a bare effort override', async () => {
+    expect(await handleMagicCommand('!effort:high', 'C001', 'ts', 'ts', 'U001', stubClient)).toBe(
+      false,
+    );
+  });
+
+  it('does not intercept an effort override with a message', async () => {
+    expect(
+      await handleMagicCommand('!effort:high do x', 'C001', 'ts', 'ts', 'U001', stubClient),
     ).toBe(false);
   });
 });
@@ -158,6 +242,21 @@ describe('queue modelOverride persistence', () => {
     expect(found?.modelOverride).toBeUndefined();
     expect(found && 'modelOverride' in found).toBe(false);
   });
+
+  it('round-trips and clears effortOverride', () => {
+    enqueue({ ...baseMsg, effortOverride: 'high' });
+    let found = getPending().find((m) => m.channelId === channelId && m.ts === ts);
+    expect(found?.effortOverride).toBe('high');
+
+    expect(updateQueuedMessage(channelId, ts, { text: 'do y', effortOverride: 'low' })).toBe(true);
+    found = getPending().find((m) => m.channelId === channelId && m.ts === ts);
+    expect(found?.effortOverride).toBe('low');
+
+    expect(updateQueuedMessage(channelId, ts, { text: 'do z' })).toBe(true);
+    found = getPending().find((m) => m.channelId === channelId && m.ts === ts);
+    expect(found?.effortOverride).toBeUndefined();
+    expect(found && 'effortOverride' in found).toBe(false);
+  });
 });
 
 describe('engine model resolution', () => {
@@ -179,6 +278,7 @@ channels:
     responseMode: stream-update
 defaults:
   model: channel-default-model
+  effort: medium
   systemPrompt: test prompt
   timeoutMs: 300000
   responseMode: batch
@@ -238,7 +338,10 @@ defaults:
     };
   }
 
-  function makeQueued(channelId: string, modelOverride?: string): QueuedMessage {
+  function makeQueued(
+    channelId: string,
+    overrides: { modelOverride?: string; effortOverride?: QueuedMessage['effortOverride'] } = {},
+  ): QueuedMessage {
     return {
       channelId,
       userId: 'U001',
@@ -246,25 +349,29 @@ defaults:
       ts: `2.${Math.floor(performance.now() * 1000)}`,
       threadTs: '2.000001',
       queuedAt: new Date().toISOString(),
-      ...(modelOverride ? { modelOverride } : {}),
+      ...(overrides.modelOverride ? { modelOverride: overrides.modelOverride } : {}),
+      ...(overrides.effortOverride ? { effortOverride: overrides.effortOverride } : {}),
     };
   }
 
-  async function runWith(channelId: string, modelOverride?: string) {
+  async function runWith(
+    channelId: string,
+    overrides: { modelOverride?: string; effortOverride?: QueuedMessage['effortOverride'] } = {},
+  ) {
     const { processQueuedMessage } = await import('../core/engine.js');
     capturedOpts.length = 0;
-    await processQueuedMessage(makeQueued(channelId, modelOverride), makeResponder());
+    await processQueuedMessage(makeQueued(channelId, overrides), makeResponder());
     expect(capturedOpts.length).toBe(1);
     return capturedOpts[0];
   }
 
-  it('passes the override to the batch runner', async () => {
-    const opts = await runWith('CMODELBATCH', 'override-model');
+  it('passes the model override to the batch runner', async () => {
+    const opts = await runWith('CMODELBATCH', { modelOverride: 'override-model' });
     expect(opts.model).toBe('override-model');
   });
 
-  it('passes the override to the streaming runner', async () => {
-    const opts = await runWith('CMODELSTREAM', 'override-model');
+  it('passes the model override to the streaming runner', async () => {
+    const opts = await runWith('CMODELSTREAM', { modelOverride: 'override-model' });
     expect(opts.model).toBe('override-model');
   });
 
@@ -273,5 +380,29 @@ defaults:
     expect(batchOpts.model).toBe('channel-default-model');
     const streamOpts = await runWith('CMODELSTREAM');
     expect(streamOpts.model).toBe('channel-default-model');
+  });
+
+  it('passes the effort override to the batch runner', async () => {
+    const opts = await runWith('CMODELBATCH', { effortOverride: 'xhigh' });
+    expect(opts.effort).toBe('xhigh');
+  });
+
+  it('passes the effort override to the streaming runner', async () => {
+    const opts = await runWith('CMODELSTREAM', { effortOverride: 'xhigh' });
+    expect(opts.effort).toBe('xhigh');
+  });
+
+  it('falls back to the channel/default effort without an override', async () => {
+    const batchOpts = await runWith('CMODELBATCH');
+    expect(batchOpts.effort).toBe('medium');
+    const streamOpts = await runWith('CMODELSTREAM');
+    expect(streamOpts.effort).toBe('medium');
+  });
+
+  it('ignores an unknown effort override from a queue file (engine chokepoint guard)', async () => {
+    const opts = await runWith('CMODELBATCH', {
+      effortOverride: 'bogus' as unknown as QueuedMessage['effortOverride'],
+    });
+    expect(opts.effort).toBe('medium');
   });
 });

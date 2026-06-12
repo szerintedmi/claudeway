@@ -4,6 +4,7 @@ import {
   resolvedDmConfig,
   resolveUserPermissions,
   resolvedTempDir,
+  isEffortLevel,
   type ResolvedChannelConfig,
   type UserPermissions,
 } from '../config.js';
@@ -119,9 +120,25 @@ export async function processQueuedMessage(
     .replace(/^\[[^\]]+ reference\][\s\S]*?\n\n/, '')
     .replace(/^\[Thread context[\s\S]*?\[Current message\]\n/, '');
   const modelSuffix = queued.modelOverride ? ` [model: ${queued.modelOverride}]` : '';
+  const effortSuffix = queued.effortOverride ? ` [effort: ${queued.effortOverride}]` : '';
   console.log(
-    `[${effectiveConfig.name}] Processing (${processMode}/${mode})${modelSuffix}: ${logText.substring(0, 80)}...`,
+    `[${effectiveConfig.name}] Processing (${processMode}/${mode})${modelSuffix}${effortSuffix}: ${logText.substring(0, 80)}...`,
   );
+
+  // Resolve per-turn overrides once for both runner branches. The engine is the
+  // chokepoint every adapter funnels through, and queue files are plain JSON read
+  // back from disk — re-validate the effort instead of trusting the static type.
+  const model = queued.modelOverride ?? channelConfig.model;
+  let effort = effectiveConfig.effort;
+  if (queued.effortOverride) {
+    if (isEffortLevel(queued.effortOverride)) {
+      effort = queued.effortOverride;
+    } else {
+      console.warn(
+        `[${effectiveConfig.name}] Ignoring unknown effort override '${queued.effortOverride}' from queue`,
+      );
+    }
+  }
 
   const tempDir = createRequestTempDir(baseDir, queued.channelId);
 
@@ -146,8 +163,8 @@ export async function processQueuedMessage(
       const claudeOpts = {
         message: queued.text,
         cwd: channelConfig.folder,
-        model: queued.modelOverride ?? channelConfig.model,
-        effort: effectiveConfig.effort,
+        model,
+        effort,
         systemPrompt: effectiveConfig.systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
@@ -177,8 +194,8 @@ export async function processQueuedMessage(
       const claudeStreamOpts = {
         message: queued.text,
         cwd: channelConfig.folder,
-        model: queued.modelOverride ?? channelConfig.model,
-        effort: effectiveConfig.effort,
+        model,
+        effort,
         systemPrompt: effectiveConfig.systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,

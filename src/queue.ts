@@ -15,9 +15,11 @@ export interface QueuedMessage {
   adapter?: 'slack' | 'voice';
   /** Per-turn model override parsed from a `!model:<name>` message prefix */
   modelOverride?: string;
+  /** Per-turn effort override parsed from a `!effort:<level>` message prefix */
+  effortOverride?: EffortLevel;
 }
 
-import { DATA_DIR } from './config.js';
+import { DATA_DIR, type EffortLevel } from './config.js';
 
 const QUEUE_DIR = join(DATA_DIR, 'queue');
 
@@ -66,18 +68,26 @@ export function getPending(): QueuedMessage[] {
 export function updateQueuedMessage(
   channelId: string,
   ts: string,
-  updates: { text: string; modelOverride?: string },
+  updates: { text: string } & Pick<QueuedMessage, 'modelOverride' | 'effortOverride'>,
 ): boolean {
   const file = messageFile(channelId, ts);
   if (!existsSync(file)) return false;
   try {
     const existing = JSON.parse(readFileSync(file, 'utf-8')) as QueuedMessage;
     existing.text = updates.text;
-    if (updates.modelOverride === undefined) {
-      delete existing.modelOverride;
-    } else {
-      existing.modelOverride = updates.modelOverride;
-    }
+    // Per-turn overrides: undefined means the edit removed the token — delete the field
+    const syncOverride = <K extends 'modelOverride' | 'effortOverride'>(
+      key: K,
+      value: QueuedMessage[K],
+    ) => {
+      if (value === undefined) {
+        delete existing[key];
+      } else {
+        existing[key] = value;
+      }
+    };
+    syncOverride('modelOverride', updates.modelOverride);
+    syncOverride('effortOverride', updates.effortOverride);
     writeFileSync(file, JSON.stringify(existing, null, 2), 'utf-8');
     return true;
   } catch {

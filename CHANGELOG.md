@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.29.0] - 2026-06-11
+
+### Added
+- **Per-turn effort override**: start a Slack message with `!effort:<level>` (`low`, `medium`, `high`, `xhigh`, `max`) to run just that message at a different thinking-effort level. Per-turn only — the next message reverts to the channel/default effort. Combines with `!model:` in any order, and override prefixes compose with magic commands (`!effort:high !kill` still executes the kill). The value is validated against the known set; an unrecognized level is rejected in-thread with the valid list (the CLI would otherwise silently run at the default effort) — validation replies are only sent after the channel-config/trigger/authorization gates, so the bot never replies where it would otherwise stay silent. Editing a still-queued message re-parses the prefix; an invalid effort in an edit applies the rest of the edit without the override and warns. Persistent sessions respawn with `--resume`, preserving context. The `xhigh` level was added to `EffortLevel` to match the current CLI
+- **Config effort validation**: `effort` values in `config.yaml` (defaults and per-channel) are validated against the known levels at load time — a typo fails loudly instead of silently running at the CLI default effort. The engine also ignores unknown effort overrides read back from queue files
+
 ## [0.28.0] - 2026-06-09
 
 ### Added

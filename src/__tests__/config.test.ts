@@ -223,6 +223,58 @@ defaults:
     expect(() => loadConfig()).not.toThrow();
   });
 
+  it('rejects an unknown effort level in defaults', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+defaults:
+  model: opus
+  effort: hgih
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    expect(() => loadConfig()).toThrow('defaults has unknown effort "hgih"');
+  });
+
+  it('rejects an unknown effort level on a channel', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+    effort: turbo
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    expect(() => loadConfig()).toThrow('channel C001 has unknown effort "turbo"');
+  });
+
+  it('accepts valid effort levels', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+    effort: xhigh
+defaults:
+  model: opus
+  effort: medium
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    expect(() => loadConfig()).not.toThrow();
+  });
+
   it('rejects unknown permissions in allowedUsers', () => {
     const yaml = `
 channels:

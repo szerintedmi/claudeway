@@ -93,6 +93,7 @@ channels:
 
 defaults:
   model: opus # per-message override: start a Slack message with "!model:<name>"
+  # effort: medium # thinking effort: low|medium|high|xhigh|max; per-message override: "!effort:<level>"
   systemPrompt: >-
       # Your responses
 

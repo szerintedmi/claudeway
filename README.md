@@ -233,7 +233,7 @@ Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutd
 | `responseMode` | How responses are delivered (see below) | from defaults |
 | `processMode` | How the Claude CLI process is managed (see below) | from defaults |
 | `triggerMode` | When to respond: `all` or `mention` (see below) | `all` |
-| `effort` | Claude CLI thinking effort (`low`, `medium`, `high`) | from defaults |
+| `effort` | Claude CLI thinking effort (`low`, `medium`, `high`, `xhigh`, `max`); per-message override via `!effort:<level>` | from defaults |
 | `allowedUsers` | Slack user IDs allowed to interact with the bot in this channel. Permissions also gate env var exposure. | everyone |
 
 ### Permissions
@@ -323,6 +323,17 @@ Prefix a message with `!model:<name>` to run just that message with a different 
 ```
 
 Unlike magic commands, this rides the normal message queue — only the model changes. The override applies to that one message; the next message uses the channel/default model again. The model name is not validated: it's passed straight to `claude --model`, and if the CLI rejects it the error is reported in the thread. Editing a still-queued message re-parses the prefix, so you can add, change, or remove the override before processing starts. In persistent process mode the session is transparently respawned with `--resume`, so conversation context is preserved across model switches.
+
+### Per-Turn Effort Override
+
+Prefix a message with `!effort:<level>` to run just that message at a different thinking-effort level (`low`, `medium`, `high`, `xhigh`, `max`):
+
+```
+@bot !effort:high refactor the queue module
+!effort:max deep review of this thread
+```
+
+Same mechanics as the model override — per-turn only, rides the normal queue, edits re-parse the prefix, and persistent sessions respawn with `--resume`. It combines with `!model:` in any order (e.g. `!model:opus !effort:high …`), and override prefixes compose with magic commands (`!effort:high !kill` still executes the kill). Unlike the model name, the effort value **is** validated: an unrecognized level (e.g. `!effort:turbo`) is rejected in-thread with the valid list instead of running — because the CLI would otherwise silently fall back to the default effort. Validation replies are only sent in channels/threads where the bot is configured, triggered, and the sender is authorized; editing a queued message to an invalid level applies the rest of the edit and warns that the effort override was dropped. The `effort` values in `config.yaml` itself are validated at load time the same way.
 
 ## Development
 
