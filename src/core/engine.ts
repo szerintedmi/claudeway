@@ -204,6 +204,9 @@ export async function processQueuedMessage(
         tempDir,
         ...(processMode === 'persistent' ? { tempBaseDir: baseDir } : {}),
         onTextDelta: (text: string) => streamer.onTextDelta(text),
+        onReasoningDelta: streamer.onReasoningDelta
+          ? (text: string) => streamer.onReasoningDelta!(text)
+          : undefined,
         onToolEvent: (event: import('../claude.js').ToolEventPayload) =>
           streamer.onToolEvent(event),
         onProcessSpawned: streamer.onProcessSpawned

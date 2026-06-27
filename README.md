@@ -233,6 +233,7 @@ Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutd
 | `responseMode` | How responses are delivered (see below) | from defaults |
 | `processMode` | How the Claude CLI process is managed (see below) | from defaults |
 | `triggerMode` | When to respond: `all` or `mention` (see below) | `all` |
+| `collapseWorkingNotes` | `stream-native` only: show live "Working notes" (reasoning + tool steps) and collapse them into an attachment on completion (see below) | `true` |
 | `effort` | Claude CLI thinking effort (`low`, `medium`, `high`, `xhigh`, `max`); per-message override via `!effort:<level>` | from defaults |
 | `allowedUsers` | Slack user IDs allowed to interact with the bot in this channel. Permissions also gate env var exposure. | everyone |
 
@@ -281,9 +282,20 @@ Set `responseMode` in `defaults` or per channel:
 |------|-------------|
 | `batch` | Wait for the full response, then post it. Default, most reliable. |
 | `stream-update` | Post a message immediately, then update it every ~500ms as text arrives. Uses `chat.update`. Recommended streaming mode. |
-| `stream-native` | Use Slack's native streaming API via the typed SDK `ChatStreamer`. Sends `markdown_text` so Slack renders native Markdown. Shows a `:thinking_face:` placeholder until the first token arrives. Requires Enterprise Grid or `recipient_team_id` — will not work on standard Slack workspaces. |
+| `stream-native` | Use Slack's native streaming API (`chat.startStream`/`appendStream`/`stopStream`) directly. Sends `markdown_text` so Slack renders native Markdown. Shows a `:thinking_face:` placeholder until the first token arrives, and live "Working notes" while Claude works (see below). Requires Enterprise Grid or `recipient_team_id` — will not work on standard Slack workspaces. |
 
 Streaming modes give real-time feedback for long responses instead of showing an hourglass for 30+ seconds. If the final response exceeds the file upload threshold (12KB), streaming modes automatically fall back to uploading a file.
+
+### Working Notes (`stream-native`)
+
+When `collapseWorkingNotes` is `true` (the default), `stream-native` shows what Claude is doing while it works:
+
+- A live **🧠 Working notes** message streams Claude's extended-thinking reasoning and a running list of tool steps (`Reading config.ts`, `Delegating to agent…`, etc.). The answer streams in its own message.
+- When the turn finishes, the working notes **collapse into an expandable attachment** (Slack's "Show more…") above the clean final answer.
+
+Reasoning comes from the CLI's `stream-json` `thinking_delta` events, so the notes are populated even on turns where Claude jumps straight from tool calls to an answer with no prose in between. Inter-tool narration is shown live once (in the answer) and archived into the notes attachment — never duplicated.
+
+Set `collapseWorkingNotes: false` to disable: the answer streams as the sole live output, tool activity shows as a single self-replacing status line, and reasoning is not shown.
 
 ## Process Management
 

@@ -274,6 +274,7 @@ describe('formatChannelConfig', () => {
         '• Mode: `stream-native` / `persistent`',
         '• Trigger: `mention`',
         '• Timeout: 5m',
+        '• Collapse working notes: `true`',
       ].join('\n'),
     );
   });
@@ -431,6 +432,7 @@ describe('SlackChannelResponder native streaming fallback', () => {
   interface Send {
     kind: 'start' | 'append' | 'stop';
     text?: string;
+    ts?: string;
   }
 
   interface Calls {
@@ -468,6 +470,7 @@ describe('SlackChannelResponder native streaming fallback', () => {
       sequence: [],
     };
     let n = 0; // counts startStream + appendStream calls
+    let startN = 0; // counts startStream calls (one per distinct stream)
     const maybeThrow = (): void => {
       if (spec.transientAt === n) throw TRANSIENT;
       if (spec.failFrom != null && n >= spec.failFrom) throw TERMINAL;
@@ -490,20 +493,28 @@ describe('SlackChannelResponder native streaming fallback', () => {
         },
         startStream: async (a: Record<string, unknown>) => {
           n += 1;
-          calls.sends.push({ kind: 'start', text: a.markdown_text as string });
+          startN += 1;
+          // Distinct ts per stream so two-stream cases (notes + answer) are
+          // distinguishable. The first stream keeps the legacy 'stream-ts' id.
+          const ts = startN === 1 ? 'stream-ts' : `stream-ts-${startN}`;
+          calls.sends.push({ kind: 'start', text: a.markdown_text as string, ts });
           calls.sequence.push('start');
           maybeThrow();
-          return { ts: 'stream-ts' };
+          return { ts };
         },
         appendStream: async (a: Record<string, unknown>) => {
           n += 1;
-          calls.sends.push({ kind: 'append', text: a.markdown_text as string });
+          calls.sends.push({ kind: 'append', text: a.markdown_text as string, ts: a.ts as string });
           calls.sequence.push('append');
           maybeThrow();
           return {};
         },
         stopStream: async (a: Record<string, unknown>) => {
-          calls.sends.push({ kind: 'stop', text: a.markdown_text as string | undefined });
+          calls.sends.push({
+            kind: 'stop',
+            text: a.markdown_text as string | undefined,
+            ts: a.ts as string,
+          });
           calls.sequence.push('stop');
           if (spec.failStop) throw TERMINAL;
           return { ts: 'stream-ts' };
@@ -525,6 +536,8 @@ describe('SlackChannelResponder native streaming fallback', () => {
   const appendsOf = (calls: Calls): Send[] => calls.sends.filter((s) => s.kind === 'append');
   const stopsOf = (calls: Calls): Send[] => calls.sends.filter((s) => s.kind === 'stop');
 
+  // Default helper keeps collapse OFF so these tests exercise raw stream mechanics
+  // (no working-notes prefix or final collapse). Collapse behavior has its own tests.
   function makeResponder(client: WebClient): SlackChannelResponder {
     return new SlackChannelResponder(
       client,
@@ -534,7 +547,29 @@ describe('SlackChannelResponder native streaming fallback', () => {
       'stream-native',
       'U1',
       'T1',
+      false, // collapseWorkingNotes
     );
+  }
+
+  function makeCollapsingResponder(client: WebClient): SlackChannelResponder {
+    return new SlackChannelResponder(
+      client,
+      'C123',
+      'thread-ts',
+      'msg-ts',
+      'stream-native',
+      'U1',
+      'T1',
+      true, // collapseWorkingNotes
+    );
+  }
+
+  // The working-notes attachment text. Notes collapse via an in-place chat.update
+  // (with attachments), so look there rather than at posts.
+  function notesAttachmentText(calls: Calls): string | undefined {
+    const upd = calls.updates.find((p) => Array.isArray(p.attachments));
+    if (!upd) return undefined;
+    return (upd.attachments as Array<{ text?: string }>)[0]?.text;
   }
 
   it('repairs the partial message with the full text when the stream finalizes early', async () => {
@@ -605,6 +640,164 @@ describe('SlackChannelResponder native streaming fallback', () => {
     expect(calls.deletes.some((d) => d.ts === toolStatusTs)).toBe(true);
     // Sanity: a tool-status message was actually posted (thinking + tool status).
     expect(calls.posts).toHaveLength(2);
+  });
+
+  it('collapses reasoning and tool steps into a working-notes attachment, keeping the answer', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeCollapsingResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    // Reasoning streams first (as it does in real Claude output), so the notes
+    // stream opens before the answer stream and stays above it.
+    sr.onReasoningDelta?.('Let me think about the GCD approach.');
+    await microtasks();
+    sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'config.ts' });
+    await microtasks();
+    sr.onTextDelta('The answer is 42.');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('The answer is 42.', sr);
+
+    // The notes stream (opened first) is branded with the working-notes prefix.
+    const start = calls.sends.find((s) => s.kind === 'start');
+    expect(start?.text?.startsWith('🧠')).toBe(true);
+    // Notes collapsed IN PLACE on the notes ts (above the answer) as an attachment.
+    const notesUpdate = calls.updates.find((u) => Array.isArray(u.attachments));
+    expect(notesUpdate?.ts).toBe('stream-ts');
+    const notes = notesAttachmentText(calls);
+    expect(notes).toContain('Let me think about the GCD approach.'); // reasoning
+    expect(notes).toContain('config.ts'); // tool step
+    expect(notes).not.toContain('The answer is 42.'); // answer not duplicated in notes
+    // Clean answer streamed to its own (second) message and kept as-is — no rebuild.
+    expect(calls.uploads).toHaveLength(0);
+    expect(calls.updates.some((u) => u.ts === 'stream-ts-2')).toBe(false);
+  });
+
+  it('moves inter-tool narration into the notes and rebuilds the answer verbatim', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeCollapsingResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    sr.onReasoningDelta?.('Planning the steps.');
+    await microtasks();
+    sr.onTextDelta('Let me check the files first.'); // narration (a tool follows)
+    await microtasks();
+    sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'a.ts' });
+    await microtasks();
+    sr.onTextDelta('Done — the answer is 42.'); // the real answer (nothing follows)
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('Done — the answer is 42.', sr);
+
+    const notes = notesAttachmentText(calls);
+    expect(notes).toContain('Planning the steps.'); // reasoning
+    expect(notes).toContain('Let me check the files first.'); // narration archived
+    expect(notes).not.toContain('Done — the answer is 42.'); // answer not in notes
+    // The narration leaked into the live answer stream, so the answer is rebuilt
+    // in place from result.text on the answer ts.
+    const answerUpdate = calls.updates.find((u) => u.ts === 'stream-ts-2');
+    expect(answerUpdate?.text).toBe('Done — the answer is 42.');
+    // No live duplication: narration was archived in the notes attachment but NOT
+    // streamed to the live notes message (it was already visible in the answer
+    // bubble). The notes stream's wire (ts 'stream-ts') carries only reasoning/tools.
+    const notesWire = calls.sends
+      .filter((s) => s.ts === 'stream-ts')
+      .map((s) => s.text ?? '')
+      .join('');
+    expect(notesWire).toContain('Planning the steps.'); // reasoning streamed live
+    expect(notesWire).not.toContain('Let me check the files first.'); // narration NOT streamed live
+  });
+
+  it('separates a tool step from reasoning that resumes after it', async () => {
+    // Regression: reasoning that resumes after a tool/subagent line must not run
+    // onto the same line as the tool step.
+    const { client, calls } = createMockClient();
+    const responder = makeCollapsingResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    sr.onReasoningDelta?.('First thought.');
+    await microtasks();
+    sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'x.ts' });
+    await microtasks();
+    sr.onReasoningDelta?.('Second thought after the tool.');
+    await microtasks();
+    sr.onTextDelta('Answer.');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('Answer.', sr);
+
+    const notes = notesAttachmentText(calls) ?? '';
+    // The tool line and the resumed reasoning are on separate lines, not glued.
+    expect(notes).not.toMatch(/x\.ts`_Second thought/);
+    expect(notes).toContain('First thought.');
+    expect(notes).toContain('Second thought after the tool.');
+    // There is a newline between the tool step and the resumed reasoning.
+    expect(notes).toMatch(/x\.ts`_\n+.*Second thought after the tool\./s);
+  });
+
+  it('reuses the thinking placeholder as the tool status (no double message) when collapse is off', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client); // collapse disabled
+    const sr = responder.createStreamingResponder();
+
+    // Tool fires before any answer text — old behaviour reused the single
+    // "thinking…" bubble as the status rather than posting a second message.
+    await microtasks(); // let the placeholder post resolve (posted-1)
+    sr.onToolEvent({ phase: 'complete', toolName: 'Bash', keyArg: 'ls' });
+    await microtasks();
+
+    // Only the placeholder was posted; the tool status edits it in place.
+    expect(calls.posts).toHaveLength(1);
+    expect(calls.updates.some((u) => u.ts === 'posted-1')).toBe(true);
+
+    sr.onTextDelta('Done.');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('Done.', sr);
+
+    // When the answer stream opened, the adopted placeholder/status bubble was removed.
+    expect(calls.deletes.some((d) => d.ts === 'posted-1')).toBe(true);
+  });
+
+  it('keeps the live answer and creates no notes for an answer-only turn', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeCollapsingResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    // No reasoning/tools/narration — straight to the answer.
+    sr.onTextDelta('The answer is 42.');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('The answer is 42.', sr);
+
+    // No notes stream opened, nothing collapsed.
+    expect(calls.updates.some((u) => Array.isArray(u.attachments))).toBe(false);
+    // Clean answer streamed live and kept as-is (no rebuild, no upload).
+    expect(calls.updates).toHaveLength(0);
+    expect(calls.uploads).toHaveLength(0);
+    // Only one stream was ever opened (the answer).
+    expect(calls.sends.filter((s) => s.kind === 'start')).toHaveLength(1);
+  });
+
+  it('leaves the live message untouched when collapseWorkingNotes is false', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client); // collapse disabled
+    const sr = responder.createStreamingResponder();
+
+    sr.onTextDelta('Let me check.');
+    await microtasks();
+    sr.onToolEvent({ phase: 'start', toolName: 'Read' });
+    await microtasks();
+    sr.onTextDelta('Answer: 42.');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('Answer: 42.', sr);
+
+    // No prefix added, no collapse, no in-place rewrite.
+    const start = calls.sends.find((s) => s.kind === 'start');
+    expect(start?.text?.startsWith('🧠')).toBe(false);
+    expect(calls.uploads).toHaveLength(0);
+    expect(calls.updates).toHaveLength(0);
   });
 
   it('retries a transient append exactly once, without doubling the text', async () => {

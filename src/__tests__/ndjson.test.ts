@@ -79,6 +79,46 @@ describe('parseStreamLine — text_delta events', () => {
   });
 });
 
+describe('parseStreamLine — reasoning (thinking) deltas', () => {
+  const makeThinking = (thinking: string) =>
+    JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'thinking_delta', thinking },
+      },
+    });
+
+  it('extracts thinking text as a reasoning_delta event', () => {
+    expect(parseStreamLine(makeThinking('Let me reason'))).toEqual({
+      type: 'reasoning_delta',
+      text: 'Let me reason',
+    });
+  });
+
+  it('returns null for an empty thinking delta', () => {
+    expect(parseStreamLine(makeThinking(''))).toBeNull();
+  });
+
+  it('ignores signature_delta (no thinking text to surface)', () => {
+    const line = JSON.stringify({
+      type: 'stream_event',
+      event: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'signature_delta', signature: 'EqQB...' },
+      },
+    });
+    expect(parseStreamLine(line)).toBeNull();
+  });
+
+  it('does not confuse reasoning with answer text', () => {
+    const reasoning = parseStreamLine(makeThinking('thinking aloud'));
+    expect(reasoning).toEqual({ type: 'reasoning_delta', text: 'thinking aloud' });
+  });
+});
+
 describe('parseStreamLine — result events', () => {
   it('extracts session_id, cost_usd, and result text', () => {
     const line = JSON.stringify({
