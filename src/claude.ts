@@ -35,6 +35,8 @@ export interface ClaudeOptions {
 
 export interface ClaudeStreamingOptions extends ClaudeOptions {
   onTextDelta: (text: string) => void;
+  /** Extended-thinking deltas, surfaced separately from the final-answer text. */
+  onReasoningDelta?: (text: string) => void;
   onToolEvent?: (event: ToolEventPayload) => void;
   /** Called after the Claude process is spawned, providing a kill function (SIGTERM) */
   onProcessSpawned?: (kill: () => void) => void;
@@ -102,6 +104,7 @@ interface PersistentProcessEntry {
     resolve: (r: ClaudeResult) => void;
     reject: (e: Error) => void;
     onTextDelta?: (text: string) => void;
+    onReasoningDelta?: (text: string) => void;
     onToolEvent?: (event: ToolEventPayload) => void;
     fullText: string;
     sessionId: string | null;
@@ -213,6 +216,7 @@ export type ToolEventPayload =
 
 export type StreamLineEvent =
   | { type: 'text_delta'; text: string }
+  | { type: 'reasoning_delta'; text: string }
   | {
       type: 'result';
       text: string;
@@ -249,6 +253,18 @@ export function parseStreamLine(line: string): StreamLineEvent {
       obj.event.delta.text
     ) {
       return { type: 'text_delta', text: obj.event.delta.text };
+    }
+
+    // Reasoning (extended thinking) delta — same envelope as text_delta but the
+    // delta carries `thinking` instead of `text`. Surfaced separately so it can be
+    // shown as "working notes" without polluting the final-answer text stream.
+    if (
+      obj.type === 'stream_event' &&
+      obj.event?.type === 'content_block_delta' &&
+      obj.event.delta?.type === 'thinking_delta' &&
+      obj.event.delta.thinking
+    ) {
+      return { type: 'reasoning_delta', text: obj.event.delta.thinking };
     }
 
     // Result event
@@ -638,6 +654,7 @@ function runClaudeStreamingProcess(
   onToolEvent?: (event: ToolEventPayload) => void,
   env?: Record<string, string>,
   onProcessSpawned?: (kill: () => void) => void,
+  onReasoningDelta?: (text: string) => void,
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
     const proc = spawnClaudeProcess(args, cwd, env ?? {});
@@ -675,6 +692,8 @@ function runClaudeStreamingProcess(
       if (event.type === 'text_delta') {
         fullText += event.text;
         onTextDelta(event.text);
+      } else if (event.type === 'reasoning_delta') {
+        onReasoningDelta?.(event.text);
       } else if (event.type === 'result') {
         sessionId = event.sessionId ?? sessionId;
         cost = event.cost ?? cost;
@@ -963,6 +982,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
       options.onToolEvent,
       spawnEnv,
       options.onProcessSpawned,
+      options.onReasoningDelta,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -983,6 +1003,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
         options.onToolEvent,
         spawnEnv,
         options.onProcessSpawned,
+        options.onReasoningDelta,
       );
     }
     throw err;
@@ -1179,6 +1200,11 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
     return;
   }
 
+  if (event.type === 'reasoning_delta' && entry.currentTurn) {
+    entry.currentTurn.onReasoningDelta?.(event.text);
+    return;
+  }
+
   if (event.type === 'tool_start' && entry.currentTurn) {
     entry.currentTurn.toolAccum = { toolName: event.toolName, partialJson: '', index: event.index };
     void entry.currentTurn.onToolEvent?.({ phase: 'start', toolName: event.toolName });
@@ -1329,6 +1355,7 @@ export async function runClaudePersistentStreaming(
       resolve,
       reject,
       onTextDelta,
+      onReasoningDelta: options.onReasoningDelta,
       onToolEvent: options.onToolEvent,
       fullText: '',
       sessionId: entry.sessionId,

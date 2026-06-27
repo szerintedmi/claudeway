@@ -32,6 +32,7 @@ function makeResponder(client: WebClient, queued: QueuedMessage): SlackChannelRe
     resolved.responseMode,
     queued.userId,
     queued.teamId,
+    resolved.collapseWorkingNotes,
   );
 }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.30.0] - 2026-06-27
+
+### Added
+- **Live "Working notes" (Slack, `stream-native`)**: Claude's reasoning and a full log of its tool and sub-agent calls stream into a separate live "🧠 Working notes" message, keeping the final answer clean and readable instead of buried in a wall of reasoning text. Reasoning is captured from the CLI `stream-json` `thinking_delta` events; the answer streams in its own message and, on completion, the notes collapse into an expandable attachment above it
+- **`collapseWorkingNotes` config**: per-channel and in `defaults`, toggles the working-notes treatment (default `true`). When off, the answer streams as the sole live output, tool activity shows as a single self-replacing status line, and reasoning is not shown. Surfaced in `!config` for `stream-native` channels
+
 ## [0.29.0] - 2026-06-11
 
 ### Added

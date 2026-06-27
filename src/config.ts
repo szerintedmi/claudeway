@@ -106,6 +106,13 @@ export interface ChannelConfig {
   processMode?: ProcessMode;
   allowedUsers?: AllowedUserEntry[];
   triggerMode?: TriggerMode;
+  /**
+   * When a streamed turn produces intermediate narration (text between tool
+   * calls) on top of the final answer, replace the live message with the clean
+   * final answer on completion and archive the full working notes as a
+   * collapsed snippet. Applies to `stream-native` mode. Defaults to true.
+   */
+  collapseWorkingNotes?: boolean;
 }
 
 export interface Defaults {
@@ -116,6 +123,7 @@ export interface Defaults {
   responseMode: ResponseMode;
   processMode?: ProcessMode;
   triggerMode?: TriggerMode;
+  collapseWorkingNotes?: boolean;
   tempDir?: string;
   tempMaxAgeDays?: number;
 }
@@ -309,6 +317,7 @@ export function resolvedDmConfig(config: Config) {
     responseMode: config.defaults.responseMode,
     processMode: config.defaults.processMode ?? ('oneshot' as ProcessMode),
     triggerMode: config.defaults.triggerMode ?? ('all' as TriggerMode),
+    collapseWorkingNotes: config.defaults.collapseWorkingNotes ?? true,
   };
 }
 
@@ -325,6 +334,7 @@ export interface ResolvedChannelConfig extends ChannelConfig {
   responseMode: ResponseMode;
   processMode: ProcessMode;
   triggerMode: TriggerMode;
+  collapseWorkingNotes: boolean;
 }
 
 export function resolvedChannelConfig(
@@ -345,6 +355,7 @@ export function resolvedChannelConfig(
     responseMode: ch.responseMode ?? config.defaults.responseMode,
     processMode: ch.processMode ?? config.defaults.processMode ?? 'oneshot',
     triggerMode: ch.triggerMode ?? config.defaults.triggerMode ?? 'all',
+    collapseWorkingNotes: ch.collapseWorkingNotes ?? config.defaults.collapseWorkingNotes ?? true,
   };
 }
 

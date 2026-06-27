@@ -112,12 +112,26 @@ const STREAM_NATIVE_KEEPALIVE_MS = 5000;
  */
 const STREAM_KEEPALIVE_TOKEN = '\u200b';
 
+/**
+ * Hardcoded prefix prepended to the live streamed message when working-notes
+ * collapsing is enabled. It is NOT model-instructed \u2014 it gives the live updates a
+ * fixed visual identity ("\ud83e\udde0 Working notes") that matches the collapsed snippet's
+ * title once the turn completes, so the reader connects the two. Kept out of the
+ * accumulated text so it never leaks into the final answer or the archived notes.
+ */
+const STREAM_LIVE_NOTES_PREFIX = '\ud83e\udde0 *Working notes* _(updating live\u2026)_\n\n';
+
+/** Title shared by the live prefix and the working-notes attachment. */
+const WORKING_NOTES_TITLE = '\ud83e\udde0 Working notes';
+
 export {
   STREAM_UPDATE_INTERVAL_MS,
   STREAMING_INDICATOR,
   STREAM_NATIVE_FLUSH_INTERVAL_MS,
   STREAM_NATIVE_KEEPALIVE_MS,
   STREAM_KEEPALIVE_TOKEN,
+  STREAM_LIVE_NOTES_PREFIX,
+  WORKING_NOTES_TITLE,
   STREAM_NATIVE_APPEND_RATE_PER_MIN,
   STREAM_NATIVE_APPEND_BURST,
 };
@@ -143,6 +157,17 @@ export function formatToolStatus(toolName: string, keyArg: string | null): strin
     return `:thinking_face: _${verb} \`${keyArg}\`..._`;
   }
   return `:thinking_face: _${verb}..._`;
+}
+
+/**
+ * Format a tool step as a single line for the live "working notes" log (a
+ * growing list of steps), as opposed to {@link formatToolStatus} which renders a
+ * single self-replacing status message. No trailing ellipsis — each line is a
+ * completed step in the narrative.
+ */
+export function formatToolNote(toolName: string, keyArg: string | null): string {
+  const verb = TOOL_DISPLAY_VERBS[toolName] ?? `Using ${toolName}`;
+  return keyArg ? `:small_blue_diamond: _${verb} \`${keyArg}\`_` : `:small_blue_diamond: _${verb}_`;
 }
 
 export function splitMessage(text: string): string[] {

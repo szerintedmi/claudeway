@@ -128,3 +128,4 @@ defaults:
   processMode: oneshot # oneshot = new session per message; persistent = reuse session
   responseMode: batch # batch | stream-update | stream-native
   triggerMode: all # all = every message; mention = only when @mentioned
+  # collapseWorkingNotes: true # stream-native only: live "🧠 Working notes" (reasoning + tool steps), collapsed into an attachment on completion (default: true)

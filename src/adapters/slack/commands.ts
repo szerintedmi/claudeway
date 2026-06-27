@@ -77,16 +77,21 @@ export function formatChannelConfig(
     processMode: string;
     timeoutMs: number;
     triggerMode?: string;
+    collapseWorkingNotes?: boolean;
   },
 ): string {
-  return [
+  const lines = [
     `<#${channelId}>`,
     `\u2022 Folder: \`${resolved.folder}\``,
     `\u2022 Model: \`${resolved.model}\``,
     `\u2022 Mode: \`${resolved.responseMode}\` / \`${resolved.processMode}\``,
     `\u2022 Trigger: \`${resolved.triggerMode ?? 'all'}\``,
     `\u2022 Timeout: ${formatTimeout(resolved.timeoutMs)}`,
-  ].join('\n');
+  ];
+  if (resolved.responseMode === 'stream-native') {
+    lines.push(`\u2022 Collapse working notes: \`${resolved.collapseWorkingNotes !== false}\``);
+  }
+  return lines.join('\n');
 }
 
 function isMagicCommandAllowed(
