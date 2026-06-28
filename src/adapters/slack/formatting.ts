@@ -40,7 +40,11 @@ function convertMarkdownText(text: string): string {
   // (e.g. "x < y" or "AT&T") isn't misparsed by Slack as tokens/entities.
   // Link conversion below intentionally introduces < chars for Slack link tokens.
   result = result.replace(/&/g, '&amp;');
-  result = result.replace(/</g, '&lt;');
+  // Escape `<` EXCEPT where it opens a valid Slack entity token, which Claude is
+  // instructed to emit directly: links (<https://…|label>), user mentions
+  // (<@U123>), channel refs (<#C123|name>), and specials (<!here>, <!subteam^…>).
+  // Escaping those would turn them into literal `&lt;…>` text in Slack.
+  result = result.replace(/<(?![@#!]|https?:\/\/|mailto:|tel:)/g, '&lt;');
 
   // Convert Markdown links [text](url) → <url|text>
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>');
