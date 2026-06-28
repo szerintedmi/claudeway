@@ -89,7 +89,7 @@ export function formatChannelConfig(
     `\u2022 Timeout: ${formatTimeout(resolved.timeoutMs)}`,
   ];
   if (resolved.responseMode === 'stream-native') {
-    lines.push(`\u2022 Collapse working notes: \`${resolved.collapseWorkingNotes !== false}\``);
+    lines.push(`\u2022 Collapse work log: \`${resolved.collapseWorkingNotes !== false}\``);
   }
   return lines.join('\n');
 }

@@ -71,6 +71,14 @@ const STREAM_UPDATE_INTERVAL_MS = 500;
 const STREAMING_INDICATOR = ' :writing_hand:';
 
 /**
+ * Emoji name (no colons) added as a reaction on the bot's live streamed message
+ * (the work log when present, else the answer) while it streams and removed when
+ * the stream finishes — a playful "generating" indicator. Best-effort: if the
+ * workspace lacks this custom emoji the reaction silently no-ops.
+ */
+const ANSWER_STREAMING_REACTION = 'partyparrot';
+
+/**
  * Native streaming (`chat.startStream`/`appendStream`/`stopStream`) tunables.
  *
  * The responder drives these methods directly and batches on a timer: text
@@ -123,22 +131,52 @@ const STREAM_KEEPALIVE_TOKEN = '\u200b';
  * title once the turn completes, so the reader connects the two. Kept out of the
  * accumulated text so it never leaks into the final answer or the archived notes.
  */
-const STREAM_LIVE_NOTES_PREFIX = '\ud83e\udde0 *Working notes* _(updating live\u2026)_\n\n';
+const STREAM_LIVE_NOTES_PREFIX = '\ud83e\udde0 *Work log* :partyparrot:\n\n';
 
 /** Title shared by the live prefix and the working-notes attachment. */
-const WORKING_NOTES_TITLE = '\ud83e\udde0 Working notes';
+const WORKING_NOTES_TITLE = '\ud83e\udde0 Work log';
+
+/** Title for the collapsible attachment that holds the folded detail section. */
+const DETAILS_TITLE = '\ud83d\udccb Details';
 
 export {
   STREAM_UPDATE_INTERVAL_MS,
   STREAMING_INDICATOR,
+  ANSWER_STREAMING_REACTION,
   STREAM_NATIVE_FLUSH_INTERVAL_MS,
   STREAM_NATIVE_KEEPALIVE_MS,
   STREAM_KEEPALIVE_TOKEN,
   STREAM_LIVE_NOTES_PREFIX,
   WORKING_NOTES_TITLE,
+  DETAILS_TITLE,
   STREAM_NATIVE_APPEND_RATE_PER_MIN,
   STREAM_NATIVE_APPEND_BURST,
 };
+
+/**
+ * Marker the model emits on its own line to separate the concise TL;DR answer
+ * from the expandable detail section. Everything before the first marker becomes
+ * the answer bubble; everything after becomes a collapsed "Details" attachment.
+ * Tolerant of surrounding whitespace, 2+ dashes on either side, and case.
+ */
+const DETAILS_MARKER = /(?:^|\n)[ \t]*-{2,}[ \t]*DETAILS[ \t]*-{2,}[ \t]*(?=\n|$)/i;
+
+/**
+ * Split model output into the TL;DR `body` and an optional `details` section on
+ * the first {@link DETAILS_MARKER}. Returns `details: null` (whole text as body,
+ * unfolded) when the marker is absent or nothing follows it; if nothing precedes
+ * it, the post-marker content becomes the body. The marker line itself is always
+ * dropped so it never leaks into a delivered message.
+ */
+export function splitDetails(text: string): { body: string; details: string | null } {
+  const match = DETAILS_MARKER.exec(text);
+  if (!match) return { body: text, details: null };
+  const body = text.slice(0, match.index).trimEnd();
+  const details = text.slice(match.index + match[0].length).trim();
+  if (!details) return { body, details: null };
+  if (!body) return { body: details, details: null };
+  return { body, details };
+}
 
 const TOOL_DISPLAY_VERBS: Record<string, string> = {
   Read: 'Reading',

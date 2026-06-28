@@ -9,17 +9,20 @@ import type { ResponseMode } from '../../config.js';
 import {
   markdownToSlackMrkdwn,
   splitMessage,
+  splitDetails,
   formatToolStatus,
   formatToolNote,
   MAX_MESSAGE_LENGTH,
   FILE_THRESHOLD,
   STREAM_UPDATE_INTERVAL_MS,
   STREAMING_INDICATOR,
+  ANSWER_STREAMING_REACTION,
   STREAM_NATIVE_FLUSH_INTERVAL_MS,
   STREAM_NATIVE_KEEPALIVE_MS,
   STREAM_KEEPALIVE_TOKEN,
   STREAM_LIVE_NOTES_PREFIX,
   WORKING_NOTES_TITLE,
+  DETAILS_TITLE,
   STREAM_NATIVE_APPEND_RATE_PER_MIN,
   STREAM_NATIVE_APPEND_BURST,
 } from './formatting.js';
@@ -58,6 +61,46 @@ export function getSnippetType(filename: string): string | undefined {
  * oversized notes rather than an abrupt Slack cutoff.
  */
 const WORKING_NOTES_MAX_CHARS = 7000;
+
+/** Grey-blue accent for the folded "📋 Details" attachment. */
+const DETAILS_ATTACHMENT_COLOR = '#6a8fb5';
+
+/**
+ * Post the folded detail section as its own attachment after the answer. Mirrors
+ * the working-notes attachment so Slack auto-collapses it behind "Show more…"
+ * once it passes ~700 chars / 5 line breaks. Best effort — a failure here must
+ * never block the answer that was already delivered.
+ */
+async function postDetailsAttachment(
+  client: WebClient,
+  channel: string,
+  threadTs: string,
+  details: string,
+): Promise<void> {
+  const trimmed = details.trim();
+  if (!trimmed) return;
+  const body =
+    trimmed.length > WORKING_NOTES_MAX_CHARS
+      ? `${trimmed.slice(0, WORKING_NOTES_MAX_CHARS)}\n\n_…(truncated)_`
+      : trimmed;
+  try {
+    await client.chat.postMessage({
+      channel,
+      thread_ts: threadTs,
+      text: DETAILS_TITLE,
+      attachments: [
+        {
+          color: DETAILS_ATTACHMENT_COLOR,
+          fallback: DETAILS_TITLE,
+          text: markdownToSlackMrkdwn(body),
+          mrkdwn_in: ['text' as const],
+        },
+      ],
+    });
+  } catch (err) {
+    console.error('[slack] Failed to post details attachment:', err);
+  }
+}
 
 /** Drop invisible keepalive tokens injected to keep an idle stream alive. */
 function stripStreamArtifacts(text: string): string {
@@ -123,6 +166,10 @@ class StreamingResponder implements IStreamingResponder {
   private updateTimer: ReturnType<typeof setInterval> | null = null;
   private finished = false;
   private statusTs: string | null = null;
+  /** ts the streaming reaction was placed on (the response message), if any. */
+  private reactionTs: string | null = null;
+  /** The in-flight reaction `add`, awaited before the `remove` so they can't race. */
+  private reactionAdd: Promise<void> = Promise.resolve();
 
   constructor(client: WebClient, channel: string, threadTs: string) {
     this.client = client;
@@ -161,6 +208,17 @@ class StreamingResponder implements IStreamingResponder {
           text: withIndicator,
         });
         this.messageTs = res.ts ?? null;
+        // Add the streaming reaction to the response message once it exists;
+        // removed in finish(). Best effort.
+        if (this.messageTs && !this.reactionTs) {
+          this.reactionTs = this.messageTs;
+          this.reactionAdd = safeReact(
+            this.client,
+            this.channel,
+            this.messageTs,
+            ANSWER_STREAMING_REACTION,
+          );
+        }
       } else {
         await this.client.chat.update({
           channel: this.channel,
@@ -207,6 +265,18 @@ class StreamingResponder implements IStreamingResponder {
     // Final update to remove the streaming indicator
     if (this.fullText.length > 0) {
       await this.flush();
+    }
+    // Streaming done — drop the reaction from the response message. Await the add
+    // first so a fast finish can't remove before the add lands.
+    if (this.reactionTs) {
+      await this.reactionAdd;
+      await safeReact(
+        this.client,
+        this.channel,
+        this.reactionTs,
+        ANSWER_STREAMING_REACTION,
+        'remove',
+      );
     }
     // Delete the status message
     if (this.statusTs) {
@@ -428,6 +498,13 @@ class NativeStreamingResponder implements IStreamingResponder {
   /** Set once any text run is reclassified as narration — the live answer is then "dirty". */
   private answerDirty = false;
   private finished = false;
+  /**
+   * ts the streaming reaction was placed on — the first bot stream that opens
+   * (the work-log stream when present, else the answer), if any.
+   */
+  private streamReactionTs: string | null = null;
+  /** The in-flight reaction `add`, awaited before the `remove` so they can't race. */
+  private streamReactionAdd: Promise<void> = Promise.resolve();
 
   /** Placeholder posted immediately for instant feedback; removed once a stream opens. */
   private placeholderPromise: Promise<string | null>;
@@ -460,7 +537,10 @@ class NativeStreamingResponder implements IStreamingResponder {
     this.answer = new SlackTextStream(client, channel, threadTs, {
       recipientTeamId: options.recipientTeamId,
       recipientUserId: options.recipientUserId,
-      onStart: () => this.removePlaceholder(),
+      onStart: () => {
+        this.removePlaceholder();
+        this.addStreamReaction(this.answer.ts);
+      },
     });
 
     this.placeholderPromise = client.chat
@@ -488,7 +568,10 @@ class NativeStreamingResponder implements IStreamingResponder {
         recipientTeamId: this.recipientTeamId,
         recipientUserId: this.recipientUserId,
         prefix: STREAM_LIVE_NOTES_PREFIX,
-        onStart: () => this.removePlaceholder(),
+        onStart: () => {
+          this.removePlaceholder();
+          this.addStreamReaction(this.notes?.ts ?? null);
+        },
       });
     }
     return this.notes;
@@ -601,6 +684,19 @@ class NativeStreamingResponder implements IStreamingResponder {
     }
   }
 
+  /**
+   * Add the streaming reaction to the first bot stream that opens — the work-log
+   * stream (which leads with reasoning/tool steps and stays live for the whole
+   * turn) when present, otherwise the answer stream. Fired from each stream's
+   * `onStart`; the guard keeps it on whichever opened first. Removed in
+   * {@link finish}. Best effort.
+   */
+  private addStreamReaction(ts: string | null): void {
+    if (!ts || this.streamReactionTs) return;
+    this.streamReactionTs = ts;
+    this.streamReactionAdd = safeReact(this.client, this.channel, ts, ANSWER_STREAMING_REACTION);
+  }
+
   private removePlaceholder(): void {
     if (this.placeholderDeleted) return;
     this.placeholderDeleted = true;
@@ -623,6 +719,19 @@ class NativeStreamingResponder implements IStreamingResponder {
     // The final text run (nothing followed it) is the answer — leave it in the
     // answer stream; do NOT flush it to notes.
     await Promise.all([this.notes?.finish(), this.answer.finish()]);
+    // Streaming done — drop the reaction from the (now-finalized) stream message.
+    // Await the add first so a fast finish can't remove before the add lands and
+    // leave the reaction stuck on the message.
+    if (this.streamReactionTs) {
+      await this.streamReactionAdd;
+      await safeReact(
+        this.client,
+        this.channel,
+        this.streamReactionTs,
+        ANSWER_STREAMING_REACTION,
+        'remove',
+      );
+    }
     await this.statusChain.catch(() => {});
     await this.placeholderPromise.catch(() => {});
     // Drop the status message (no-collapse path) and any lingering placeholder. If
@@ -691,8 +800,10 @@ async function sendResponse(
     return;
   }
 
-  // Convert standard Markdown → Slack mrkdwn before sending
-  const formatted = markdownToSlackMrkdwn(text);
+  // Fold the expandable detail section out of the answer body, then convert
+  // standard Markdown → Slack mrkdwn before sending.
+  const { body, details } = splitDetails(text);
+  const formatted = markdownToSlackMrkdwn(body);
 
   const chunks = splitMessage(formatted);
   for (const chunk of chunks) {
@@ -702,6 +813,7 @@ async function sendResponse(
       text: chunk,
     });
   }
+  if (details) await postDetailsAttachment(client, channel, threadTs, details);
 }
 
 export class SlackChannelResponder implements ChannelResponder {
@@ -797,23 +909,38 @@ export class SlackChannelResponder implements ChannelResponder {
         await this.collapseNotes(nsr.getNotesTs(), nsr.getNotesText());
       }
 
+      // Fold the expandable detail section out of the answer (skipped for the
+      // file-upload path, which keeps the full text in one document).
+      const { body, details } =
+        finalText.length > FILE_THRESHOLD
+          ? { body: finalText, details: null }
+          : splitDetails(finalText);
+
       // Ensure the answer slot shows the clean, authoritative answer. Leave the
       // live answer untouched only when it streamed cleanly to the end AND no
-      // narration leaked into it; otherwise rebuild it from `result.text`.
+      // narration leaked into it; otherwise rebuild it from `result.text`. A
+      // folded detail section always forces a rebuild — the live stream still
+      // holds the raw marker + details that must be stripped from the bubble.
       const answerTs = nsr.getStreamTs();
-      const needsRebuild = !nsr.streamDeliveredOk() || nsr.isAnswerDirty();
+      const needsRebuild = !nsr.streamDeliveredOk() || nsr.isAnswerDirty() || details !== null;
       if (clean.length > 0 && (needsRebuild || finalText.length > FILE_THRESHOLD)) {
-        await this.deliverFinalText(finalText, answerTs);
+        await this.deliverFinalText(details !== null ? body : finalText, answerTs);
       } else if (clean.length === 0 && answerTs) {
         // No answer text at all (e.g. reasoning-only turn) — drop the empty bubble.
         await this.deleteMessage(answerTs);
       }
+      // Posted last so it lands below the answer (the answer bubble's position is
+      // fixed at creation; editing it in place keeps it above this attachment).
+      if (details) await postDetailsAttachment(this.client, this.channelId, this.threadTs, details);
       return;
     }
     const fullText = finalText;
 
-    // stream-update mode: handle oversized responses
+    // stream-update mode: handle oversized responses and the folded detail section.
     const sr = responder as StreamingResponder;
+    // No fold for the file-upload path — the full text stays in one document.
+    const { body, details } =
+      fullText.length > FILE_THRESHOLD ? { body: fullText, details: null } : splitDetails(fullText);
     if (fullText.length > FILE_THRESHOLD) {
       // Upload as a file, THEN delete the streamed message — upload first so a
       // failed upload never loses the only copy of the response.
@@ -833,9 +960,12 @@ export class SlackChannelResponder implements ChannelResponder {
           // Best effort — may lack permission
         }
       }
-    } else if (fullText.length > MAX_MESSAGE_LENGTH) {
-      // Final text fits in messages but was truncated during streaming — do a final complete send
-      const formatted = markdownToSlackMrkdwn(fullText);
+    } else if (details !== null || fullText.length > MAX_MESSAGE_LENGTH) {
+      // Rewrite the streamed message with the final body — either to strip the
+      // folded detail section out of the live bubble, or because the text was
+      // truncated during streaming. The live message already holds the raw text
+      // (marker + details inline) until this overwrite lands.
+      const formatted = markdownToSlackMrkdwn(details !== null ? body : fullText);
       const chunks = splitMessage(formatted);
       const msgTs = sr.getMessageTs();
       if (msgTs && chunks.length > 0) {
@@ -858,6 +988,7 @@ export class SlackChannelResponder implements ChannelResponder {
         }
       }
     }
+    if (details) await postDetailsAttachment(this.client, this.channelId, this.threadTs, details);
   }
 
   /**
