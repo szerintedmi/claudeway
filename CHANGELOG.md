@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.30.1] - 2026-06-28
+
+### Fixed
+- **Slack links/mentions rendered as literal text**: the mrkdwn converter escaped every `<`, mangling the Slack-native tokens Claude emits — `<URL|label>` links (e.g. Jira tickets), `<@user>`, `<#channel>`, and `<!here>` showed up verbatim. `<` is now escaped only when it doesn't open a valid Slack token
+
 ## [0.30.0] - 2026-06-27
 
 ### Added

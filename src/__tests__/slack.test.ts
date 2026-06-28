@@ -160,6 +160,36 @@ describe('markdownToSlackMrkdwn', () => {
         'x &lt; y and <https://example.com|visit>',
       );
     });
+
+    it('preserves Slack-native link tokens the model emits directly', () => {
+      // Claude is told (system prompt) to output <URL|label> for links. The
+      // converter must leave these intact, not escape the leading <.
+      expect(
+        markdownToSlackMrkdwn('<https://hostaway.atlassian.net/browse/AI-647|AI-647> — done'),
+      ).toBe('<https://hostaway.atlassian.net/browse/AI-647|AI-647> — done');
+    });
+
+    it('preserves bare angle-bracket links', () => {
+      expect(markdownToSlackMrkdwn('see <https://example.com>')).toBe('see <https://example.com>');
+    });
+
+    it('preserves mailto/tel link tokens', () => {
+      expect(markdownToSlackMrkdwn('<mailto:a@b.com|email> or <tel:+1234|call>')).toBe(
+        '<mailto:a@b.com|email> or <tel:+1234|call>',
+      );
+    });
+
+    it('preserves user, channel, and special mention tokens', () => {
+      expect(markdownToSlackMrkdwn('cc <@U123ABC> in <#C456DEF|general> <!here>')).toBe(
+        'cc <@U123ABC> in <#C456DEF|general> <!here>',
+      );
+    });
+
+    it('still escapes < that does not open a Slack token', () => {
+      expect(markdownToSlackMrkdwn('a<b and <3 and <not-a-token>')).toBe(
+        'a&lt;b and &lt;3 and &lt;not-a-token>',
+      );
+    });
   });
 });
 
