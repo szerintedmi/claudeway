@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.31.0] - 2026-06-28
+
+### Added
+- **Collapsible "Details" section (Slack)**: responses can now lead with a concise TL;DR and fold the deeper explanation into an expandable "📋 Details" attachment below the answer, the same way the work log collapses (Slack auto-hides it behind "Show more…" once it's long enough). Claude marks the split with a `---DETAILS---` line; the server strips the marker, keeps the TL;DR in the answer bubble, and posts everything after it as the attachment. Works in all delivery modes (`batch`, `stream-update`, `stream-native`); oversized responses that upload as a file are left unfolded. The default `systemPrompt` instructs Claude to lead with a TL;DR and use the marker only when a detail section adds value
+
+### Changed
+- **Renamed "Working notes" → "Work log"**: the live reasoning/tool-activity stream and its collapsed attachment are now labelled "🧠 Work log" (also reflected in `!config`). The `collapseWorkingNotes` config key is unchanged
+- **Live streaming indicators (Slack)**: the bot's live streamed message now carries a `:partyparrot:` reaction while it streams, removed when the stream finishes — a "generating" indicator. In `stream-native` it sits on the work-log stream (the message live for the whole turn; the answer stream when there's no work log); in `stream-update` it sits on the response message. The live work-log header also shows the same `:partyparrot:` in place of the old "(updating live…)" text. Both are best-effort: a workspace without the custom emoji simply shows no indicator
+
 ## [0.30.1] - 2026-06-28
 
 ### Fixed

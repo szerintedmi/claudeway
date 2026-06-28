@@ -2,6 +2,7 @@ import { describe, it, expect, jest, beforeEach } from 'bun:test';
 import {
   markdownToSlackMrkdwn,
   splitMessage,
+  splitDetails,
   FILE_THRESHOLD,
   STREAM_NATIVE_FLUSH_INTERVAL_MS,
   STREAM_NATIVE_KEEPALIVE_MS,
@@ -236,6 +237,51 @@ describe('splitMessage', () => {
   });
 });
 
+describe('splitDetails', () => {
+  it('returns the whole text as body when no marker is present', () => {
+    expect(splitDetails('just an answer')).toEqual({ body: 'just an answer', details: null });
+  });
+
+  it('splits TL;DR and details on the marker, dropping the marker line', () => {
+    const { body, details } = splitDetails('TL;DR answer\n---DETAILS---\nthe long version');
+    expect(body).toBe('TL;DR answer');
+    expect(details).toBe('the long version');
+  });
+
+  it('tolerates surrounding whitespace, extra dashes, and case', () => {
+    const { body, details } = splitDetails('short\n  ----- details ----  \nmore');
+    expect(body).toBe('short');
+    expect(details).toBe('more');
+  });
+
+  it('splits only on the first marker, keeping later markers in details', () => {
+    const { body, details } = splitDetails('a\n---DETAILS---\nb\n---DETAILS---\nc');
+    expect(body).toBe('a');
+    expect(details).toBe('b\n---DETAILS---\nc');
+  });
+
+  it('does not fold when nothing follows the marker', () => {
+    expect(splitDetails('answer\n---DETAILS---\n   ')).toEqual({
+      body: 'answer',
+      details: null,
+    });
+  });
+
+  it('promotes post-marker content to body when nothing precedes the marker', () => {
+    expect(splitDetails('---DETAILS---\nonly details')).toEqual({
+      body: 'only details',
+      details: null,
+    });
+  });
+
+  it('does not treat a plain horizontal rule as a marker', () => {
+    expect(splitDetails('above\n---\nbelow')).toEqual({
+      body: 'above\n---\nbelow',
+      details: null,
+    });
+  });
+});
+
 describe('formatDuration', () => {
   const ago = (ms: number) => new Date(Date.now() - ms);
 
@@ -304,7 +350,7 @@ describe('formatChannelConfig', () => {
         '• Mode: `stream-native` / `persistent`',
         '• Trigger: `mention`',
         '• Timeout: 5m',
-        '• Collapse working notes: `true`',
+        '• Collapse work log: `true`',
       ].join('\n'),
     );
   });
@@ -470,6 +516,7 @@ describe('SlackChannelResponder native streaming fallback', () => {
     updates: Record<string, unknown>[];
     deletes: Record<string, unknown>[];
     uploads: Record<string, unknown>[];
+    reactions: { action: 'add' | 'remove'; name: string; ts: string }[];
     sends: Send[];
     sequence: string[];
   }
@@ -496,6 +543,7 @@ describe('SlackChannelResponder native streaming fallback', () => {
       updates: [],
       deletes: [],
       uploads: [],
+      reactions: [],
       sends: [],
       sequence: [],
     };
@@ -550,7 +598,24 @@ describe('SlackChannelResponder native streaming fallback', () => {
           return { ts: 'stream-ts' };
         },
       },
-      reactions: { add: async () => ({}), remove: async () => ({}) },
+      reactions: {
+        add: async (a: Record<string, unknown>) => {
+          calls.reactions.push({
+            action: 'add',
+            name: a.name as string,
+            ts: a.timestamp as string,
+          });
+          return {};
+        },
+        remove: async (a: Record<string, unknown>) => {
+          calls.reactions.push({
+            action: 'remove',
+            name: a.name as string,
+            ts: a.timestamp as string,
+          });
+          return {};
+        },
+      },
       files: {
         uploadV2: async (a: Record<string, unknown>) => {
           calls.uploads.push(a);
@@ -648,6 +713,80 @@ describe('SlackChannelResponder native streaming fallback', () => {
     expect(stopsOf(calls)).toHaveLength(1);
     // The tail that arrived after the first flush rode along on stopStream.
     expect(stopsOf(calls)[0].text).toBe('world');
+  });
+
+  it('puts the streaming reaction on the work-log stream and removes it on finish', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeCollapsingResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    // Reasoning opens the work-log stream first (ts 'stream-ts'); the answer
+    // stream opens later (ts 'stream-ts-2'). The reaction must land on the
+    // work-log stream — the message live for the whole turn.
+    sr.onReasoningDelta?.('thinking…');
+    await microtasks();
+    sr.onTextDelta('the answer');
+    await microtasks();
+
+    const added = calls.reactions.filter((r) => r.action === 'add' && r.name === 'partyparrot');
+    expect(added).toHaveLength(1);
+    expect(added[0].ts).toBe('stream-ts'); // the work-log message, not the answer
+
+    await sr.finish();
+    await responder.onStreamComplete('the answer', sr);
+
+    const removed = calls.reactions.filter(
+      (r) => r.action === 'remove' && r.name === 'partyparrot',
+    );
+    expect(removed).toHaveLength(1);
+    expect(removed[0].ts).toBe('stream-ts');
+  });
+
+  it('falls back to the answer stream for the reaction when there is no work log', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client); // collapse off → no work-log stream
+    const sr = responder.createStreamingResponder();
+
+    sr.onTextDelta('Hello ');
+    await microtasks();
+    await sr.finish();
+
+    const added = calls.reactions.filter((r) => r.action === 'add' && r.name === 'partyparrot');
+    expect(added).toHaveLength(1);
+    expect(added[0].ts).toBe('stream-ts'); // the answer stream (the only bot message)
+  });
+
+  it('waits for the reaction add to land before removing it on a fast finish', async () => {
+    const { client, calls } = createMockClient();
+    // Gate the reaction add so it stays in-flight while finish() runs — this is the
+    // race: a void add + an awaited remove could otherwise remove-then-add and
+    // leave the parrot stuck on the finished message.
+    const reactions = client.reactions as unknown as {
+      add: (a: Record<string, unknown>) => Promise<unknown>;
+      remove: (a: Record<string, unknown>) => Promise<unknown>;
+    };
+    const origAdd = reactions.add;
+    let releaseAdd!: () => void;
+    const gate = new Promise<void>((r) => (releaseAdd = r));
+    reactions.add = async (a) => {
+      await gate;
+      return origAdd(a);
+    };
+
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+    sr.onTextDelta('hi'); // startStream → add fired (gated, in-flight)
+    await microtasks();
+
+    const finishP = sr.finish();
+    await microtasks();
+    // The add is still gated, so finish() must NOT have removed yet.
+    expect(calls.reactions.some((r) => r.action === 'remove')).toBe(false);
+
+    releaseAdd();
+    await finishP;
+    // Order is add-then-remove; the reaction never ends up stuck.
+    expect(calls.reactions.map((r) => r.action)).toEqual(['add', 'remove']);
   });
 
   it('deletes a tool-status message posted mid-stream on a clean finish', async () => {
@@ -922,6 +1061,42 @@ describe('SlackChannelResponder native streaming fallback', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('folds the detail section into an attachment and trims the answer bubble', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+    const full = 'TL;DR answer\n---DETAILS---\nthe long version';
+
+    sr.onTextDelta('TL;DR answer');
+    await microtasks();
+    sr.onTextDelta('\n---DETAILS---\nthe long version');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete(full, sr);
+
+    // The live answer bubble is rebuilt in place to hold only the TL;DR.
+    expect(calls.updates.some((u) => u.ts === 'stream-ts' && u.text === 'TL;DR answer')).toBe(true);
+    // The detail section is posted as a separate attachment after the answer.
+    const detailPost = calls.posts.find((p) => Array.isArray(p.attachments));
+    expect(detailPost).toBeDefined();
+    expect((detailPost!.attachments as Array<{ text?: string }>)[0].text).toContain(
+      'the long version',
+    );
+  });
+
+  it('does not post a detail attachment when no marker is present', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    sr.onTextDelta('Just the answer.');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('Just the answer.', sr);
+
+    expect(calls.posts.some((p) => Array.isArray(p.attachments))).toBe(false);
   });
 });
 
