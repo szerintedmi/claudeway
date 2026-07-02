@@ -7,8 +7,6 @@
 botOwners: ["U0123456789"]
 # botOwners: [alice]
 
-systemChannel: "C0123456789"
-
 # Repo definitions — cloned/pulled on startup into .docker/repos/
 repos:
   my-project:
@@ -64,7 +62,12 @@ env: []
 #     # What the shared default token can/can't do — injected into the agent's
 #     # system prompt so it warns users preemptively (and points them at !creds)
 #     # instead of attempting a write that fails.
-#     sharedAccessNote: "read-only — creating or updating Jira/Confluence content will fail"
+#     sharedAccessNote: "read-only — Jira/Confluence write tools are disabled at the MCP layer for the shared credential; enroll a personal token to write"
+#     # MCP servers (mcp.json keys) forced read-only (READ_ONLY_MODE=true) when
+#     # this credential does NOT resolve to a personal secret. Atlassian API
+#     # tokens can't be scoped, so this is what makes the shared default
+#     # actually read-only instead of writing as the token owner.
+#     mcpReadOnlyServers: [mcp-atlassian]
 #   github:
 #     label: "GitHub"
 #     exposeAs: git-credential-helper
@@ -117,8 +120,8 @@ channels:
   #     - No file paths with slashes — say "config dot yaml in the source directory" instead.
   #     - No emoji or Unicode symbols.
   #     - Don't start responses with filler like "Sure!" or "Great question!" — just answer.
-  #   allowedUsers:
-  #     - "voice-user": [git]
+  #   members:
+  #     - bob   # registry entry must carry the voice id (users.bob.voice: voice-bob)
 
 # Optional: WebSocket voice server for Meta Ray-Ban glasses (or any WS voice/text client)
 # voiceServer:
@@ -127,7 +130,7 @@ channels:
 #   auth:
 #     tokens:
 #       - token: "${VOICE_AUTH_TOKEN}"  # env var interpolation supported
-#         userId: voice-user            # mapped to channel allowedUsers
+#         userId: voice-bob             # voice id from the users registry (users.<id>.voice)
 #         defaultChannel: voice-default  # channel to route messages to
 
 # Optional: Voice pipeline config (STT/TTS). Required for audio input via voice adapter.

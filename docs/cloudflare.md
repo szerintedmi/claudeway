@@ -50,6 +50,11 @@ tunnel: claudeway
 credentials-file: /Users/you/.cloudflared/<TUNNEL_UUID>.json
 
 ingress:
+  # credential enrollment form (separate server on 8791)
+  - hostname: claudeway.yourdomain.com
+    path: ^/creds
+    service: http://localhost:8791
+  # voice web UI + WebSocket — everything else on this host
   - hostname: claudeway.yourdomain.com
     service: http://localhost:8765
   - service: http_status:404
@@ -57,6 +62,7 @@ ingress:
 
 - Replace `<TUNNEL_UUID>` with the UUID from step 2
 - Replace `claudeway.yourdomain.com` with your desired subdomain
+- The `path: ^/creds` rule routes the `!creds` enrollment form (its own server on 8791) through the same hostname — set `baseUrl: "https://claudeway.yourdomain.com"` in `config.yaml` so magic links point there
 - The final `- service: http_status:404` is a required catch-all for unmatched requests
 
 #### 4. Add DNS route

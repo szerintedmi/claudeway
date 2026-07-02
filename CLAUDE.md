@@ -8,6 +8,8 @@ Always adhere to Anthropic's Terms of Service 100%. Claudeway is a personal tool
 
 Claudeway is a multi-channel Claude Code CLI gateway. Messages arrive via Slack Socket Mode or a WebSocket voice interface (with configurable STT/TTS providers), get processed by the Claude CLI (`claude -p`), and responses are delivered back through the originating channel.
 
+User-facing docs: `README.md` (quick start, commands) + `docs/configuration.md`, `docs/deployment.md`, `docs/troubleshooting.md`, `docs/per-user-credentials.md` — keep them in sync with behavior changes.
+
 ## Architecture
 
 ### Server (TypeScript / Bun)
@@ -52,7 +54,7 @@ Claudeway is a multi-channel Claude Code CLI gateway. Messages arrive via Slack 
 - Session IDs are deterministic (derived from channel ID + folder path via UUID v5)
 - One message processed at a time per channel (serialized via `channelBusy` set)
 - Bot does NOT programmatically join Slack channels — requires manual `/invite` + config entry
-- Magic commands (`!kill`, `!killall`, `!nudge`, `!config`, `!ps`, `!creds`) have authorization checks — a `botOwners` entry for global commands, channel membership for channel-scoped commands; `!creds` is DM-only and the sole non-owner DM capability
+- Magic commands (`src/adapters/slack/commands.ts`) have scoped authorization: `!help`/`!whoami` are open to anyone anywhere; `!ps`/`!kill`/`!nudge` require channel membership; `!config`/`!killall`/cross-channel targeting require `botOwners`; `!creds` (+ `list`/`revoke`) is DM-only
 - Subprocess env vars are allowlisted in `buildAllowedEnv()` in `src/claude.ts`. Only baseline vars (`HOME`, `PATH`, etc.) + non-credential `env` + permission-linked env vars + explicitly injected vars + resolved user credentials reach the subprocess.
 - Repo-backed channels run each Slack thread in its own git worktree (`wt/<channel>/<threadTs>`, `src/worktrees.ts`) — thread participants share files, concurrent threads are isolated, session IDs keep deriving from the logical repo folder. New worktrees are based on `origin/<branch>` after a throttled fetch (fallback: local HEAD); startup GC keeps worktrees with uncommitted or unmerged work regardless of age.
 
@@ -65,7 +67,7 @@ Channel access is the normal permission boundary: users listed in a channel can 
 - `userCredentials` defines credential fields, form labels/guidance, explicit shared defaults via `defaultFromEnv`, and delivery via `exposeAs` (`env` or `git-credential-helper`).
 - Resolution precedence is **user secret > explicit shared default > unset**. There is no ambient fallback from matching env var names.
 - Credentials resolved from a shared default or left unset are surfaced to the agent via a "Credential status" system-prompt block (`buildCredentialStatus` in `src/prompt.ts`); `userCredentials.<name>.sharedAccessNote` declares what the shared token can't do, so the agent refuses doomed writes and points at `!creds` preemptively instead of failing mid-task.
-- Provider token scope controls read/write capability for Jira/GitHub. Claudeway no longer switches Jira MCP configs based on `jiraWrite`.
+- Provider token scope controls read/write capability where tokens can be scoped (GitHub). Atlassian API tokens can't be scoped, so `userCredentials.<name>.mcpReadOnlyServers` lists MCP servers forced read-only (`READ_ONLY_MODE=true` in a generated config, `src/mcp.ts`) whenever that credential does not resolve to a personal secret. Tool-layer guardrail against accidental writes attributed to the shared token's owner — not a security boundary; the shared token still reaches the subprocess env.
 - **BYO Claude is built-in and always on**: the `claude` credential is injected by `loadConfig()` (not configurable) and personal enrollment is mandatory for **everyone**, bot owner included — unenrolled users' turns are refused with a `!creds` hint (audited as `spawn.denied`). Hard startup requirements: a secrets master key (`CLAUDEWAY_SECRETS_KEY` or `.secrets/key`) and `baseUrl` (the enrollment form always runs). Store: AES-256-GCM in `.secrets/user-credentials.json`.
 
 Credential layers:
