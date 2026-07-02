@@ -12,7 +12,8 @@ import { getActiveProcesses, killProcess, killAllProcesses, nudgeProcess } from 
 import { getPending } from '../../queue.js';
 import { safeReact, warnInThread } from './utils.js';
 import { MAX_CONCURRENT_PROCESSES } from '../../core/engine.js';
-import { botDmTarget, helpMessage, listUserChannels, ownerMention } from './onboarding.js';
+import { helpMessage, listUserChannels, ownerMention } from './onboarding.js';
+import { credsDmInstruction } from '../../creds-hint.js';
 import { getSecretStore } from '../../secrets.js';
 
 // --- Types ---
@@ -307,7 +308,7 @@ async function helpHandler(ctx: CommandContext): Promise<void> {
 }
 
 async function whoamiHandler(ctx: CommandContext): Promise<void> {
-  const { channelId, threadTs, userId, client, config, botUserId } = ctx;
+  const { channelId, threadTs, userId, client, config } = ctx;
   const user = resolveUser(config, channelId, userId);
   const lines = [':bust_in_silhouette: *Your access*'];
 
@@ -335,7 +336,7 @@ async function whoamiHandler(ctx: CommandContext): Promise<void> {
       `• Credentials: ${
         names.length > 0
           ? names.map((n) => `\`${n}\``).join(', ')
-          : `none — DM ${botDmTarget(botUserId)} \`!creds\` to connect your own`
+          : `none — ${credsDmInstruction('connect your own')}`
       }`,
     );
   }

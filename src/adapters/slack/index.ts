@@ -1,5 +1,6 @@
 import { App } from '@slack/bolt';
 import { loadConfig, botOwnerSlackIds } from '../../config.js';
+import { setBotIdentity } from '../../creds-hint.js';
 import { registerMessageHandler, drainAllPending } from './handler.js';
 
 // ownerId → DM channel id cache
@@ -75,6 +76,9 @@ export async function startSlackAdapter(): Promise<App> {
   if (!botUserId) {
     throw new Error('Could not resolve bot user ID from auth.test');
   }
+
+  // Creds hints everywhere render a clickable `<@bot>` mention
+  setBotIdentity({ botUserId });
 
   // Check if we have users:read scope (needed for mention resolution)
   let canResolveUsers = false;

@@ -304,7 +304,7 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
             await client.chat.postMessage({
               channel: msg.channel,
               thread_ts: msg.thread_ts ?? msg.ts,
-              text: dmWelcomeMessage(config, msg.user ?? 'unknown', botUserId),
+              text: dmWelcomeMessage(config, msg.user ?? 'unknown'),
             });
             return;
           }

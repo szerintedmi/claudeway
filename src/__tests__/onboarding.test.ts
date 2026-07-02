@@ -1,5 +1,4 @@
 import {
-  botDmTarget,
   ownerMention,
   listUserChannels,
   unauthorizedChannelMessage,
@@ -32,13 +31,6 @@ describe('ownerMention', () => {
     expect(ownerMention(makeConfig({ botOwners: ['U0A', 'U0B'] }))).toBe('<@U0A> or <@U0B>');
     // Registry-key entries resolve to the person's Slack id
     expect(ownerMention(makeConfig({ botOwners: ['alice'] }))).toBe('<@U0ALICE>');
-  });
-});
-
-describe('botDmTarget', () => {
-  it('mentions the bot when the Slack bot id is available', () => {
-    expect(botDmTarget('U0BOT')).toBe('<@U0BOT>');
-    expect(botDmTarget()).toBe('me');
   });
 });
 
@@ -94,8 +86,8 @@ describe('message builders', () => {
   });
 
   it('DM welcome always includes the creds hint (enrollment is mandatory)', () => {
-    expect(dmWelcomeMessage(makeConfig(), 'U0ALICE')).toContain('!creds');
-    expect(dmWelcomeMessage(makeConfig(), 'U0ALICE', 'U0BOT')).toContain('DM <@U0BOT> `!creds`');
+    // The DM welcome is already inside the DM — "right here", no DM link needed
+    expect(dmWelcomeMessage(makeConfig(), 'U0ALICE')).toContain('Send `!creds` right here');
   });
 
   it('help adapts to configured channel / DM / unconfigured channel', () => {

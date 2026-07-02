@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test';
 import type { WebClient } from '@slack/web-api';
 import { handleCredsCommand } from '../adapters/slack/creds-command.js';
+import { setBotIdentity } from '../creds-hint.js';
 import type { Config } from '../config.js';
 
 function makeConfig(): Config {
@@ -13,7 +14,8 @@ function makeConfig(): Config {
 }
 
 describe('handleCredsCommand', () => {
-  it('points channel users at the clickable bot mention for DM-only credential commands', async () => {
+  it('points channel users at the bot DM for DM-only credential commands', async () => {
+    setBotIdentity({ botUserId: 'U0BOT' });
     const postMessage = mock(async () => ({ ok: true }));
     const client = { chat: { postMessage } } as unknown as WebClient;
 
@@ -32,8 +34,9 @@ describe('handleCredsCommand', () => {
       expect.objectContaining({
         channel: 'C0CHAN',
         thread_ts: '1710000000.000100',
-        text: ':lock: Credential commands work in DMs only — DM <@U0BOT> `!creds`.',
+        text: ':lock: Credential commands work in *direct messages* only — send `!creds` in a *direct message* to <@U0BOT> instead.',
       }),
     );
+    setBotIdentity({});
   });
 });

@@ -62,6 +62,13 @@ export interface CredentialDef {
   exposeAs?: CredentialExposeAs;
   /** Least-privilege guidance shown on the enrollment form. */
   guidance?: string;
+  /**
+   * What the shared default token (defaultFromEnv) can and cannot do, e.g.
+   * "read-only — creating or updating Jira issues will fail". Injected into
+   * the subprocess system prompt so the agent warns users preemptively
+   * instead of attempting a write that fails.
+   */
+  sharedAccessNote?: string;
 }
 
 export interface CredsFormConfig {
@@ -538,6 +545,16 @@ export function loadConfig(): Config {
     if (fields.length === 0) {
       throw new Error(
         `${configPath}: userCredentials.${credName}.fields must list at least one field`,
+      );
+    }
+    if (def.sharedAccessNote !== undefined && typeof def.sharedAccessNote !== 'string') {
+      throw new Error(
+        `${configPath}: userCredentials.${credName}.sharedAccessNote must be a string`,
+      );
+    }
+    if (def.sharedAccessNote && !fields.some(({ def: f }) => f.defaultFromEnv)) {
+      console.warn(
+        `[config] userCredentials.${credName}.sharedAccessNote is set but no field has defaultFromEnv — the note only applies to shared defaults`,
       );
     }
     for (const { name, def: fieldDef } of fields) {

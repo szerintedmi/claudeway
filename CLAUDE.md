@@ -25,13 +25,14 @@ Claudeway is a multi-channel Claude Code CLI gateway. Messages arrive via Slack 
 - `src/config.ts` — Config loading/saving, channel resolution with defaults, `users:` registry + permission resolution
 - `src/queue.ts` — Persistent file-based message queue
 - `src/mcp.ts` — MCP config management (read-only config generation for permission enforcement)
-- `src/prompt.ts` — System prompt construction including access restriction injection
+- `src/prompt.ts` — System prompt construction including credential-status injection
 - `src/tempdir.ts` — Temp and scratch directory management
 - `src/sync-repos.ts` — Git clone/pull for configured repos on startup
 - `src/secrets.ts` — Encrypted per-user credential store (AES-256-GCM behind a `SecretStore` interface) + secret scrubbing
 - `src/credentials.ts` — Config-driven per-user credential resolution (personal > explicit shared default > unset)
 - `src/git-credentials.ts` — Git enforcement adapter: per-spawn gitconfig + credential helper (tokens out of subprocess env)
 - `src/creds-links.ts` — Single-use, short-TTL magic links for `!creds` enrollment
+- `src/creds-hint.ts` — Canonical "send `!creds` in a *direct message* to `<@bot>`" copy + bot identity (shared by engine refusals, onboarding, `!whoami`, prompt block)
 - `src/audit.ts` — Append-only JSONL audit log (credential names, never values)
 - `src/worktrees.ts` — Per-thread git worktrees (thread isolation) + age-based GC
 
@@ -63,6 +64,7 @@ Channel access is the normal permission boundary: users listed in a channel can 
 - The canonical user id keys the secret store, audit log, and persistent-process identity — stable across a person's Slack and voice identities.
 - `userCredentials` defines credential fields, form labels/guidance, explicit shared defaults via `defaultFromEnv`, and delivery via `exposeAs` (`env` or `git-credential-helper`).
 - Resolution precedence is **user secret > explicit shared default > unset**. There is no ambient fallback from matching env var names.
+- Credentials resolved from a shared default or left unset are surfaced to the agent via a "Credential status" system-prompt block (`buildCredentialStatus` in `src/prompt.ts`); `userCredentials.<name>.sharedAccessNote` declares what the shared token can't do, so the agent refuses doomed writes and points at `!creds` preemptively instead of failing mid-task.
 - Provider token scope controls read/write capability for Jira/GitHub. Claudeway no longer switches Jira MCP configs based on `jiraWrite`.
 - **BYO Claude is built-in and always on**: the `claude` credential is injected by `loadConfig()` (not configurable) and personal enrollment is mandatory for **everyone**, bot owner included — unenrolled users' turns are refused with a `!creds` hint (audited as `spawn.denied`). Hard startup requirements: a secrets master key (`CLAUDEWAY_SECRETS_KEY` or `.secrets/key`) and `baseUrl` (the enrollment form always runs). Store: AES-256-GCM in `.secrets/user-credentials.json`.
 

@@ -16,10 +16,6 @@ export function ownerMention(config: Config): string {
   return owners.map((id) => `<@${id}>`).join(' or ');
 }
 
-export function botDmTarget(botUserId?: string): string {
-  return botUserId ? `<@${botUserId}>` : 'me';
-}
-
 /** Channels (excluding voice-only pseudo-channels) this user may use. */
 export function listUserChannels(config: Config, userId: string): string[] {
   return Object.keys(config.channels)
@@ -27,8 +23,9 @@ export function listUserChannels(config: Config, userId: string): string[] {
     .filter((id) => isUserAllowedInChannel(config, id, userId));
 }
 
-export function credsHint(botUserId?: string): string {
-  return `DM ${botDmTarget(botUserId)} \`!creds\` to connect your own Claude/Jira/GitHub credentials.`;
+/** Enrollment hint for copy that is ALREADY inside the bot DM. */
+export function credsHint(): string {
+  return 'Send `!creds` right here to connect your own Claude/Jira/GitHub credentials.';
 }
 
 /** Case 1: authorized channel, user not on the member list. */
@@ -63,7 +60,7 @@ export function channelWelcomeMessage(config: Config, channelId: string): string
 }
 
 /** Case 4: friendly DM response for non-owner users. */
-export function dmWelcomeMessage(config: Config, userId: string, botUserId?: string): string {
+export function dmWelcomeMessage(config: Config, userId: string): string {
   const channels = listUserChannels(config, userId);
   const lines = [
     ":wave: Hi! I'm Claudeway — I run Claude Code against our repos from Slack.",
@@ -72,7 +69,7 @@ export function dmWelcomeMessage(config: Config, userId: string, botUserId?: str
       : `You don't have access to any of my channels yet — ask ${ownerMention(config)} to add you.`,
     '`!help` lists commands, `!whoami` shows your access.',
   ];
-  lines.push(credsHint(botUserId));
+  lines.push(credsHint());
   lines.push(`Ask questions in a configured channel; owner-only admin commands also work here.`);
   return lines.join('\n');
 }

@@ -1,4 +1,6 @@
-import type { TriggerMode, UserPermissions } from './config.js';
+import type { TriggerMode } from './config.js';
+import type { CredentialStatus } from './credentials.js';
+import { credsDmInstruction } from './creds-hint.js';
 
 export interface ThreadMessage {
   authorName: string;
@@ -67,69 +69,42 @@ export function buildPrompt(
   return directory + context + text;
 }
 
-/** How a restricted user can get more access — injected into the restriction prompt. */
-export interface EscalationInfo {
-  /** Slack user ids of the bot owners (rendered as mentions). */
-  owners?: string[];
-}
-
 /**
- * Build access restriction text to append to the system prompt.
- * Returns '' if the user has full access (both git and jiraWrite).
+ * Agent-facing credential status block, appended to the system prompt.
+ *
+ * Lists only credentials the user is NOT running on a personal token for —
+ * shared defaults (with their config-declared capability note) and unresolved
+ * ones — so the agent can refuse doomed operations preemptively and point the
+ * user at `!creds` instead of attempting a write that fails. Returns '' when
+ * every credential resolved personally (no prompt noise for enrolled users).
+ *
+ * Persistent-mode consistency: this block derives entirely from credential
+ * resolution, and the engine already respawns the persistent process when the
+ * resolved credential-value hash changes — so enrolling via `!creds` refreshes
+ * the block on the user's next turn.
  */
-export function buildAccessRestrictions(
-  permissions: UserPermissions,
-  scratchDir: string,
-  escalation: EscalationInfo = {},
-): string {
-  if (permissions.has('git') && permissions.has('jiraWrite')) return '';
+export function buildCredentialStatus(statuses: CredentialStatus[], userLabel: string): string {
+  const limited = statuses.filter((s) => s.source !== 'personal');
+  if (limited.length === 0) return '';
 
-  const lines: string[] = ['## Access restrictions for this user', ''];
-  lines.push('You are operating in READ-ONLY mode for this user.');
-
-  if (!permissions.has('git')) {
-    lines.push('- Do NOT modify, create, or delete any files in the repository');
-    lines.push(
-      '- Do NOT run git commit, git push, git checkout, git stash, or any git commands that modify state',
-    );
+  const lines: string[] = [`## Credential status for ${userLabel}`, ''];
+  for (const s of limited) {
+    if (s.source === 'shared') {
+      lines.push(
+        `- ${s.name} (${s.label}): using the SHARED default token${s.note ? ` — ${s.note}` : ''}. No personal token connected.`,
+      );
+    } else {
+      lines.push(
+        `- ${s.name} (${s.label}): NO credential available — operations needing it will fail.`,
+      );
+    }
   }
-
-  if (!permissions.has('jiraWrite')) {
-    lines.push('- Do NOT create, update, or delete Jira tickets or Confluence pages');
-  }
-
+  lines.push('');
   lines.push(
-    '- You MAY read files, search code, run git log/diff/show, and search Jira/Confluence',
-  );
-  lines.push(
-    `- You MAY write files to ${scratchDir} — this is a shared workspace that persists across messages in this channel`,
-  );
-  lines.push(
-    '- You MAY write temporary files to $CLAUDEWAY_TEMP_DIR for one-off outputs (e.g., file attachments)',
-  );
-  const owner =
-    escalation.owners && escalation.owners.length > 0
-      ? escalation.owners.map((id) => `<@${id}>`).join(' or ')
-      : 'the bot owner';
-  lines.push(
-    `- If the user asks you to do something restricted, explain that they have read-only access ` +
-      `and that they can ask ${owner} for the needed permission ` +
-      `(git for repo changes, jiraWrite for Jira/Confluence writes), ` +
-      'or connect their own credentials by DMing you `!creds`',
+    'If the user asks for an operation these credentials cannot perform, do NOT attempt it — it will fail. ' +
+      'Instead, name the limiting credential and tell them they can ' +
+      `${credsDmInstruction('connect their own token')}, then retry.`,
   );
 
   return '\n\n' + lines.join('\n');
-}
-
-/**
- * Append access restrictions to a system prompt if needed.
- */
-export function appendAccessRestrictions(
-  systemPrompt: string,
-  permissions: UserPermissions,
-  scratchDir: string,
-  escalation: EscalationInfo = {},
-): string {
-  const restrictions = buildAccessRestrictions(permissions, scratchDir, escalation);
-  return restrictions ? systemPrompt + restrictions : systemPrompt;
 }

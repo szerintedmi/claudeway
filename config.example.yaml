@@ -61,6 +61,10 @@ env: []
 #         label: "Jira API token"
 #         defaultFromEnv: SHARED_JIRA_API_TOKEN
 #     guidance: "Create an API token at id.atlassian.com → Security → API tokens. Username is your work email."
+#     # What the shared default token can/can't do — injected into the agent's
+#     # system prompt so it warns users preemptively (and points them at !creds)
+#     # instead of attempting a write that fails.
+#     sharedAccessNote: "read-only — creating or updating Jira/Confluence content will fail"
 #   github:
 #     label: "GitHub"
 #     exposeAs: git-credential-helper
@@ -69,6 +73,7 @@ env: []
 #         label: "GitHub fine-grained PAT"
 #         defaultFromEnv: SHARED_GITHUB_TOKEN
 #     guidance: "Fine-grained PAT limited to the repos you need; Contents: Read and write."
+#     sharedAccessNote: "read-only — git push and PR creation will fail"
 
 # Credential enrollment web form (magic links issued by "!creds") — always on.
 baseUrl: "http://192.168.1.10:8791"   # REQUIRED: how users reach the form (LAN/VPN; put HTTPS in front if exposed wider)

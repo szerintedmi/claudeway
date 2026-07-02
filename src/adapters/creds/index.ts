@@ -60,6 +60,8 @@ function page(title: string, body: string): Response {
 body{font-family:-apple-system,system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;background:#1a1a2e;color:#eee}
 h1{font-size:1.3rem}h2{font-size:1rem;margin:1.5rem 0 .25rem}
 input{width:100%;box-sizing:border-box;padding:.5rem;margin:.25rem 0;border-radius:6px;border:1px solid #444;background:#0f0f1e;color:#eee;font-family:monospace}
+input[type=checkbox]{width:auto;margin:0 .4rem 0 0;accent-color:#c44}
+.del{display:block;color:#e88;font-size:.85rem;margin:.35rem 0 0}
 button{margin-top:1rem;padding:.6rem 1.4rem;border-radius:6px;border:0;background:#0a9396;color:#fff;font-size:1rem;cursor:pointer}
 .hint{color:#9aa;font-size:.85rem;margin:.15rem 0}
 .set{color:#7c7;font-size:.85rem}
@@ -97,7 +99,11 @@ function renderForm(config: Config, userId: string, token: string): Response {
         .join('\n');
       const status = setNames.has(name) ? '<span class="set">✓ set</span>' : '';
       const guidance = def.guidance ? `<p class="hint">${escapeHtml(def.guidance)}</p>` : '';
-      return `<h2>${escapeHtml(def.label)} ${status}</h2>${guidance}${fields}`;
+      // Deletion only offered for stored credentials; it wins over typed values
+      const del = setNames.has(name)
+        ? `<label class="del"><input type="checkbox" name="${escapeHtml(`${name}.__delete`)}">Delete my stored ${escapeHtml(def.label)} credential (ignores values typed above)</label>`
+        : '';
+      return `<h2>${escapeHtml(def.label)} ${status}</h2>${guidance}${fields}${del}`;
     })
     .join('\n');
 
@@ -109,7 +115,7 @@ to the repos you need, read-only where possible. Values are encrypted at rest; t
 <form method="post" action="/creds">
 <input type="hidden" name="t" value="${escapeHtml(token)}">
 ${sections}
-<button type="submit">Save credentials</button>
+<button type="submit">Save changes</button>
 </form>`,
   );
 }
@@ -137,7 +143,13 @@ async function handlePost(req: Request): Promise<Response> {
   const store = getSecretStore();
 
   const saved: string[] = [];
+  const deleted: string[] = [];
   for (const [name, def] of enrollableCreds(config)) {
+    // Delete wins over typed values — checking the box means "remove it"
+    if (form.get(`${name}.__delete`)) {
+      if (store.delete(userId, name)) deleted.push(name);
+      continue;
+    }
     const value: Record<string, string> = store.get(userId, name) ?? {};
     let changed = false;
     for (const { name: fieldName } of credentialFields(def)) {
@@ -156,11 +168,19 @@ async function handlePost(req: Request): Promise<Response> {
   if (saved.length > 0) {
     audit({ event: 'creds.set', userId, credNames: saved });
   }
+  if (deleted.length > 0) {
+    audit({ event: 'creds.deleted', userId, credNames: deleted, detail: 'deleted via web form' });
+  }
 
+  const codes = (names: string[]) => names.map((n) => `<code>${escapeHtml(n)}</code>`).join(', ');
+  const parts = [
+    ...(saved.length > 0 ? [`Stored: ${codes(saved)}.`] : []),
+    ...(deleted.length > 0 ? [`Deleted: ${codes(deleted)}.`] : []),
+  ];
   return page(
     'Saved',
-    saved.length > 0
-      ? `<h1>Credentials saved</h1><p>Stored: ${saved.map((n) => `<code>${escapeHtml(n)}</code>`).join(', ')}. You can close this tab. Manage them anytime with <code>!creds list</code> / <code>!creds revoke</code>.</p>`
+    parts.length > 0
+      ? `<h1>Credentials updated</h1><p>${parts.join(' ')} You can close this tab. Manage them anytime with <code>!creds list</code> / <code>!creds revoke</code>.</p>`
       : '<h1>Nothing saved</h1><p class="warn">All fields were empty. DM the bot <code>!creds</code> for a fresh link and try again.</p>',
   );
 }

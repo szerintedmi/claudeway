@@ -8,7 +8,7 @@ import {
 import { getSecretStore } from '../../secrets.js';
 import { issueLink, LINK_TTL_MS } from '../../creds-links.js';
 import { audit } from '../../audit.js';
-import { botDmTarget } from './onboarding.js';
+import { credsDmInstruction } from '../../creds-hint.js';
 
 /**
  * `!creds` — self-service credential enrollment over Slack DM.
@@ -85,7 +85,7 @@ export async function handleCredsCommand(
   if (!channelId.startsWith('D')) {
     await reply(
       ctx,
-      `:lock: Credential commands work in DMs only — DM ${botDmTarget(ctx.botUserId)} \`!creds\`.`,
+      `:lock: Credential commands work in *direct messages* only — ${credsDmInstruction()} instead.`,
     );
     return true;
   }

@@ -157,6 +157,36 @@ describe('resolveUserCredentials', () => {
     expect(r.missingClaudeCred).toBe(true);
   });
 
+  it('reports a status per registry credential (source + sharedAccessNote)', () => {
+    delete process.env.SHARED_GITHUB_TOKEN;
+    process.env.SHARED_JIRA_API_TOKEN = 'shared-jira';
+    process.env.SHARED_JIRA_USERNAME = 'svc@x.com';
+    store.set('val', 'claude', { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-personal' });
+    const config = makeConfig();
+    config.userCredentials!.jira.sharedAccessNote = 'read-only — Jira writes will fail';
+
+    const r = resolveUserCredentials(config, 'val', { store });
+    expect(r.statuses).toEqual([
+      {
+        name: 'jira',
+        label: 'Jira',
+        source: 'shared',
+        note: 'read-only — Jira writes will fail',
+      },
+      { name: 'github', label: 'GitHub PAT', source: 'none' },
+      { name: 'claude', label: 'Claude token', source: 'personal' },
+    ]);
+  });
+
+  it('omits the note for personal resolutions', () => {
+    const config = makeConfig();
+    config.userCredentials!.jira.sharedAccessNote = 'read-only';
+    store.set('val', 'jira', { JIRA_API_TOKEN: 'personal-jira' });
+    const r = resolveUserCredentials(config, 'val', { store });
+    const jira = r.statuses.find((s) => s.name === 'jira');
+    expect(jira).toEqual({ name: 'jira', label: 'Jira', source: 'personal' });
+  });
+
   it('secretsHash changes when a stored value changes', () => {
     store.set('petro', 'jira', { JIRA_API_TOKEN: 'v1' });
     const r1 = resolveUserCredentials(makeConfig(), 'petro', { store });

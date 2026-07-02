@@ -20,6 +20,15 @@ export interface GitCredentialResolution {
   cacheKey: string;
 }
 
+/** Per-credential resolution outcome — feeds the agent-facing prompt block. */
+export interface CredentialStatus {
+  name: string;
+  label: string;
+  source: 'personal' | 'shared' | 'none';
+  /** Config-declared capability note for the shared default (sharedAccessNote). */
+  note?: string;
+}
+
 export interface ResolvedCredentials {
   /** Env vars to inject at highest precedence (personal or explicit shared default values). */
   env: Record<string, string>;
@@ -31,6 +40,8 @@ export interface ResolvedCredentials {
   personalCredNames: string[];
   /** Cred names where the explicit shared default was used (audit). */
   sharedCredNames: string[];
+  /** Resolution outcome per registry credential, in registry order. */
+  statuses: CredentialStatus[];
   /**
    * True when `userCredentials.claude` is configured but no Claude token
    * resolved for this user. Hard gate: the engine refuses the turn instead of
@@ -47,6 +58,7 @@ const EMPTY: ResolvedCredentials = {
   secretValues: [],
   personalCredNames: [],
   sharedCredNames: [],
+  statuses: [],
   missingClaudeCred: false,
   secretsHash: '',
 };
@@ -73,6 +85,7 @@ export function resolveUserCredentials(
     secretValues: [],
     personalCredNames: [],
     sharedCredNames: [],
+    statuses: [],
     missingClaudeCred: false,
     secretsHash: '',
   };
@@ -83,11 +96,11 @@ export function resolveUserCredentials(
     const exposeAs = credentialExposeAs(def);
     const fields = credentialFields(def);
     const personal = store.get(userId, credName);
+    let source: CredentialStatus['source'] = 'none';
 
     if (exposeAs === 'git-credential-helper') {
       const tokenField = fields[0];
-      if (!tokenField) continue;
-      if (personal?.[tokenField.name]) {
+      if (tokenField && personal?.[tokenField.name]) {
         const token = personal[tokenField.name];
         result.git = {
           token,
@@ -98,7 +111,8 @@ export function resolveUserCredentials(
         result.secretValues.push(token);
         result.personalCredNames.push(credName);
         hashInput[`${credName}.${tokenField.name}`] = token;
-      } else if (tokenField.def.defaultFromEnv && process.env[tokenField.def.defaultFromEnv]) {
+        source = 'personal';
+      } else if (tokenField?.def.defaultFromEnv && process.env[tokenField.def.defaultFromEnv]) {
         const token = process.env[tokenField.def.defaultFromEnv]!;
         result.git = {
           token,
@@ -109,37 +123,41 @@ export function resolveUserCredentials(
         result.secretValues.push(token);
         result.sharedCredNames.push(credName);
         hashInput[`${credName}.${tokenField.name}`] = token;
+        source = 'shared';
       }
-      continue;
-    }
-
-    // Plain env injection
-    if (personal) {
-      let injected = false;
-      for (const field of fields) {
-        if (personal[field.name]) {
-          result.env[field.name] = personal[field.name];
-          result.secretValues.push(personal[field.name]);
-          hashInput[`${credName}.${field.name}`] = personal[field.name];
-          injected = true;
+    } else {
+      // Plain env injection
+      if (personal) {
+        for (const field of fields) {
+          if (personal[field.name]) {
+            result.env[field.name] = personal[field.name];
+            result.secretValues.push(personal[field.name]);
+            hashInput[`${credName}.${field.name}`] = personal[field.name];
+            source = 'personal';
+          }
         }
+        if (source === 'personal') result.personalCredNames.push(credName);
       }
-      if (injected) {
-        result.personalCredNames.push(credName);
-        continue;
+
+      if (source === 'none') {
+        for (const field of fields) {
+          if (field.def.defaultFromEnv && process.env[field.def.defaultFromEnv]) {
+            result.env[field.name] = process.env[field.def.defaultFromEnv]!;
+            result.secretValues.push(process.env[field.def.defaultFromEnv]!);
+            hashInput[`${credName}.${field.name}`] = process.env[field.def.defaultFromEnv]!;
+            source = 'shared';
+          }
+        }
+        if (source === 'shared') result.sharedCredNames.push(credName);
       }
     }
 
-    let injected = false;
-    for (const field of fields) {
-      if (field.def.defaultFromEnv && process.env[field.def.defaultFromEnv]) {
-        result.env[field.name] = process.env[field.def.defaultFromEnv]!;
-        result.secretValues.push(process.env[field.def.defaultFromEnv]!);
-        hashInput[`${credName}.${field.name}`] = process.env[field.def.defaultFromEnv]!;
-        injected = true;
-      }
-    }
-    if (injected) result.sharedCredNames.push(credName);
+    result.statuses.push({
+      name: credName,
+      label: def.label,
+      source,
+      ...(source === 'shared' && def.sharedAccessNote ? { note: def.sharedAccessNote } : {}),
+    });
   }
 
   // BYO Claude is always on: every user (bot owner included) must run on

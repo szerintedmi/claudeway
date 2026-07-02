@@ -11,6 +11,8 @@ import {
 } from '../config.js';
 import { runClaude, runClaudeStreaming, runClaudePersistentStreaming } from '../claude.js';
 import { resolveUserCredentials, type ResolvedCredentials } from '../credentials.js';
+import { credsDmInstruction } from '../creds-hint.js';
+import { buildCredentialStatus } from '../prompt.js';
 import { scrubSecrets } from '../secrets.js';
 import { audit } from '../audit.js';
 import { ensureThreadWorktree } from '../worktrees.js';
@@ -113,11 +115,9 @@ export async function processQueuedMessage(
       credNames: ['claude'],
       detail: 'no personal Claude credential',
     });
-    // Mentioning the bot renders a clickable link that opens its profile/DM
-    const botRef = queued.botUserId ? `<@${queued.botUserId}>` : 'me';
     await responder
       .warn(
-        `This server requires your own Claude credential — DM ${botRef} \`!creds\` to connect it, then resend your message.`,
+        `This server requires your own Claude credential — ${credsDmInstruction('connect it')}, then resend your message here.`,
       )
       .catch(() => {});
     dequeue(queued.channelId, queued.ts);
@@ -126,9 +126,18 @@ export async function processQueuedMessage(
 
   const baseDir = resolvedTempDir(config);
   const scratchDir = ensureScratchDir(baseDir, queued.channelId);
+
+  // Tell the agent which credentials this user is running on shared/absent
+  // tokens for, so it warns preemptively instead of attempting doomed writes.
+  // Slack senders get their mention token (consistent with the user directory
+  // block); voice senders fall back to the registry name / canonical id.
+  const userLabel = /^U[A-Z0-9]+$/.test(queued.userId)
+    ? `<@${queued.userId}>${user.name ? ` (${user.name})` : ''}`
+    : (user.name ?? user.userId);
   const effectiveConfig: ResolvedChannelConfig = {
     ...channelConfig,
-    systemPrompt: channelConfig.systemPrompt,
+    systemPrompt:
+      channelConfig.systemPrompt + buildCredentialStatus(credentials.statuses, userLabel),
   };
 
   processingMessages.add(processingKey(queued.channelId, queued.ts));

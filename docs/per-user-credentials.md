@@ -54,7 +54,7 @@ Implements [the merged plan](plans/2026-07-01-per-user-credentials-merged.md): e
 ## User flow
 
 1. DM the bot `!creds` → receive a single-use link (10-min TTL) to the web form.
-2. Paste least-privilege tokens (guidance is shown per service; values are AES-256-GCM encrypted at rest, never shown back).
+2. Paste least-privilege tokens (guidance is shown per service; values are AES-256-GCM encrypted at rest, never shown back). Stored credentials show a per-credential delete checkbox on the same form.
 3. Done — subsequent turns use your tokens. In persistent threads, a token change triggers a respawn automatically.
 
 Commands: `!creds` (link) · `!creds list` · `!creds revoke <name>|all` · **owner:** `!creds list @user`, `!creds revoke @user [name|all]`.
@@ -65,6 +65,7 @@ Commands: `!creds` (link) · `!creds list` · `!creds revoke <name>|all` · **ow
 - **Shared defaults are explicit.** A shared default exists only when a field maps `defaultFromEnv` to a server env var. Claudeway does not implicitly read the exposed field name from `.env`.
 - **Personal credentials override shared defaults.** Values enrolled via `!creds` are used for that user's turns and trigger persistent-process respawn on change.
 - **Provider scope controls read/write.** Jira and GitHub write access comes from the resolved token's own permissions. Claudeway no longer switches Jira MCP configs based on `jiraWrite`.
+- **The agent is told which tokens are shared.** Each credential can declare a `sharedAccessNote` (e.g. `"read-only — creating or updating Jira issues will fail"`). Users running on a shared default or with no credential get a "Credential status" block appended to the subprocess system prompt, so the agent refuses doomed writes preemptively and points at `!creds` instead of failing mid-task. Users whose credentials are all personal get no block.
 - **BYO Claude is built-in and always on**: **every** user — bot owner included — must enroll their own Claude token; unenrolled users' turns are refused with a `!creds` hint (audited as `spawn.denied`). There is no owner-auth fallback — without the hard gate, an "unenrolled" user would silently inherit the owner's `~/.claude` auth. Note: the owner's enrolled `setup-token` token does not auto-refresh like an interactive login (re-enroll when it expires, roughly yearly), and enrollment requires Slack (`!creds` is DM-only) — voice-only users must enroll via Slack first.
 
 ## Least-privilege token recipes
