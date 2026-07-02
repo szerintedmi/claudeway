@@ -937,6 +937,10 @@ function buildClaudeArgs(
   if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath);
   }
+  // Only the gateway-provided MCP config may load — without this the subprocess
+  // also picks up the operator's ~/.claude.json servers (and any personal
+  // credentials embedded in them), bypassing per-user credential resolution.
+  args.push('--strict-mcp-config');
   args.push('--dangerously-skip-permissions');
 
   args.push(buildMessageWithFiles(message, options.filePaths));
@@ -1125,6 +1129,9 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
   if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath);
   }
+  // See note on the batch path: strict mode keeps the operator's ~/.claude.json
+  // MCP servers (and embedded credentials) out of gateway-spawned sessions.
+  args.push('--strict-mcp-config');
   args.push('--dangerously-skip-permissions');
 
   return { args, sessionId, cwd, resuming };
