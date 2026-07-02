@@ -11,9 +11,9 @@
     "format": "prettier --write 'src/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts'",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
-    "test:watch": "bun test --watch",
-    "test:coverage": "bun test --coverage",
+    "test": "bun test src/",
+    "test:watch": "bun test --watch src/",
+    "test:coverage": "bun test --coverage src/",
     "sync-repos": "bun -e \"import { syncRepos } from './src/sync-repos.ts'; syncRepos();\"",
     "prepare": "husky"
   },

@@ -1435,6 +1435,19 @@ export async function runClaudePersistentStreaming(
       return;
     }
 
+    // Single-slot turn guard: the engine serializes per channel (channelBusy),
+    // so an occupied slot means that serialization was defeated somewhere.
+    // Overwriting would orphan the running turn's promise forever (frozen
+    // stream, leaked process slot) — surface the bug loudly instead.
+    if (entry.currentTurn) {
+      reject(
+        new Error(
+          `A turn is already in progress for ${regKey} — refusing to overwrite it. This indicates a serialization bug.`,
+        ),
+      );
+      return;
+    }
+
     entry.stderrBuf = '';
     entry.currentTurn = {
       resolve,

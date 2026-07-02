@@ -229,6 +229,7 @@ export async function processQueuedMessage(
   // throws — otherwise the native keepalive timer would leak and keep calling Slack.
   let sr: IStreamingResponder | null = null;
   let streamFinished = false;
+  let streamErrorMsg: string | undefined;
 
   try {
     if (mode === 'batch') {
@@ -299,7 +300,9 @@ export async function processQueuedMessage(
       streamFinished = true;
 
       const finalText = result.response || streamer.getFullText();
-      await responder.onStreamComplete(finalText, streamer);
+      await responder.onStreamComplete(finalText, streamer, {
+        authoritative: result.response.trim().length > 0,
+      });
       await responder.onComplete();
 
       if (result.cost !== null) {
@@ -312,6 +315,7 @@ export async function processQueuedMessage(
       err instanceof Error ? err.message : String(err),
       credentials.secretValues,
     );
+    streamErrorMsg = errorMsg;
     console.error(`[${channelConfig.name}] Error:`, errorMsg);
     try {
       await responder.onError(errorMsg);
@@ -319,11 +323,13 @@ export async function processQueuedMessage(
       console.error('[engine] onError threw:', e);
     }
   } finally {
-    // If the runner threw before finish() ran, finalize the stream here so its
-    // keepalive timer is cleared and the open stream is stopped (best effort).
+    // If the runner threw before finish() ran, finalize the stream here with the
+    // failure outcome so the live UI is closed out (open task cards flip to
+    // error, the stream is stopped, keepalive timers are cleared) — the work log
+    // must never be left dangling/expanded.
     if (sr && !streamFinished) {
       try {
-        await sr.finish();
+        await sr.finish({ ok: false, errorMessage: streamErrorMsg });
       } catch (e) {
         console.error('[engine] stream finalize during cleanup failed:', e);
       }

@@ -40,13 +40,13 @@ server-build: ## Compile TypeScript
 	bun run build
 
 server-test: ## Run server tests
-	bun test
+	bun test src/
 
 server-test-watch: ## Run server tests in watch mode
-	bun test --watch
+	bun test --watch src/
 
 server-test-coverage: ## Run server tests with coverage
-	bun test --coverage
+	bun test --coverage src/
 
 server-lint: ## Lint server code
 	bun run lint
