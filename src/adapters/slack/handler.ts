@@ -4,15 +4,22 @@ import {
   loadConfig,
   resolvedChannelConfig,
   resolvedDmConfig,
+  isUserAllowedInChannel,
+  isBotOwner,
   EFFORT_LEVELS,
   isEffortLevel,
-  type AllowedUserEntry,
   type EffortLevel,
   type TriggerMode,
 } from '../../config.js';
 import { enqueue, dequeue, updateQueuedMessage, getPending } from '../../queue.js';
 import { handleMagicCommand } from './commands.js';
-import { isUserAllowed, safeReact, warnInThread } from './utils.js';
+import { safeReact, warnInThread } from './utils.js';
+import {
+  channelWelcomeMessage,
+  dmWelcomeMessage,
+  unauthorizedChannelMessage,
+  unconfiguredChannelMessage,
+} from './onboarding.js';
 import { shouldRespond, buildPrompt, extractMentionedUserIds } from '../../prompt.js';
 import { fetchThreadContext, resolveUserName } from './thread.js';
 import { extractTextFromAttachments, type SlackAttachment } from './attachments.js';
@@ -124,9 +131,47 @@ export function applyOverrides(
   return { text: mentionPrefix + rest, modelOverride, effortOverride };
 }
 
+// Channels already greeted/hinted this process run (welcome + unconfigured hint)
+const welcomedChannels = new Set<string>();
+const unconfiguredHinted = new Set<string>();
+
 export function registerMessageHandler(app: App, botUserId: string, canResolveUsers = true): void {
+  // Fallback join detection — fires only if the app manifest subscribes to
+  // member_joined_channel; the channel_join message path below covers the rest.
+  app.event('member_joined_channel', async ({ event, client }) => {
+    if (event.user !== botUserId || welcomedChannels.has(event.channel)) return;
+    welcomedChannels.add(event.channel);
+    try {
+      const config = loadConfig();
+      await client.chat.postMessage({
+        channel: event.channel,
+        text: channelWelcomeMessage(config, event.channel),
+      });
+    } catch (err) {
+      console.error(`[${event.channel}] Failed to post welcome:`, err);
+    }
+  });
+
   app.message(async ({ message, client, context }) => {
     const msg = message as SlackMessage;
+
+    // Welcome message when the bot itself is added to a channel (the join shows
+    // up as a channel_join system message for the bot's own user)
+    if (msg.subtype === 'channel_join' && msg.user === botUserId) {
+      if (!welcomedChannels.has(msg.channel)) {
+        welcomedChannels.add(msg.channel);
+        try {
+          const config = loadConfig();
+          await client.chat.postMessage({
+            channel: msg.channel,
+            text: channelWelcomeMessage(config, msg.channel),
+          });
+        } catch (err) {
+          console.error(`[${msg.channel}] Failed to post welcome:`, err);
+        }
+      }
+      return;
+    }
 
     // Ignore bot messages and message edits (allow file_share for file attachments)
     if (msg.bot_id) return;
@@ -215,6 +260,7 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
         msg.ts,
         msg.user,
         client,
+        botUserId,
       ))
     ) {
       return;
@@ -243,31 +289,43 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
     if (!hasText && !hasFiles && !bareOverride) return;
 
     // Quick config check + user authorization
-    let channelAllowedUsers: AllowedUserEntry[] | undefined;
+    let userAllowedInChannel = true;
     let triggerMode: TriggerMode = 'all';
-    let botOwner: string | undefined;
+    let senderIsOwner: boolean;
     try {
       const config = loadConfig();
-      botOwner = config.botOwner;
+      senderIsOwner = isBotOwner(config, msg.user ?? '');
       const resolved = resolvedChannelConfig(config, msg.channel);
       if (!resolved) {
         if (msg.channel.startsWith('D')) {
-          if (msg.user !== config.botOwner) {
-            await safeReact(client, msg.channel, msg.ts, 'no_entry');
+          if (!senderIsOwner) {
+            // Friendly DM welcome instead of a flat rejection — tells the user
+            // what the bot is, where they can use it, and how to get access
             await client.chat.postMessage({
               channel: msg.channel,
               thread_ts: msg.thread_ts ?? msg.ts,
-              text: 'Sorry, DMs are not enabled for your account.',
+              text: dmWelcomeMessage(config, msg.user ?? 'unknown', botUserId),
             });
             return;
           }
           // botOwner DM — allow through (triggerMode stays 'all')
         } else {
+          // Unconfigured channel: stay silent for ambient traffic, but answer an
+          // explicit @mention once per channel so the bot isn't confusingly mute
+          if (msg.text?.includes(`<@${botUserId}>`) && !unconfiguredHinted.has(msg.channel)) {
+            unconfiguredHinted.add(msg.channel);
+            await client.chat.postMessage({
+              channel: msg.channel,
+              thread_ts: msg.thread_ts ?? msg.ts,
+              text: unconfiguredChannelMessage(config),
+            });
+          }
           return;
         }
       } else {
         triggerMode = resolved.triggerMode;
-        channelAllowedUsers = resolved.allowedUsers;
+        // Registry-aware: channel `members` (canonical users)
+        userAllowedInChannel = isUserAllowedInChannel(config, msg.channel, msg.user ?? 'unknown');
       }
     } catch (err) {
       console.error('Failed to load config during message routing:', err);
@@ -286,14 +344,16 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
     const combinedText = [msg.text, attachmentText].filter(Boolean).join('\n');
     if (!shouldRespond(combinedText || undefined, botUserId, triggerMode)) return;
 
-    // Reject unauthorized users (botOwner always allowed)
+    // Reject unauthorized users (botOwners always allowed) — with a pointer to
+    // who can grant access instead of a bare refusal
     const userId = msg.user ?? 'unknown';
-    if (userId !== botOwner && !isUserAllowed(channelAllowedUsers, userId)) {
+    if (!senderIsOwner && !userAllowedInChannel) {
       await safeReact(client, msg.channel, msg.ts, 'no_entry');
+      const config = loadConfig();
       await client.chat.postMessage({
         channel: msg.channel,
         thread_ts: msg.thread_ts ?? msg.ts,
-        text: "Sorry, you're not authorized to use this bot in this channel.",
+        text: unauthorizedChannelMessage(config),
       });
       return;
     }
@@ -375,6 +435,7 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
       text,
       ts: msg.ts,
       threadTs,
+      botUserId,
       queuedAt: new Date().toISOString(),
       ...(filePaths.length > 0 ? { filePaths } : {}),
       ...(senderEntry ? { userName: senderEntry.name } : {}),

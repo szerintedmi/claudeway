@@ -1,12 +1,14 @@
-import { writeFileSync, readFileSync, unlinkSync, existsSync, statSync } from 'fs';
+import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 import { resolve } from 'path';
 import { loadConfig, resolvedTempDir, DEFAULT_TEMP_MAX_AGE_DAYS } from './config.js';
 import { ensureQueueDir } from './queue.js';
 import { syncRepos } from './sync-repos.js';
-import { generateReadOnlyMcpConfig } from './mcp.js';
 import { FILE_TEMP_BASE } from './adapters/slack/files.js';
 import { cleanupStaleTempFiles } from './tempdir.js';
+import { cleanupGitCredentialFiles } from './git-credentials.js';
+import { cleanupStaleWorktrees } from './worktrees.js';
+import { getSecretStore } from './secrets.js';
 
 // --- Shared startup utilities ---
 
@@ -73,6 +75,18 @@ const config = loadConfig();
 const tempMaxAgeDays = config.defaults.tempMaxAgeDays ?? DEFAULT_TEMP_MAX_AGE_DAYS;
 cleanupStaleTempFiles(tempMaxAgeDays, resolvedTempDir(config), FILE_TEMP_BASE);
 
+// Per-user credentials are always on (BYO Claude): a master key and a
+// reachable enrollment form are hard startup requirements — fail fast instead
+// of limping along in a half-configured state.
+cleanupGitCredentialFiles();
+getSecretStore(); // throws without CLAUDEWAY_SECRETS_KEY / .secrets/key
+if (!config.baseUrl) {
+  throw new Error(
+    'config.yaml: "baseUrl" is required — users enroll their Claude token via the !creds form ' +
+      '(e.g. baseUrl: "http://192.168.1.10:8791")',
+  );
+}
+
 process.on('exit', releaseLock);
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
@@ -88,18 +102,11 @@ process.on('unhandledRejection', (reason) => {
 ensureQueueDir();
 syncRepos();
 
-// Generate read-only MCP config if mcp.json exists
-const mcpPath = resolve(process.cwd(), 'mcp.json');
-if (existsSync(mcpPath) && statSync(mcpPath).isFile()) {
-  try {
-    generateReadOnlyMcpConfig(mcpPath);
-    console.log('[startup] Generated mcp-readonly.json');
-  } catch (err) {
-    console.warn(
-      '[startup] Failed to generate mcp-readonly.json:',
-      err instanceof Error ? err.message : err,
-    );
-  }
+// Prune per-thread worktrees idle past threadWorktreeMaxAgeDays
+try {
+  cleanupStaleWorktrees(config);
+} catch (err) {
+  console.warn('[startup] Worktree cleanup failed:', err instanceof Error ? err.message : err);
 }
 
 // --- Conditional adapter boot ---
@@ -123,6 +130,10 @@ if (voiceEnabled) {
   const { startVoiceAdapter } = await import('./adapters/voice/index.js');
   startVoiceAdapter(config);
 }
+
+// Enrollment form always runs — it is the only way to connect credentials
+const { startCredsServer } = await import('./adapters/creds/index.js');
+startCredsServer(config);
 
 console.log('Claudeway started');
 

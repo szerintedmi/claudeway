@@ -4,6 +4,19 @@
       "type": "stdio",
       "command": "npx",
       "args": ["@squidcode/forever-plugin"]
+    },
+    "mcp-atlassian": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-atlassian"],
+      "env": {
+        "CONFLUENCE_URL": "https://your-org.atlassian.net/wiki",
+        "CONFLUENCE_USERNAME": "${JIRA_USERNAME}",
+        "CONFLUENCE_API_TOKEN": "${JIRA_API_TOKEN}",
+        "JIRA_URL": "https://your-org.atlassian.net",
+        "JIRA_USERNAME": "${JIRA_USERNAME}",
+        "JIRA_API_TOKEN": "${JIRA_API_TOKEN}"
+      }
     }
   }
 }

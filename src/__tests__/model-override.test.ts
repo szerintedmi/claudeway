@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll, mock } from 'bun:test';
-import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { randomBytes } from 'node:crypto';
 import type { WebClient } from '@slack/web-api';
 import {
   parseModelOverride,
@@ -289,6 +290,14 @@ defaults:
     writeFileSync(join(tmpDir, 'config.yaml'), configYaml);
     process.cwd = () => tmpDir;
 
+    // BYO Claude is always on: give the engine a secret store with an enrolled
+    // token so the enrollment gate lets the test user through
+    const { getSecretStore, resetSecretStoreForTests, secretsDir } = await import('../secrets.js');
+    mkdirSync(secretsDir(tmpDir), { recursive: true });
+    writeFileSync(join(secretsDir(tmpDir), 'key'), randomBytes(32).toString('hex'));
+    resetSecretStoreForTests();
+    getSecretStore(tmpDir).set('U001', 'claude', { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-test' });
+
     actualClaude = await import('../claude.js');
     const fakeResult = { response: 'ok', sessionId: null, cost: null, tokens: null };
     mock.module('../claude.js', () => ({
@@ -311,9 +320,11 @@ defaults:
     }));
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     process.cwd = originalCwd;
     rmSync(tmpDir, { recursive: true, force: true });
+    const { resetSecretStoreForTests } = await import('../secrets.js');
+    resetSecretStoreForTests();
     // Restore the real module for any test files that run after this one
     mock.module('../claude.js', () => actualClaude);
   });

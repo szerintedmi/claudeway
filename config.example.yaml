@@ -1,8 +1,11 @@
 # Claudeway configuration
 
-# Bot owner's Slack user ID — required for DM access, !config, !killall,
-# and cross-channel !kill/!nudge. Without this, global magic commands are denied.
-botOwner: "U0123456789"
+# Bot owners — required for DM access, !config, !killall, and cross-channel
+# !kill/!nudge. Without this, global magic commands are denied. Every listed
+# user gets full owner privileges. Prefer `users:` registry keys (e.g. [alice]);
+# raw Slack ids also work when the owner isn't in the registry.
+botOwners: ["U0123456789"]
+# botOwners: [alice]
 
 systemChannel: "C0123456789"
 
@@ -12,35 +15,77 @@ repos:
     url: https://github.com/org/my-project.git
     branch: main  # optional, defaults to repo default branch
 
-# Global env vars — every Claude subprocess gets these (regardless of permissions)
-env: [CLAUDE_CODE_OAUTH_TOKEN]
+# Runtime env vars that are not user credentials. Prefer userCredentials below
+# for API keys/tokens so shared defaults and per-user overrides live in one place.
+# Do NOT list CLAUDE_CODE_OAUTH_TOKEN — every user runs on their own enrolled
+# token, injected per spawn from the credential store.
+env: []
 
-# Permission definitions — each bundles env vars exposed when the permission is granted.
-# "git" and "jiraWrite" are known names with built-in enforcement:
-#   git: enables git credentials + author identity; without it, git auth is blocked
-#   jiraWrite: enables full MCP config; without it, MCP is read-only
-# Any other name is custom — purely controls env var exposure.
-permissions:
-  git:
-    env: []
-    # env: [GIT_SSH_KEY_PATH]  # uncomment if git access needs an SSH key env var
-  jiraWrite:
-    env: []
-    # env: [JIRA_API_TOKEN, JIRA_URL, JIRA_EMAIL]
-  # langfuse:                  # custom permission example — env-only, no enforcement
-  #   env: [LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_HOST]
+# Canonical person registry — define each human ONCE; channels reference them by
+# name via "members". The registry key is the canonical user id used by the
+# per-user credential store, the audit log, and persistent-process identity
+# (stable across a person's Slack and voice identities).
+# users:
+#   alice: { name: "Alice Doe", slack: U0ADMIN001 }
+#   bob:   { name: "Bob Roe", slack: U0DEV00002, voice: voice-bob }
+#   carol: { slack: U0VIEW0003 }
+
+# Per-user credentials (see docs/per-user-credentials.md).
+# BYO Claude is built-in and ALWAYS ON: every user — bot owners included — must
+# enroll their own Claude token ("!creds" Slack DM → magic link → web form)
+# before the bot processes their messages, so usage runs under and is
+# attributed to their own account.
+# Hard startup requirements:
+#   - CLAUDEWAY_SECRETS_KEY (32-byte hex/base64) in the environment, or a
+#     .secrets/key file (generate with: openssl rand -hex 32)
+#   - baseUrl (below) — the enrollment form always runs
+#
+# Optional additional credential types (Jira/GitHub/custom):
+#   fields:             form fields + names exposed to the child/tool
+#   defaultFromEnv:     explicit shared default source from the server env
+#   exposeAs:           "env" (default) or "git-credential-helper" (token never
+#                       enters the subprocess env; delivered via per-spawn gitconfig)
+# Channel access is the normal permission boundary: allowed users can use shared
+# defaults for configured credentials. Personal values enrolled via !creds
+# override shared defaults. ("claude" is reserved: built-in.)
+# userCredentials:
+#   jira:
+#     label: "Jira"
+#     exposeAs: env
+#     fields:
+#       JIRA_USERNAME:
+#         label: "Jira email"
+#         secret: false
+#         defaultFromEnv: SHARED_JIRA_USERNAME
+#       JIRA_API_TOKEN:
+#         label: "Jira API token"
+#         defaultFromEnv: SHARED_JIRA_API_TOKEN
+#     guidance: "Create an API token at id.atlassian.com → Security → API tokens. Username is your work email."
+#   github:
+#     label: "GitHub"
+#     exposeAs: git-credential-helper
+#     fields:
+#       GITHUB_TOKEN:
+#         label: "GitHub fine-grained PAT"
+#         defaultFromEnv: SHARED_GITHUB_TOKEN
+#     guidance: "Fine-grained PAT limited to the repos you need; Contents: Read and write."
+
+# Credential enrollment web form (magic links issued by "!creds") — always on.
+baseUrl: "http://192.168.1.10:8791"   # REQUIRED: how users reach the form (LAN/VPN; put HTTPS in front if exposed wider)
+# credsForm:
+#   port: 8791   # optional, default 8791
 
 channels:
   C0123456789:
     name: my-project
     repo: my-project  # repo name from repos map, resolved to .docker/repos/my-project
     # Optional: restrict who can use the bot and run magic commands in this channel.
-    # If omitted, all channel members can interact with the bot (read-only).
-    # botOwner always has full access regardless of listing.
-    # allowedUsers:
-    #   - "U0ADMIN001": [git, jiraWrite]  # git + Jira write + their env vars
-    #   - "U0DEV00002": [git]              # git only, Jira read-only
-    #   - "U0VIEW0003"                     # read-only, global env only
+    # If omitted, all channel members can interact with the bot. Users allowed
+    # in the channel can use configured shared credential defaults.
+    # Reference the users registry:
+    # members:
+    #   - alice
+    #   - bob
 
   # Voice channel (used by the WebSocket voice adapter)
   # The systemPrompt should be optimized for spoken output (TTS via Deepgram Aura-2).
@@ -136,6 +181,9 @@ defaults:
       failure if the conversion itself fails.
   tempDir: .claudeway-tmp # Temp directory for per-request file attachments (relative to project root)
   # tempMaxAgeDays: 90  # Delete temp files older than N days on startup (default: 90, 0 to disable)
+  # threadWorktreeMaxAgeDays: 14  # Prune per-thread git worktrees idle for N days (default: 14, 0 to disable)
+  # threadWorktrees: true  # Run each conversation of a repo-backed channel in its own git worktree
+  #                        # (default: true; also settable per channel — disable on busy Q&A channels)
   timeoutMs: 300000
   processMode: oneshot # oneshot = new session per message; persistent = reuse session
   responseMode: batch # batch | stream-update | stream-native

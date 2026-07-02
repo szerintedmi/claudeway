@@ -144,21 +144,21 @@ describe('getMcpConfigPath', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('returns mcp.json when jiraWrite is granted', () => {
+  it('returns mcp.json when it exists', () => {
+    writeFileSync(join(tmpDir, 'mcp.json'), '{}');
+    writeFileSync(join(tmpDir, 'mcp-readonly.json'), '{}');
+    expect(getMcpConfigPath(new Set(), tmpDir)).toBe(join(tmpDir, 'mcp.json'));
+  });
+
+  it('does not switch to mcp-readonly.json based on permissions', () => {
     writeFileSync(join(tmpDir, 'mcp.json'), '{}');
     writeFileSync(join(tmpDir, 'mcp-readonly.json'), '{}');
     expect(getMcpConfigPath(new Set(['git', 'jiraWrite']), tmpDir)).toBe(join(tmpDir, 'mcp.json'));
   });
 
-  it('returns mcp-readonly.json when jiraWrite is not granted and file exists', () => {
+  it('returns mcp.json even when readonly does not exist', () => {
     writeFileSync(join(tmpDir, 'mcp.json'), '{}');
-    writeFileSync(join(tmpDir, 'mcp-readonly.json'), '{}');
-    expect(getMcpConfigPath(new Set(), tmpDir)).toBe(join(tmpDir, 'mcp-readonly.json'));
-  });
-
-  it('returns null when jiraWrite is not granted and readonly does not exist', () => {
-    writeFileSync(join(tmpDir, 'mcp.json'), '{}');
-    expect(getMcpConfigPath(new Set(), tmpDir)).toBeNull();
+    expect(getMcpConfigPath(new Set(), tmpDir)).toBe(join(tmpDir, 'mcp.json'));
   });
 
   it('returns null when no MCP config exists', () => {

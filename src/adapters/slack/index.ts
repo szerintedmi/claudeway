@@ -1,31 +1,39 @@
 import { App } from '@slack/bolt';
-import { loadConfig } from '../../config.js';
+import { loadConfig, botOwnerSlackIds } from '../../config.js';
 import { registerMessageHandler, drainAllPending } from './handler.js';
 
-let ownerDmChannelId: string | null = null;
+// ownerId → DM channel id cache
+const ownerDmChannels = new Map<string, string>();
 
 async function notifyOwner(app: App | null, message: string): Promise<void> {
   if (!app) return;
   try {
     const config = loadConfig();
-    if (!config.botOwner) return;
-    if (!ownerDmChannelId) {
-      const result = await app.client.conversations.open({ users: config.botOwner });
-      ownerDmChannelId = result.channel?.id ?? null;
-      if (!ownerDmChannelId) return;
+    for (const ownerId of botOwnerSlackIds(config)) {
+      try {
+        let dmChannel = ownerDmChannels.get(ownerId);
+        if (!dmChannel) {
+          const result = await app.client.conversations.open({ users: ownerId });
+          dmChannel = result.channel?.id ?? undefined;
+          if (!dmChannel) continue;
+          ownerDmChannels.set(ownerId, dmChannel);
+        }
+        await app.client.chat.postMessage({ channel: dmChannel, text: message });
+      } catch (err) {
+        console.error(
+          `notifyOwner failed for ${ownerId}:`,
+          err instanceof Error ? err.message : err,
+        );
+        if (err && typeof err === 'object' && 'data' in err) {
+          console.error(
+            'API response:',
+            JSON.stringify((err as Record<string, unknown>).data, null, 2),
+          );
+        }
+      }
     }
-    await app.client.chat.postMessage({
-      channel: ownerDmChannelId,
-      text: message,
-    });
   } catch (err) {
     console.error('notifyOwner failed:', err instanceof Error ? err.message : err);
-    if (err && typeof err === 'object' && 'data' in err) {
-      console.error(
-        'API response:',
-        JSON.stringify((err as Record<string, unknown>).data, null, 2),
-      );
-    }
   }
 }
 

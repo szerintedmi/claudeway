@@ -58,9 +58,9 @@ Claude Code edits the config file directly, and changes take effect on the next 
    - `files:read` (for image attachments)
    - `files:write` (for file attachments in responses)
    - `groups:history` (for private channels)
-   - `im:history` (for receiving DMs from botOwner)
+   - `im:history` (for receiving DMs from bot owners)
    - `im:read`
-   - `im:write` (for botOwner DM notifications)
+   - `im:write` (for bot owner DM notifications)
    - `reactions:write`
    - `users:read` (for resolving display names in thread context)
 4. **Subscribe to Bot Events** (Event Subscriptions):
@@ -82,15 +82,17 @@ Create `.env` (see [`.env.example`](.env.example)):
 ```
 SLACK_BOT_TOKEN=xoxb-your-bot-token
 SLACK_APP_TOKEN=xapp-your-app-level-token
-CLAUDE_CODE_OAUTH_TOKEN=<run `claude setup-token` to generate>
+CLAUDEWAY_SECRETS_KEY=<run `openssl rand -hex 32` to generate>
 ```
 
-The `CLAUDE_CODE_OAUTH_TOKEN` is required for Docker deployments and optional when running locally (where the CLI uses its own auth). Generate it with `claude setup-token` on a machine where Claude Code is already authenticated.
+`CLAUDEWAY_SECRETS_KEY` encrypts the per-user credential store and is required at startup (alternatively, put the key in `.secrets/key`). Claude auth is per-user: every user — bot owners included — connects their own token by DMing the bot `!creds` and pasting the output of `claude setup-token` into the enrollment form (see [docs/per-user-credentials.md](docs/per-user-credentials.md)).
 
 Create `config.yaml` (see [`config.example.yaml`](config.example.yaml) for a full example):
 
 ```yaml
-botOwner: "U0123456789"
+botOwners: ["U0123456789"]
+
+baseUrl: "http://192.168.1.10:8791" # required — how users reach the !creds enrollment form
 
 repos:
   my-project:
@@ -174,11 +176,7 @@ The install script auto-detects your `bun` path, project directory, and user env
 
 Docker provides filesystem isolation — Claude CLI can only access repos defined in `config.yaml`.
 
-1. Generate an auth token on a machine where Claude Code is authenticated:
-   ```bash
-   claude setup-token
-   ```
-   Add the token to your `.env` as `CLAUDE_CODE_OAUTH_TOKEN`.
+1. Claude auth is per-user (no server-wide token): after the container is up, each user DMs the bot `!creds` and enrolls their own `claude setup-token` output via the web form. Make sure `baseUrl` points at a host/port reachable from users' browsers and the creds form port (default 8791) is published.
 
 2. Define repos in `config.yaml` and map channels to them (see `config.example.yaml`). Repos are automatically cloned/pulled on every startup (both `bun start` and Docker).
 
@@ -202,7 +200,7 @@ Docker provides filesystem isolation — Claude CLI can only access repos define
 
 Session state, repos, queue, and files are persisted in named Docker volumes across restarts.
 
-**Env var security:** `docker-compose.yml` lists env vars explicitly (what enters the container). The `env` and `permissions` sections in `config.yaml` then control which of those reach the Claude subprocess (see [Permissions](#permissions) below).
+**Env var security:** `docker-compose.yml` lists env vars explicitly (what enters the container). `config.yaml` then controls which credential values reach the Claude subprocess or tool adapters. Prefer `userCredentials` for API keys/tokens so shared defaults and per-user overrides are declared in one place.
 
 ## Config Options
 
@@ -210,16 +208,16 @@ Session state, repos, queue, and files are persisted in named Docker volumes acr
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `botOwner` | Slack user ID — receives startup/shutdown DMs, can use magic commands | none (disabled) |
+| `botOwners` | Slack user IDs (list) — receive startup/shutdown DMs, can use magic commands | none (disabled) |
 | `repos` | Repo definitions (`url`, optional `branch`) — cloned into `.docker/repos/` | none |
 | `channels` | Channel-to-repo mappings | required |
 | `defaults` | Default model, prompt, timeout, and response mode | required |
 | `defaults.tempDir` | Temp directory for per-request file attachments (relative to project root) | `.claudeway-tmp` |
 | `defaults.tempMaxAgeDays` | Delete temp files older than N days on startup (0 to disable) | `90` |
-| `env` | Global env var names for Claude subprocesses | none (baseline only) |
-| `permissions` | Permission definitions with env var bundles (see below) | none |
+| `env` | Non-credential env var names for Claude subprocesses | none (baseline only) |
+| `userCredentials` | Credential definitions for shared defaults and `!creds` enrollment | built-in Claude credential only |
 
-Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutdown, and you can send magic commands (`!config`, `!ps`, etc.) in that DM as an admin console.
+Set `botOwners` to a list containing your Slack user ID. Claudeway will DM you on startup and shutdown, and you can send magic commands (`!config`, `!ps`, etc.) in that DM as an admin console.
 
 ### Channel Config
 
@@ -235,20 +233,23 @@ Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutd
 | `triggerMode` | When to respond: `all` or `mention` (see below) | `all` |
 | `collapseWorkingNotes` | `stream-native` only: show live "Working notes" (reasoning + tool steps) and collapse them into an attachment on completion (see below) | `true` |
 | `effort` | Claude CLI thinking effort (`low`, `medium`, `high`, `xhigh`, `max`); per-message override via `!effort:<level>` | from defaults |
-| `allowedUsers` | Slack user IDs allowed to interact with the bot in this channel. Permissions also gate env var exposure. | everyone |
+| `members` | Users (by `users:` registry key) allowed to interact with the bot in this channel. Allowed users can use configured shared credential defaults. | everyone |
 
-### Permissions
+### Credentials
 
-Each permission is defined in the top-level `permissions` section and bundles env vars that are exposed when the permission is granted. `git` and `jiraWrite` are known names with built-in enforcement; any other name is custom (env-var-only).
+Credentials are defined in `userCredentials`. Each field name is the value exposed to the subprocess/tool. `defaultFromEnv` points at an explicit shared default env var; enrolled user values from `!creds` override those defaults.
 
 | Field | Description |
 |-------|-------------|
-| `env` | Global env var names — every Claude subprocess gets these |
-| `permissions.<name>.env` | Env var names exposed when a user has this permission |
+| `userCredentials.<name>.label` | Display label on the enrollment form |
+| `userCredentials.<name>.guidance` | Help text on the enrollment form |
+| `userCredentials.<name>.fields` | Field names stored per user and exposed to the child/tool |
+| `fields.<field>.defaultFromEnv` | Explicit shared default source env var |
+| `fields.<field>.label` | Optional field label on the enrollment form |
+| `fields.<field>.secret` | Whether the form masks the value (default true) |
+| `userCredentials.<name>.exposeAs` | `env` or `git-credential-helper` |
 
-**Built-in enforcement** for known permission names:
-- `git` — enables git credentials + author identity; without it, git auth is blocked
-- `jiraWrite` — enables full MCP config; without it, MCP is read-only
+`exposeAs: git-credential-helper` means the token is not exposed as `GITHUB_TOKEN` in Claude's environment; it is delivered to `git` via a per-spawn credential helper. Provider token scope controls read/write behavior for shared defaults.
 
 See `config.example.yaml` for a full example.
 
@@ -311,7 +312,7 @@ Control running Claude CLI processes directly from Slack with magic commands. Th
 | `!nudge #channel` | Nudge a process in another channel by name |
 | `!config` | Show channel/bot configuration |
 
-Magic commands require authorization. `botOwner` can run all commands. Channel `allowedUsers` can run `!ps`, `!kill`, and `!nudge` in their own channel. Cross-channel `!kill`/`!nudge`, `!killall`, and `!config` are `botOwner`-only.
+Magic commands require authorization. Users in `botOwners` can run all commands. Channel `members` can run `!ps`, `!kill`, and `!nudge` in their own channel. Cross-channel `!kill`/`!nudge`, `!killall`, and `!config` are `botOwners`-only.
 
 Example `!ps` output:
 ```

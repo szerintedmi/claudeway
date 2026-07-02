@@ -12,17 +12,23 @@ services:
       # Claudeway process needs these (never passed to Claude subprocess)
       - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN}
-      # Claude subprocess gets this via global env config
-      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
+      # Master key for the per-user credential store (required; users enroll
+      # their own Claude tokens via !creds — no server-wide Claude token)
+      - CLAUDEWAY_SECRETS_KEY=${CLAUDEWAY_SECRETS_KEY}
       # Voice pipeline (Claudeway-internal, not for Claude subprocess)
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
       - VOICE_AUTH_TOKEN=${VOICE_AUTH_TOKEN:-}
-      # Langfuse (passed to Claude via permissions.langfuse.env)
-      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
-      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
-      - LANGFUSE_HOST=${LANGFUSE_HOST:-}
+      # Shared credential defaults (mapped through userCredentials.defaultFromEnv)
+      - SHARED_JIRA_USERNAME=${SHARED_JIRA_USERNAME:-}
+      - SHARED_JIRA_API_TOKEN=${SHARED_JIRA_API_TOKEN:-}
+      - SHARED_GITHUB_TOKEN=${SHARED_GITHUB_TOKEN:-}
+      - SHARED_NEWRELIC_API_KEY=${SHARED_NEWRELIC_API_KEY:-}
+      - SHARED_LANGFUSE_SECRET_KEY=${SHARED_LANGFUSE_SECRET_KEY:-}
+      - SHARED_LANGFUSE_PUBLIC_KEY=${SHARED_LANGFUSE_PUBLIC_KEY:-}
+      - SHARED_LANGFUSE_HOST=${SHARED_LANGFUSE_HOST:-}
     ports:
       - "${VOICE_PORT:-8765}:${VOICE_PORT:-8765}"  # Voice WebSocket server (only used when voiceServer.enabled)
+      - "${CREDS_PORT:-8791}:${CREDS_PORT:-8791}"  # !creds enrollment form (always on)
     volumes:
       # Config (read-only). create_host_path: false makes the container fail to
       # start if the source file is missing, instead of silently creating a
@@ -54,6 +60,9 @@ services:
 
       # Persistent state (repos, queue, files) — shared with host
       - ./.docker:/app/.docker
+
+      # Encrypted per-user credential store — must survive container recreation
+      - ./.secrets:/app/.secrets
     security_opt:
       - no-new-privileges:true
     read_only: false  # Claude needs to write to work folders

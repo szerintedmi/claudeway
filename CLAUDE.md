@@ -2,7 +2,7 @@
 
 ## Primary Design Principle
 
-Always adhere to Anthropic's Terms of Service 100%. Claudeway is a personal tool for a single developer using their own Claude Max subscription through the official Claude Code CLI. It does not extract OAuth tokens, route requests through third-party backends, or operate as a multi-user service.
+Always adhere to Anthropic's Terms of Service 100%. Claudeway is a personal tool operated by a single developer through the official Claude Code CLI. Trusted collaborators may use it with **their own credentials**: each user can authenticate with their own Claude subscription/token (`!creds` enrollment), and downstream actions (git, Jira) run under and are attributed to their own accounts. Claudeway never extracts OAuth tokens and never routes requests through third-party backends.
 
 ## Project Overview
 
@@ -20,13 +20,20 @@ Claudeway is a multi-channel Claude Code CLI gateway. Messages arrive via Slack 
 - `src/core/prose-chunker.ts` — Sentence-boundary text chunking for TTS
 - `src/adapters/slack/` — Slack Bolt adapter (handler, responder, formatting, thread context)
 - `src/adapters/voice/` — WebSocket voice adapter (protocol, handler, responder, audio sessions, test UI) — used by Android companion app, Meta glasses, and browser test UI
+- `src/adapters/creds/` — Credential enrollment web form (magic-link gated, rate-limited)
 - `src/claude.ts` — Claude CLI orchestration (batch and streaming process runners)
-- `src/config.ts` — Config loading/saving, channel resolution with defaults, user permission parsing
+- `src/config.ts` — Config loading/saving, channel resolution with defaults, `users:` registry + permission resolution
 - `src/queue.ts` — Persistent file-based message queue
 - `src/mcp.ts` — MCP config management (read-only config generation for permission enforcement)
 - `src/prompt.ts` — System prompt construction including access restriction injection
 - `src/tempdir.ts` — Temp and scratch directory management
 - `src/sync-repos.ts` — Git clone/pull for configured repos on startup
+- `src/secrets.ts` — Encrypted per-user credential store (AES-256-GCM behind a `SecretStore` interface) + secret scrubbing
+- `src/credentials.ts` — Config-driven per-user credential resolution (personal > explicit shared default > unset)
+- `src/git-credentials.ts` — Git enforcement adapter: per-spawn gitconfig + credential helper (tokens out of subprocess env)
+- `src/creds-links.ts` — Single-use, short-TTL magic links for `!creds` enrollment
+- `src/audit.ts` — Append-only JSONL audit log (credential names, never values)
+- `src/worktrees.ts` — Per-thread git worktrees (thread isolation) + age-based GC
 
 ### Android Companion App (Kotlin / Jetpack Compose)
 
@@ -44,27 +51,28 @@ Claudeway is a multi-channel Claude Code CLI gateway. Messages arrive via Slack 
 - Session IDs are deterministic (derived from channel ID + folder path via UUID v5)
 - One message processed at a time per channel (serialized via `channelBusy` set)
 - Bot does NOT programmatically join Slack channels — requires manual `/invite` + config entry
-- Magic commands (`!kill`, `!killall`, `!nudge`, `!config`, `!ps`) have authorization checks via `isMagicCommandAllowed()` — `botOwner` for global commands, channel `allowedUsers` for channel-scoped commands
-- Subprocess env vars are allowlisted via `permissions` config — `buildAllowedEnv()` in `src/claude.ts`. Only baseline vars (`HOME`, `PATH`, etc.) + global `env` + permission-linked env vars + explicitly injected vars reach the subprocess.
+- Magic commands (`!kill`, `!killall`, `!nudge`, `!config`, `!ps`, `!creds`) have authorization checks — a `botOwners` entry for global commands, channel membership for channel-scoped commands; `!creds` is DM-only and the sole non-owner DM capability
+- Subprocess env vars are allowlisted in `buildAllowedEnv()` in `src/claude.ts`. Only baseline vars (`HOME`, `PATH`, etc.) + non-credential `env` + permission-linked env vars + explicitly injected vars + resolved user credentials reach the subprocess.
+- Repo-backed channels run each Slack thread in its own git worktree (`wt/<channel>/<threadTs>`, `src/worktrees.ts`) — thread participants share files, concurrent threads are isolated, session IDs keep deriving from the logical repo folder
 
-## User Roles & Permissions
+## Users & Per-User Credentials
 
-Every user is **read-only by default**. Permissions are additive. The `botOwner` has full access implicitly unless explicitly listed in `allowedUsers` (useful for testing).
+Channel access is the normal permission boundary: users listed in a channel can use the bot there, including configured shared credential defaults.
 
-- `allowedUsers` supports mixed entries: plain string (read-only) or `"userId": [git, jiraWrite, ...]`
-- Permission names are defined in `config.permissions` — each bundles env vars exposed to Claude
-- `git` — known name: enables git push/commit, file modification, and git credential access
-- `jiraWrite` — known name: uses full MCP config instead of read-only MCP config
-- Custom permissions (e.g., `langfuse`) — env-var-only, no built-in enforcement
+- People are defined once in the top-level `users:` registry (canonical id → name, Slack id, voice id); channels reference them via `members:`. The removed legacy `allowedUsers` shape is rejected at config load with a migration hint.
+- The canonical user id keys the secret store, audit log, and persistent-process identity — stable across a person's Slack and voice identities.
+- `userCredentials` defines credential fields, form labels/guidance, explicit shared defaults via `defaultFromEnv`, and delivery via `exposeAs` (`env` or `git-credential-helper`).
+- Resolution precedence is **user secret > explicit shared default > unset**. There is no ambient fallback from matching env var names.
+- Provider token scope controls read/write capability for Jira/GitHub. Claudeway no longer switches Jira MCP configs based on `jiraWrite`.
+- **BYO Claude is built-in and always on**: the `claude` credential is injected by `loadConfig()` (not configurable) and personal enrollment is mandatory for **everyone**, bot owner included — unenrolled users' turns are refused with a `!creds` hint (audited as `spawn.denied`). Hard startup requirements: a secrets master key (`CLAUDEWAY_SECRETS_KEY` or `.secrets/key`) and `baseUrl` (the enrollment form always runs). Store: AES-256-GCM in `.secrets/user-credentials.json`.
 
-Enforcement layers:
-1. **System prompt injection** — read-only restrictions appended per user (soft guard)
-2. **Git credential stripping** — env vars disable git auth for non-`git` users (hard)
-3. **Git author identity** — commits attributed to Slack user profile (all users)
-4. **MCP read-only config** — `mcp-readonly.json` auto-generated with `READ_ONLY_MODE: "true"` (hard)
-5. **Env var allowlist** — `permissions.<name>.env` gates which env vars (API keys, tokens) reach the subprocess based on user permissions
+Credential layers:
+1. **Git credential adapter** — `exposeAs: git-credential-helper` uses a per-spawn gitconfig (SSH→HTTPS rewrite + credential helper); the token does not enter subprocess env.
+2. **Env credential delivery** — `exposeAs: env` injects resolved fields into the subprocess env at highest precedence.
+3. **Git author identity** — commits are attributed to the registry name / Slack profile.
+4. **Audit + scrubbing** — every credentialed spawn and enrollment event lands in `.claudeway-audit.jsonl` (names, never values); decrypted values are scrubbed from stderr logs and error replies.
 
-In persistent mode, the process is killed and respawned with `--resume` when the incoming user's identity, permission set, or resolved env var exposure differs from the running process.
+In persistent mode, the process is killed and respawned with `--resume` when the incoming user's identity, permission set, resolved env var exposure, or credential-value hash differs from the running process.
 
 ## Branch Strategy (Fork)
 

@@ -14,7 +14,60 @@ export interface RepoConfig {
   branch?: string;
 }
 
-export type AllowedUserEntry = string | Record<string, string[]>;
+/**
+ * Canonical user registry entry — one per person, referenced by channels.
+ * The registry key is the canonical user id used by the secret store,
+ * audit log, and persistent-process identity.
+ */
+export interface UserDef {
+  /** Display name (git author identity). Defaults to the registry key. */
+  name?: string;
+  /** Slack user ID (U...) */
+  slack?: string;
+  /** Voice adapter user id (matches voiceServer.auth.tokens[].userId) */
+  voice?: string;
+  /** Permission names from config.permissions */
+  permissions?: string[];
+}
+
+/** Channel member entry: canonical user id, or { id: [extraPermissions] }. */
+export type MemberEntry = string | Record<string, string[]>;
+
+export type CredentialExposeAs = 'env' | 'git-credential-helper';
+
+export interface CredentialFieldDef {
+  /** Human-readable field label shown on the enrollment form. */
+  label?: string;
+  /** Whether the form input should mask this value. Defaults to true. */
+  secret?: boolean;
+  /** Optional shared default source. This env var name may differ from the exposed field name. */
+  defaultFromEnv?: string;
+}
+
+export interface CredentialField {
+  name: string;
+  def: CredentialFieldDef;
+}
+
+/**
+ * Per-user credential registry entry (config-driven).
+ * `fields` names values carried by this credential. Personal values are stored
+ * under the field name; `defaultFromEnv` can provide an explicit shared default.
+ */
+export interface CredentialDef {
+  label: string;
+  /** Values carried by this credential, keyed by the name exposed to the child/tool. */
+  fields: Record<string, CredentialFieldDef>;
+  /** How the resolved credential is exposed. Default: env. */
+  exposeAs?: CredentialExposeAs;
+  /** Least-privilege guidance shown on the enrollment form. */
+  guidance?: string;
+}
+
+export interface CredsFormConfig {
+  /** HTTP port for the enrollment form server (default 8791). */
+  port?: number;
+}
 
 /** A user's granted permissions — set of permission names from config.permissions keys. */
 export type UserPermissions = Set<string>;
@@ -27,22 +80,59 @@ export function fullPermissions(config: Config): UserPermissions {
   return new Set(Object.keys(config.permissions ?? {}));
 }
 
+export function credentialExposeAs(def: CredentialDef): CredentialExposeAs {
+  return def.exposeAs ?? 'env';
+}
+
+export function credentialFields(def: CredentialDef): CredentialField[] {
+  return Object.entries(def.fields).map(([name, fieldDef]) => ({
+    name,
+    def: fieldDef ?? {},
+  }));
+}
+
 export interface PermissionDef {
   env?: string[];
 }
 
+/** Bot owner entries as configured — registry keys or raw Slack ids ([] when unset). */
+export function botOwnerIds(config: Config): string[] {
+  return config.botOwners ?? [];
+}
+
+/** Bot owners resolved to Slack user ids — for mentions and DM notifications. */
+export function botOwnerSlackIds(config: Config): string[] {
+  return botOwnerIds(config)
+    .map((entry) => config.users?.[entry]?.slack ?? entry)
+    .filter((id) => !!id);
+}
+
 /**
- * Parse mixed allowedUsers entries into a map of userId → permissions.
- * Plain string entries get read-only permissions. Object entries get the listed permissions.
+ * Whether an external id belongs to a bot owner. The registry unifies a
+ * person's identities — a voice turn by an owner is still an owner (canonical
+ * id or registered slack id matches a botOwners entry).
  */
-export function parseAllowedUsers(entries: AllowedUserEntry[]): Map<string, UserPermissions> {
+export function isBotOwner(config: Config, externalId: string): boolean {
+  const owners = botOwnerIds(config);
+  if (owners.length === 0) return false;
+  if (owners.includes(externalId)) return true;
+  const registry = findRegistryUser(config, externalId);
+  if (!registry) return false;
+  return (
+    owners.includes(registry.userId) ||
+    (!!registry.def.slack && owners.includes(registry.def.slack))
+  );
+}
+
+/** Parse channel member entries into canonicalId → extra permissions. */
+export function parseMembers(entries: MemberEntry[]): Map<string, UserPermissions> {
   const map = new Map<string, UserPermissions>();
   for (const entry of entries) {
     if (typeof entry === 'string') {
       map.set(entry, new Set());
     } else {
-      for (const [userId, perms] of Object.entries(entry)) {
-        map.set(userId, new Set(perms));
+      for (const [id, perms] of Object.entries(entry)) {
+        map.set(id, new Set(perms));
       }
     }
   }
@@ -50,32 +140,136 @@ export function parseAllowedUsers(entries: AllowedUserEntry[]): Map<string, User
 }
 
 /**
- * Extract just the user IDs from mixed allowedUsers entries.
+ * Find a user's canonical registry entry by external id (Slack id, voice id)
+ * or by canonical id itself. Returns null if not registered.
  */
-export function extractAllowedUserIds(entries: AllowedUserEntry[]): string[] {
-  return entries.flatMap((entry) => (typeof entry === 'string' ? [entry] : Object.keys(entry)));
+export function findRegistryUser(
+  config: Config,
+  externalId: string,
+): { userId: string; def: UserDef } | null {
+  for (const [userId, def] of Object.entries(config.users ?? {})) {
+    if (userId === externalId || def.slack === externalId || def.voice === externalId) {
+      return { userId, def };
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve an external id (Slack/voice) to the canonical user id.
+ * Unregistered users keep their external id as the canonical id (back-compat) —
+ * the secret store, audit log, and process identity all key on this value.
+ */
+export function resolveCanonicalUserId(config: Config, externalId: string): string {
+  return findRegistryUser(config, externalId)?.userId ?? externalId;
+}
+
+/** A user resolved through the registry for a specific channel. */
+export interface ResolvedUser {
+  /** Canonical user id (registry key, or external id when unregistered). */
+  userId: string;
+  /** Display name from the registry (git author identity). */
+  name?: string;
+  permissions: UserPermissions;
+  /** True when the user exists in the `users:` registry. */
+  registered: boolean;
+  isBotOwner: boolean;
+}
+
+/**
+ * Resolve a user (by external Slack/voice id) to canonical identity + permissions
+ * for a channel. Permissions are additive: registry permissions ∪ channel member
+ * extras. botOwner gets full permissions unless explicitly listed (registry
+ * entry or channel member).
+ */
+export function resolveUser(config: Config, channelId: string, externalId: string): ResolvedUser {
+  const registry = findRegistryUser(config, externalId);
+  const userId = registry?.userId ?? externalId;
+  const owner = isBotOwner(config, externalId);
+  const ch = config.channels[channelId];
+
+  const perms = new Set<string>(registry?.def.permissions ?? []);
+  let explicitlyListed = registry !== null;
+
+  if (ch?.members && ch.members.length > 0) {
+    const extra = parseMembers(ch.members).get(userId);
+    if (extra) {
+      explicitlyListed = true;
+      for (const p of extra) perms.add(p);
+    }
+  }
+
+  if (owner && !explicitlyListed) {
+    return {
+      userId,
+      name: registry?.def.name,
+      permissions: fullPermissions(config),
+      registered: registry !== null,
+      isBotOwner: owner,
+    };
+  }
+
+  return {
+    userId,
+    name: registry?.def.name,
+    permissions: perms,
+    registered: registry !== null,
+    isBotOwner: owner,
+  };
 }
 
 /**
  * Resolve a user's permissions for a given channel.
- * botOwner always gets full permissions. Users not in allowedUsers get read-only.
+ * botOwner always gets full permissions unless explicitly listed. Unlisted users get read-only.
  */
 export function resolveUserPermissions(
   config: Config,
   channelId: string,
   userId: string,
 ): UserPermissions {
+  return resolveUser(config, channelId, userId).permissions;
+}
+
+/**
+ * Whether a user (external id) may interact with a channel.
+ * Open when `members` does not restrict the channel.
+ */
+export function isUserAllowedInChannel(
+  config: Config,
+  channelId: string,
+  externalId: string,
+): boolean {
   const ch = config.channels[channelId];
-  if (!ch?.allowedUsers || ch.allowedUsers.length === 0) {
-    return userId === config.botOwner ? fullPermissions(config) : new Set();
+  if (!ch?.members || ch.members.length === 0) return true;
+  const canonical = resolveCanonicalUserId(config, externalId);
+  return parseMembers(ch.members).has(canonical);
+}
+
+/** Whether a user is allowed in at least one configured channel (or is a botOwner). */
+export function isUserAllowedAnywhere(config: Config, externalId: string): boolean {
+  if (isBotOwner(config, externalId)) return true;
+  // Registry presence alone is not enough — the user must be admitted to ≥1 channel
+  return Object.keys(config.channels).some((chId) =>
+    isUserAllowedInChannel(config, chId, externalId),
+  );
+}
+
+/**
+ * Union of a user's permissions across the registry and every channel —
+ * used to gate which credential types they may enroll.
+ */
+export function resolveGlobalPermissions(config: Config, canonicalUserId: string): UserPermissions {
+  const registry = config.users?.[canonicalUserId];
+  const perms = new Set<string>(registry?.permissions ?? []);
+  for (const ch of Object.values(config.channels)) {
+    if (ch.members) {
+      for (const p of parseMembers(ch.members).get(canonicalUserId) ?? []) perms.add(p);
+    }
   }
-
-  const parsed = parseAllowedUsers(ch.allowedUsers);
-  const explicit = parsed.get(userId);
-  if (explicit !== undefined) return explicit;
-
-  // Not listed — botOwner gets full access, others read-only
-  return userId === config.botOwner ? fullPermissions(config) : new Set();
+  if (isBotOwner(config, canonicalUserId)) {
+    return fullPermissions(config);
+  }
+  return perms;
 }
 
 /**
@@ -104,8 +298,15 @@ export interface ChannelConfig {
   timeoutMs?: number;
   responseMode?: ResponseMode;
   processMode?: ProcessMode;
-  allowedUsers?: AllowedUserEntry[];
+  /** Channel members referencing the `users:` registry by canonical id. */
+  members?: MemberEntry[];
   triggerMode?: TriggerMode;
+  /**
+   * Run each thread/conversation of this repo-backed channel in its own git
+   * worktree (isolation + per-thread branches). Default: true. Disable on
+   * busy Q&A channels to avoid one worktree per conversation.
+   */
+  threadWorktrees?: boolean;
   /**
    * When a streamed turn produces intermediate narration (text between tool
    * calls) on top of the final answer, replace the live message with the clean
@@ -126,6 +327,10 @@ export interface Defaults {
   collapseWorkingNotes?: boolean;
   tempDir?: string;
   tempMaxAgeDays?: number;
+  /** Age (days) after which idle per-thread git worktrees are pruned. */
+  threadWorktreeMaxAgeDays?: number;
+  /** Default for channels' threadWorktrees flag (default: true). */
+  threadWorktrees?: boolean;
 }
 
 export interface VoiceTokenConfig {
@@ -158,11 +363,19 @@ export interface Config {
   repos?: Record<string, RepoConfig>;
   channels: Record<string, ChannelConfig>;
   defaults: Defaults;
-  botOwner?: string;
+  /** Bot owners — `users:` registry keys (preferred) or raw Slack ids. All get full owner privileges. */
+  botOwners?: string[];
   voiceServer?: VoiceServerConfig;
   voice?: VoiceConfig;
   env?: string[];
   permissions?: Record<string, PermissionDef>;
+  /** Canonical person registry — one entry per human, keyed by canonical user id. */
+  users?: Record<string, UserDef>;
+  /** Per-user credential registry (see docs/per-user-credentials.md). */
+  userCredentials?: Record<string, CredentialDef>;
+  /** Public base URL for the creds enrollment form (e.g. http://192.168.1.10:8791). */
+  baseUrl?: string;
+  credsForm?: CredsFormConfig;
 }
 
 export function getConfigPath(): string {
@@ -180,6 +393,17 @@ export function resolveFolder(folder: string): string {
   return resolve(DATA_DIR, 'repos', folder);
 }
 
+/**
+ * Built-in BYO-Claude credential: every user — bot owner included — runs on
+ * their own enrolled token, so usage is attributed to their own account.
+ * Injected into every loaded config; not configurable.
+ */
+export const CLAUDE_CREDENTIAL: CredentialDef = {
+  label: 'Claude Code OAuth token',
+  fields: { CLAUDE_CODE_OAUTH_TOKEN: { label: 'Claude Code OAuth token' } },
+  guidance: 'Run `claude setup-token` on your own machine and paste the token.',
+};
+
 export function loadConfig(): Config {
   const configPath = getConfigPath();
   const raw = readFileSync(configPath, 'utf-8');
@@ -187,6 +411,26 @@ export function loadConfig(): Config {
 
   if (!config.channels || typeof config.channels !== 'object') {
     throw new Error(`${configPath}: "channels" must be an object`);
+  }
+  if ('botOwner' in (config as unknown as Record<string, unknown>)) {
+    throw new Error(
+      `${configPath}: "botOwner" has been renamed — use "botOwners" (a list of Slack ids)`,
+    );
+  }
+  if (config.botOwners !== undefined) {
+    if (!Array.isArray(config.botOwners) || config.botOwners.some((v) => typeof v !== 'string')) {
+      throw new Error(
+        `${configPath}: "botOwners" must be a list of users registry keys or Slack user ids`,
+      );
+    }
+    for (const entry of config.botOwners) {
+      // Registry key, or something that plausibly is a raw Slack user id
+      if (!config.users?.[entry] && !/^[UW][A-Z0-9]{4,}$/.test(entry)) {
+        console.warn(
+          `[config] botOwners entry "${entry}" is neither a users registry key nor a Slack user id — owner privileges will not resolve`,
+        );
+      }
+    }
   }
   if (!config.defaults) {
     config.defaults = {
@@ -220,24 +464,97 @@ export function loadConfig(): Config {
   // Validate permissions config
   const validPermissions = new Set(Object.keys(config.permissions ?? {}));
 
-  // Validate permission names in allowedUsers reference defined permissions
+  // allowedUsers was removed (2026-07-02) — refuse rather than silently ignore
   for (const [chId, ch] of Object.entries(config.channels)) {
-    if (ch.allowedUsers) {
-      for (const entry of ch.allowedUsers) {
-        if (typeof entry === 'object') {
-          for (const [, perms] of Object.entries(entry)) {
-            for (const perm of perms) {
-              if (!validPermissions.has(perm)) {
-                throw new Error(
-                  `${configPath}: channel ${chId} has unknown permission "${perm}". Defined: ${[...validPermissions].join(', ') || '(none)'}`,
-                );
-              }
+    if ('allowedUsers' in (ch as unknown as Record<string, unknown>)) {
+      throw new Error(
+        `${configPath}: channel ${chId} uses "allowedUsers", which has been removed — ` +
+          'define people in the top-level "users:" registry and reference them via channel "members:"',
+      );
+    }
+  }
+
+  // Validate users registry
+  for (const [userId, def] of Object.entries(config.users ?? {})) {
+    for (const perm of def.permissions ?? []) {
+      if (!validPermissions.has(perm)) {
+        throw new Error(
+          `${configPath}: user "${userId}" has unknown permission "${perm}". Defined: ${[...validPermissions].join(', ') || '(none)'}`,
+        );
+      }
+    }
+  }
+
+  // Validate channel members reference registered users + known permissions
+  for (const [chId, ch] of Object.entries(config.channels)) {
+    for (const entry of ch.members ?? []) {
+      const memberIds = typeof entry === 'string' ? [entry] : Object.keys(entry);
+      for (const id of memberIds) {
+        if (!config.users?.[id]) {
+          throw new Error(`${configPath}: channel ${chId} member "${id}" is not defined in users`);
+        }
+      }
+      if (typeof entry === 'object') {
+        for (const perms of Object.values(entry)) {
+          for (const perm of perms) {
+            if (!validPermissions.has(perm)) {
+              throw new Error(
+                `${configPath}: channel ${chId} member has unknown permission "${perm}". Defined: ${[...validPermissions].join(', ') || '(none)'}`,
+              );
             }
           }
         }
       }
     }
   }
+
+  // Validate userCredentials registry (claude is built-in, not configurable)
+  if (config.userCredentials?.claude) {
+    throw new Error(
+      `${configPath}: userCredentials.claude is built-in (personal Claude token, always required) — remove the entry`,
+    );
+  }
+  for (const [credName, def] of Object.entries(config.userCredentials ?? {})) {
+    const rawDef = def as unknown as Record<string, unknown>;
+    for (const legacyKey of ['env', 'inject', 'fallback', 'requiresPermission']) {
+      if (legacyKey in rawDef) {
+        throw new Error(
+          `${configPath}: userCredentials.${credName}.${legacyKey} is no longer supported — use fields/defaultFromEnv/exposeAs`,
+        );
+      }
+    }
+    if (!def.fields || typeof def.fields !== 'object' || Array.isArray(def.fields)) {
+      throw new Error(
+        `${configPath}: userCredentials.${credName}.fields must be an object with at least one field`,
+      );
+    }
+    const exposeAs = credentialExposeAs(def);
+    if (exposeAs !== 'env' && exposeAs !== 'git-credential-helper') {
+      throw new Error(
+        `${configPath}: userCredentials.${credName}.exposeAs must be "env" or "git-credential-helper"`,
+      );
+    }
+    const fields = credentialFields(def);
+    if (fields.length === 0) {
+      throw new Error(
+        `${configPath}: userCredentials.${credName}.fields must list at least one field`,
+      );
+    }
+    for (const { name, def: fieldDef } of fields) {
+      if (!name || typeof name !== 'string') {
+        throw new Error(`${configPath}: userCredentials.${credName}.fields contains an empty name`);
+      }
+      if (fieldDef.defaultFromEnv !== undefined && typeof fieldDef.defaultFromEnv !== 'string') {
+        throw new Error(
+          `${configPath}: userCredentials.${credName}.fields.${name}.defaultFromEnv must be a string`,
+        );
+      }
+    }
+  }
+
+  // BYO Claude is always on — inject the built-in credential so every consumer
+  // (resolution, enrollment form, !creds) sees it without config plumbing
+  config.userCredentials = { claude: CLAUDE_CREDENTIAL, ...(config.userCredentials ?? {}) };
 
   // Warn about env vars in permissions not present in process.env
   for (const [permName, def] of Object.entries(config.permissions ?? {})) {
@@ -252,6 +569,16 @@ export function loadConfig(): Config {
   for (const v of config.env ?? []) {
     if (!process.env[v]) {
       console.warn(`[config] env references "${v}" which is not set`);
+    }
+  }
+
+  for (const [credName, def] of Object.entries(config.userCredentials ?? {})) {
+    for (const { name, def: fieldDef } of credentialFields(def)) {
+      if (fieldDef.defaultFromEnv && !process.env[fieldDef.defaultFromEnv]) {
+        console.warn(
+          `[config] userCredentials.${credName}.fields.${name}.defaultFromEnv references "${fieldDef.defaultFromEnv}" which is not set`,
+        );
+      }
     }
   }
 
@@ -318,6 +645,7 @@ export function resolvedDmConfig(config: Config) {
     processMode: config.defaults.processMode ?? ('oneshot' as ProcessMode),
     triggerMode: config.defaults.triggerMode ?? ('all' as TriggerMode),
     collapseWorkingNotes: config.defaults.collapseWorkingNotes ?? true,
+    threadWorktrees: false, // DMs run in the gateway's own directory — no repo
   };
 }
 
@@ -335,6 +663,7 @@ export interface ResolvedChannelConfig extends ChannelConfig {
   processMode: ProcessMode;
   triggerMode: TriggerMode;
   collapseWorkingNotes: boolean;
+  threadWorktrees: boolean;
 }
 
 export function resolvedChannelConfig(
@@ -356,6 +685,7 @@ export function resolvedChannelConfig(
     processMode: ch.processMode ?? config.defaults.processMode ?? 'oneshot',
     triggerMode: ch.triggerMode ?? config.defaults.triggerMode ?? 'all',
     collapseWorkingNotes: ch.collapseWorkingNotes ?? config.defaults.collapseWorkingNotes ?? true,
+    threadWorktrees: ch.threadWorktrees ?? config.defaults.threadWorktrees ?? true,
   };
 }
 

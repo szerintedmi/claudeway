@@ -67,11 +67,21 @@ export function buildPrompt(
   return directory + context + text;
 }
 
+/** How a restricted user can get more access — injected into the restriction prompt. */
+export interface EscalationInfo {
+  /** Slack user ids of the bot owners (rendered as mentions). */
+  owners?: string[];
+}
+
 /**
  * Build access restriction text to append to the system prompt.
  * Returns '' if the user has full access (both git and jiraWrite).
  */
-export function buildAccessRestrictions(permissions: UserPermissions, scratchDir: string): string {
+export function buildAccessRestrictions(
+  permissions: UserPermissions,
+  scratchDir: string,
+  escalation: EscalationInfo = {},
+): string {
   if (permissions.has('git') && permissions.has('jiraWrite')) return '';
 
   const lines: string[] = ['## Access restrictions for this user', ''];
@@ -97,8 +107,15 @@ export function buildAccessRestrictions(permissions: UserPermissions, scratchDir
   lines.push(
     '- You MAY write temporary files to $CLAUDEWAY_TEMP_DIR for one-off outputs (e.g., file attachments)',
   );
+  const owner =
+    escalation.owners && escalation.owners.length > 0
+      ? escalation.owners.map((id) => `<@${id}>`).join(' or ')
+      : 'the bot owner';
   lines.push(
-    '- If the user asks you to do something restricted, explain that they have read-only access',
+    `- If the user asks you to do something restricted, explain that they have read-only access ` +
+      `and that they can ask ${owner} for the needed permission ` +
+      `(git for repo changes, jiraWrite for Jira/Confluence writes), ` +
+      'or connect their own credentials by DMing you `!creds`',
   );
 
   return '\n\n' + lines.join('\n');
@@ -111,7 +128,8 @@ export function appendAccessRestrictions(
   systemPrompt: string,
   permissions: UserPermissions,
   scratchDir: string,
+  escalation: EscalationInfo = {},
 ): string {
-  const restrictions = buildAccessRestrictions(permissions, scratchDir);
+  const restrictions = buildAccessRestrictions(permissions, scratchDir, escalation);
   return restrictions ? systemPrompt + restrictions : systemPrompt;
 }

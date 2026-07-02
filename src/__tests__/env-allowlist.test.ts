@@ -171,6 +171,37 @@ describe('buildAllowedEnv', () => {
 
     expect(env.MISSING_VAR).toBeUndefined();
   });
+
+  it('injects per-user credential env at highest precedence', () => {
+    process.env.JIRA_API_TOKEN = 'shared-service-account';
+
+    const config = makeConfig({
+      env: ['JIRA_API_TOKEN'],
+    });
+
+    const env = buildAllowedEnv({
+      config,
+      channelId: 'C001',
+      userPermissions: READ_ONLY_PERMISSIONS,
+      extraEnv: { GIT_AUTHOR_NAME: 'Alice' },
+      userCredEnv: { JIRA_API_TOKEN: 'personal-token' },
+    });
+
+    // user secret overrides the global/shared value
+    expect(env.JIRA_API_TOKEN).toBe('personal-token');
+    expect(env.GIT_AUTHOR_NAME).toBe('Alice');
+  });
+
+  it('user credential env overrides extraEnv-injected vars', () => {
+    const env = buildAllowedEnv({
+      config: makeConfig(),
+      channelId: 'C001',
+      userPermissions: READ_ONLY_PERMISSIONS,
+      extraEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'injected' },
+      userCredEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'personal' },
+    });
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('personal');
+  });
 });
 
 describe('processIdentityKey', () => {
@@ -242,5 +273,19 @@ describe('processIdentityKey', () => {
     const key = processIdentityKey('U001', new Set(['jiraWrite']), config, 'C001', 'opus', 'high');
     // Env var names should be sorted
     expect(key).toContain('JIRA_API_TOKEN,JIRA_URL');
+  });
+
+  it('changes when the secrets hash changes (token rotation mid-thread)', () => {
+    const config = makeConfig();
+    const perms = new Set(['git']);
+    const key1 = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', 'hash-a');
+    const key2 = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', 'hash-b');
+    const key3 = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', 'hash-a');
+    expect(key1).not.toBe(key2);
+    expect(key1).toBe(key3);
+    // No hash (legacy callers) still works
+    expect(processIdentityKey('U001', perms, config, 'C001', 'opus', 'high')).toBe(
+      processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', ''),
+    );
   });
 });

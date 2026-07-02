@@ -49,25 +49,18 @@ export function readOnlyMcpConfigPath(mcpPath: string): string {
 }
 
 /**
- * Get the appropriate MCP config path based on user permissions.
- * Returns null if no MCP config file exists.
+ * Get the configured MCP config path.
+ *
+ * Credential scope now controls read/write access at the provider. Claudeway no
+ * longer switches between full and generated read-only MCP configs based on
+ * `jiraWrite` or personal Jira enrollment.
  */
 export function getMcpConfigPath(
-  permissions: UserPermissions | undefined,
+  _permissions: UserPermissions | undefined,
   cwd: string,
 ): string | null {
-  const jiraWrite = permissions?.has('jiraWrite') ?? true;
   const fullPath = resolve(cwd, 'mcp.json');
-  const readonlyPath = resolve(cwd, 'mcp-readonly.json');
 
-  if (!jiraWrite) {
-    // Non-jiraWrite user: only use the read-only config, or no MCP at all.
-    // Never fall back to full mcp.json — that would grant write access.
-    if (existsSync(readonlyPath) && statSync(readonlyPath).isFile()) {
-      return readonlyPath;
-    }
-    return null;
-  }
   if (existsSync(fullPath) && statSync(fullPath).isFile()) {
     return fullPath;
   }
