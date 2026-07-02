@@ -24,6 +24,10 @@ export const DEFAULT_THREAD_WORKTREE_MAX_AGE_DAYS = 14;
 const WORKTREES_BASE = () => resolve(DATA_DIR, 'worktrees');
 const MARKER_FILE = '.claudeway-last-used';
 
+/** Minimum gap between `git fetch origin` calls per repo (worktree creation). */
+const FETCH_MIN_INTERVAL_MS = 5 * 60_000;
+const lastFetchAt = new Map<string, number>();
+
 function git(args: string[], cwd: string): string {
   // Strip inherited git-context env vars (GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE
   // are exported by git to hook processes) so they can't redirect our worktree
@@ -52,11 +56,15 @@ export function threadWorktreeBranch(channelId: string, threadTs: string): strin
   return `wt/${sanitize(channelId)}/${sanitize(threadTs)}`;
 }
 
-/** Overrides for tests — production callers omit them. */
 export interface WorktreeOpts {
-  /** Main checkout path (default: resolveFolder(repoName)). */
+  /**
+   * Configured repo branch (repos.<name>.branch). New worktrees are based on
+   * origin/<baseBranch>; when unset, the main checkout's current branch is used.
+   */
+  baseBranch?: string;
+  /** Main checkout path (default: resolveFolder(repoName)) — test override. */
   repoFolder?: string;
-  /** Base directory holding all worktrees (default: DATA_DIR/worktrees). */
+  /** Base directory holding all worktrees (default: DATA_DIR/worktrees) — test override. */
   worktreesBase?: string;
 }
 
@@ -86,6 +94,51 @@ function touchMarker(worktreeDir: string): void {
     }
   } catch {
     // best effort
+  }
+}
+
+/**
+ * Throttled `git fetch origin` so new threads start from the latest remote
+ * state without hammering the remote on a burst of new threads. Failure
+ * (offline, no origin) is non-fatal; the attempt time is recorded either way
+ * so a dead remote can't block every new thread on a fetch timeout.
+ */
+function fetchOriginThrottled(repoFolder: string): void {
+  const now = Date.now();
+  const last = lastFetchAt.get(repoFolder);
+  if (last !== undefined && now - last < FETCH_MIN_INTERVAL_MS) return;
+  lastFetchAt.set(repoFolder, now);
+  try {
+    git(['remote', 'get-url', 'origin'], repoFolder);
+  } catch {
+    return; // no origin remote — nothing to fetch
+  }
+  try {
+    git(['fetch', 'origin'], repoFolder);
+  } catch (err) {
+    console.warn(
+      `[worktrees] fetch origin failed in ${repoFolder} — new worktrees will base on the local checkout:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
+ * Ref to base a NEW thread worktree on: origin/<branch> after a throttled
+ * fetch, so threads start from the latest remote state instead of the main
+ * checkout's HEAD (only as fresh as the last restart). Returns undefined —
+ * meaning "base on local HEAD" — when there is no matching remote-tracking
+ * ref (no origin, detached HEAD).
+ */
+function resolveWorktreeBase(repoFolder: string, baseBranch?: string): string | undefined {
+  try {
+    fetchOriginThrottled(repoFolder);
+    const branch = baseBranch ?? git(['rev-parse', '--abbrev-ref', 'HEAD'], repoFolder);
+    if (!branch || branch === 'HEAD') return undefined;
+    git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`], repoFolder);
+    return `origin/${branch}`;
+  } catch {
+    return undefined;
   }
 }
 
@@ -126,11 +179,13 @@ export function ensureThreadWorktree(
     })();
     if (branchExists) {
       git(['worktree', 'add', dir, branch], repoFolder);
+      console.log(`[worktrees] Created ${dir} (${branch})`);
     } else {
-      git(['worktree', 'add', dir, '-b', branch], repoFolder);
+      const baseRef = resolveWorktreeBase(repoFolder, opts.baseBranch);
+      git(['worktree', 'add', dir, '-b', branch, ...(baseRef ? [baseRef] : [])], repoFolder);
+      console.log(`[worktrees] Created ${dir} (${branch} from ${baseRef ?? 'local HEAD'})`);
     }
     touchMarker(dir);
-    console.log(`[worktrees] Created ${dir} (${branch})`);
     return dir;
   } catch (err) {
     console.warn(
@@ -142,9 +197,45 @@ export function ensureThreadWorktree(
 }
 
 /**
+ * True when deleting the worktree would lose work: a dirty working tree
+ * (ignoring our last-used marker) or commits on the thread branch that no
+ * other branch/remote/tag can reach. Check failures fall through to false so
+ * broken worktrees (wiped dirs, pruned metadata) can still be cleaned up.
+ */
+function hasUnsavedWork(dir: string, branch: string, repoFolder: string): boolean {
+  try {
+    const dirty = git(['status', '--porcelain'], dir)
+      .split('\n')
+      .some((line) => line.trim() !== '' && line.slice(3) !== MARKER_FILE);
+    if (dirty) return true;
+  } catch {
+    // Not a functioning worktree — nothing git could preserve here
+  }
+  try {
+    const unmerged = git(
+      [
+        'rev-list',
+        '--count',
+        `refs/heads/${branch}`,
+        '--not',
+        `--exclude=${branch}`,
+        '--branches',
+        '--remotes',
+        '--tags',
+      ],
+      repoFolder,
+    );
+    return parseInt(unmerged, 10) > 0;
+  } catch {
+    return false; // branch already gone — the working-tree check above ran
+  }
+}
+
+/**
  * Prune worktrees whose last activity exceeds threadWorktreeMaxAgeDays.
  * Runs at startup alongside temp cleanup. Removes the worktree and its
- * wt/<channel>/<threadTs> branch.
+ * wt/<channel>/<threadTs> branch. Worktrees with uncommitted changes or
+ * unmerged commits are kept (with a log line) regardless of age.
  */
 export function cleanupStaleWorktrees(
   config: Config,
@@ -169,6 +260,12 @@ export function cleanupStaleWorktrees(
           const marker = join(dir, MARKER_FILE);
           const mtime = existsSync(marker) ? statSync(marker).mtimeMs : statSync(dir).mtimeMs;
           if (mtime >= cutoff) continue;
+          if (hasUnsavedWork(dir, `wt/${channelId}/${threadTs}`, repoFolder)) {
+            console.log(
+              `[worktrees] Keeping stale worktree ${repoName}/${channelId}/${threadTs} — uncommitted or unmerged work (remove manually to reclaim)`,
+            );
+            continue;
+          }
           try {
             git(['worktree', 'remove', '--force', dir], repoFolder);
           } catch {

@@ -91,7 +91,8 @@ Repo-backed channels run each Slack thread in its own git worktree under `.docke
 - Participants in one thread share files; each turn's commits/pushes carry that turn's author and token.
 - Concurrent threads on the same repo no longer collide (previously a real hazard in the shared checkout).
 - The main checkout stays clean for `syncRepos()`; worktrees share the object store, so startup fetches benefit all threads.
-- Idle worktrees (and their `wt/*` branches) are pruned at startup after `defaults.threadWorktreeMaxAgeDays` (default 14; `0` disables).
+- New worktrees start from `origin/<branch>` (the configured `repos.<name>.branch`, else the checkout's current branch) after a throttled `git fetch origin` (at most every 5 min per repo), so fresh threads get the latest remote state regardless of when the gateway last restarted. Offline or origin-less repos fall back to the local HEAD. Existing thread worktrees are never updated mid-conversation.
+- Idle worktrees (and their `wt/*` branches) are pruned at startup after `defaults.threadWorktreeMaxAgeDays` (default 14; `0` disables). Worktrees with uncommitted changes or commits unreachable from any other branch/remote are kept regardless of age (logged; remove manually to reclaim).
 - Session IDs still derive from the logical repo folder, so existing session IDs stay stable. Note: the Claude CLI stores session transcripts keyed by the actual cwd, so threads that existed *before* enabling worktrees start a fresh transcript on their next message.
 - **Every conversation root gets a worktree** (not just replies): the Claude CLI keys transcripts by cwd, so a conversation must live in one cwd from its very first turn — moving into a worktree at the first reply would drop the root turn's context. The cost is one worktree per conversation on repo-backed channels; the age GC bounds it, and busy Q&A channels can opt out entirely with `threadWorktrees: false` (per channel or in `defaults`).
 

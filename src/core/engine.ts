@@ -193,7 +193,9 @@ export async function processQueuedMessage(
   const repoName = (channelConfig as { repo?: string }).repo;
   const worktreesEnabled = (channelConfig as { threadWorktrees?: boolean }).threadWorktrees ?? true;
   if (config.repos && repoName && queued.threadTs && worktreesEnabled) {
-    const worktree = ensureThreadWorktree(repoName, queued.channelId, queued.threadTs);
+    const worktree = ensureThreadWorktree(repoName, queued.channelId, queued.threadTs, {
+      baseBranch: config.repos[repoName]?.branch,
+    });
     if (worktree) {
       cwd = worktree;
       sessionFolder = channelConfig.folder;
