@@ -69,6 +69,15 @@ export interface CredentialDef {
    * instead of attempting a write that fails.
    */
   sharedAccessNote?: string;
+  /**
+   * MCP server names (keys in mcp.json) forced into read-only mode
+   * (READ_ONLY_MODE=true in the generated MCP config) whenever this credential
+   * does NOT resolve to a personal secret. Guardrail for shared full-access
+   * tokens — Atlassian API tokens can't be scoped, so without this a shared
+   * fallback token could write as its owner. The named server must honor
+   * READ_ONLY_MODE (mcp-atlassian does).
+   */
+  mcpReadOnlyServers?: string[];
 }
 
 export interface CredsFormConfig {
@@ -556,6 +565,16 @@ export function loadConfig(): Config {
       console.warn(
         `[config] userCredentials.${credName}.sharedAccessNote is set but no field has defaultFromEnv — the note only applies to shared defaults`,
       );
+    }
+    if (def.mcpReadOnlyServers !== undefined) {
+      if (
+        !Array.isArray(def.mcpReadOnlyServers) ||
+        def.mcpReadOnlyServers.some((s) => typeof s !== 'string' || !s)
+      ) {
+        throw new Error(
+          `${configPath}: userCredentials.${credName}.mcpReadOnlyServers must be a list of MCP server names`,
+        );
+      }
     }
     for (const { name, def: fieldDef } of fields) {
       if (!name || typeof name !== 'string') {

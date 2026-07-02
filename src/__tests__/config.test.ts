@@ -463,6 +463,38 @@ defaults:
     writeFileSync(join(tmpDir, 'config.yaml'), yaml);
     expect(() => loadConfig()).toThrow('userCredentials.claude is built-in');
   });
+
+  it('accepts a valid mcpReadOnlyServers list and rejects non-string entries', () => {
+    const base = (mcpReadOnlyServers: string) => `
+channels:
+  C001:
+    name: test
+    folder: /test
+userCredentials:
+  jira:
+    label: Jira
+    fields:
+      JIRA_API_TOKEN: {}
+    mcpReadOnlyServers: ${mcpReadOnlyServers}
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), base('[mcp-atlassian]'));
+    expect(() => loadConfig()).not.toThrow();
+
+    writeFileSync(join(tmpDir, 'config.yaml'), base('"mcp-atlassian"'));
+    expect(() => loadConfig()).toThrow(
+      'userCredentials.jira.mcpReadOnlyServers must be a list of MCP server names',
+    );
+
+    writeFileSync(join(tmpDir, 'config.yaml'), base('[""]'));
+    expect(() => loadConfig()).toThrow(
+      'userCredentials.jira.mcpReadOnlyServers must be a list of MCP server names',
+    );
+  });
 });
 
 describe('resolveFolder', () => {

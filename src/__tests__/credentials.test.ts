@@ -195,6 +195,47 @@ describe('resolveUserCredentials', () => {
     expect(r1.secretsHash).not.toBe(r2.secretsHash);
     expect(r1.secretsHash).not.toContain('v1');
   });
+
+  describe('readOnlyMcpServers', () => {
+    it('forces the listed servers read-only on shared fallback', () => {
+      process.env.SHARED_JIRA_API_TOKEN = 'shared-jira';
+      const config = makeConfig();
+      config.userCredentials!.jira.mcpReadOnlyServers = ['mcp-atlassian'];
+      const r = resolveUserCredentials(config, 'val', { store });
+      expect(r.readOnlyMcpServers).toEqual(['mcp-atlassian']);
+    });
+
+    it('forces the listed servers read-only when the credential is unset', () => {
+      delete process.env.SHARED_JIRA_API_TOKEN;
+      delete process.env.SHARED_JIRA_USERNAME;
+      const config = makeConfig();
+      config.userCredentials!.jira.mcpReadOnlyServers = ['mcp-atlassian'];
+      const r = resolveUserCredentials(config, 'val', { store });
+      expect(r.readOnlyMcpServers).toEqual(['mcp-atlassian']);
+    });
+
+    it('does not force read-only when a personal secret is enrolled', () => {
+      process.env.SHARED_JIRA_API_TOKEN = 'shared-jira';
+      const config = makeConfig();
+      config.userCredentials!.jira.mcpReadOnlyServers = ['mcp-atlassian'];
+      store.set('val', 'jira', { JIRA_API_TOKEN: 'personal-jira' });
+      const r = resolveUserCredentials(config, 'val', { store });
+      expect(r.readOnlyMcpServers).toEqual([]);
+    });
+
+    it('dedupes and sorts across credentials', () => {
+      const config = makeConfig();
+      config.userCredentials!.jira.mcpReadOnlyServers = ['zeta', 'mcp-atlassian'];
+      config.userCredentials!.github.mcpReadOnlyServers = ['mcp-atlassian'];
+      const r = resolveUserCredentials(config, 'val', { store });
+      expect(r.readOnlyMcpServers).toEqual(['mcp-atlassian', 'zeta']);
+    });
+
+    it('is empty when no credential declares mcpReadOnlyServers', () => {
+      const r = resolveUserCredentials(makeConfig(), 'val', { store });
+      expect(r.readOnlyMcpServers).toEqual([]);
+    });
+  });
 });
 
 describe('config helpers', () => {

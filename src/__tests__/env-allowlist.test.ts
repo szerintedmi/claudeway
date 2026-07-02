@@ -288,4 +288,16 @@ describe('processIdentityKey', () => {
       processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', ''),
     );
   });
+
+  it('changes when the read-only MCP server set changes (personal Jira enrolled mid-thread)', () => {
+    const config = makeConfig();
+    const perms = new Set(['git']);
+    const shared = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', 'h', [
+      'mcp-atlassian',
+    ]);
+    const personal = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', 'h', []);
+    expect(shared).not.toBe(personal);
+    // Omitted (legacy callers) equals empty set
+    expect(processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', 'h')).toBe(personal);
+  });
 });

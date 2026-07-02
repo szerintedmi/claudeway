@@ -43,6 +43,12 @@ export interface ResolvedCredentials {
   /** Resolution outcome per registry credential, in registry order. */
   statuses: CredentialStatus[];
   /**
+   * MCP servers to force into read-only mode for this user — union of
+   * `mcpReadOnlyServers` over credentials that did NOT resolve to a personal
+   * secret (sorted, deduped). Feeds getMcpConfigPath and the process identity.
+   */
+  readOnlyMcpServers: string[];
+  /**
    * True when `userCredentials.claude` is configured but no Claude token
    * resolved for this user. Hard gate: the engine refuses the turn instead of
    * letting the subprocess inherit the owner's ~/.claude auth.
@@ -59,6 +65,7 @@ const EMPTY: ResolvedCredentials = {
   personalCredNames: [],
   sharedCredNames: [],
   statuses: [],
+  readOnlyMcpServers: [],
   missingClaudeCred: false,
   secretsHash: '',
 };
@@ -86,6 +93,7 @@ export function resolveUserCredentials(
     personalCredNames: [],
     sharedCredNames: [],
     statuses: [],
+    readOnlyMcpServers: [],
     missingClaudeCred: false,
     secretsHash: '',
   };
@@ -158,7 +166,15 @@ export function resolveUserCredentials(
       source,
       ...(source === 'shared' && def.sharedAccessNote ? { note: def.sharedAccessNote } : {}),
     });
+
+    // Shared full-access tokens (Atlassian tokens can't be scoped) get their
+    // MCP servers forced read-only; only a personal secret unlocks writes.
+    if (def.mcpReadOnlyServers?.length && source !== 'personal') {
+      result.readOnlyMcpServers.push(...def.mcpReadOnlyServers);
+    }
   }
+
+  result.readOnlyMcpServers = [...new Set(result.readOnlyMcpServers)].sort();
 
   // BYO Claude is always on: every user (bot owner included) must run on
   // their own token — otherwise the subprocess would silently inherit the

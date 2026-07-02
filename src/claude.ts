@@ -575,9 +575,10 @@ function resolveExposedEnvVarNames(
 
 /**
  * Compute a composite identity key for persistent process restart comparison.
- * Includes user identity, permissions, resolved env var names, and a hash of
- * the user's resolved secret VALUES (never the values themselves) — so a token
- * change mid-thread triggers the existing kill/respawn path.
+ * Includes user identity, permissions, resolved env var names, a hash of the
+ * user's resolved secret VALUES (never the values themselves), and the set of
+ * MCP servers forced read-only — so a token change or read-only/full MCP
+ * switch mid-thread triggers the existing kill/respawn path.
  */
 export function processIdentityKey(
   userId: string,
@@ -587,10 +588,11 @@ export function processIdentityKey(
   model: string,
   effort: string,
   secretsHash = '',
+  readOnlyMcpServers: string[] = [],
 ): string {
   const permPart = permissionKeyStr(permissions);
   const envPart = resolveExposedEnvVarNames(config, channelId, permissions).join(',');
-  return `${userId}|${permPart}|${envPart}|${model}|${effort}|${secretsHash}`;
+  return `${userId}|${permPart}|${envPart}|${model}|${effort}|${secretsHash}|${readOnlyMcpServers.join(',')}`;
 }
 
 function spawnClaudeProcess(args: string[], cwd: string, env: Record<string, string>) {
@@ -933,7 +935,10 @@ function buildClaudeArgs(
   // --mcp-config is variadic (<configs...>) — it greedily consumes every
   // following non-flag arg. Insert it before another flag so the variadic
   // terminates and the trailing positional user message isn't slurped in.
-  const mcpConfigPath = getMcpConfigPath(options.userPermissions, process.cwd());
+  const mcpConfigPath = getMcpConfigPath(
+    options.credentials?.readOnlyMcpServers ?? [],
+    process.cwd(),
+  );
   if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath);
   }
@@ -1125,7 +1130,10 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
 
   // See note on the batch path: --mcp-config is variadic, so put another flag
   // after it to terminate the variadic.
-  const mcpConfigPath = getMcpConfigPath(options.userPermissions, process.cwd());
+  const mcpConfigPath = getMcpConfigPath(
+    options.credentials?.readOnlyMcpServers ?? [],
+    process.cwd(),
+  );
   if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath);
   }
@@ -1178,6 +1186,7 @@ function createPersistentProcess(
     options.model,
     options.effort ?? '',
     options.credentials?.secretsHash ?? '',
+    options.credentials?.readOnlyMcpServers ?? [],
   );
 
   const entry: PersistentProcessEntry = {
@@ -1397,6 +1406,7 @@ export async function runClaudePersistentStreaming(
     options.model,
     options.effort ?? '',
     options.credentials?.secretsHash ?? '',
+    options.credentials?.readOnlyMcpServers ?? [],
   );
   if (entry && !entry.proc.killed && entry.identityKey !== incomingIdentityKey) {
     console.log(`[${channelId}] Process identity changed — respawning persistent process`);
