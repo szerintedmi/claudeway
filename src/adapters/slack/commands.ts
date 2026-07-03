@@ -1,13 +1,25 @@
 import type { WebClient } from '@slack/web-api';
-import { loadConfig, resolvedChannelConfig, type Config } from '../../config.js';
+import {
+  loadConfig,
+  resolvedChannelConfig,
+  isUserAllowedInChannel,
+  isBotOwner,
+  resolveUser,
+  resolveCanonicalUserId,
+  type Config,
+} from '../../config.js';
 import { getActiveProcesses, killProcess, killAllProcesses, nudgeProcess } from '../../claude.js';
 import { getPending } from '../../queue.js';
-import { isUserAllowed, safeReact, warnInThread } from './utils.js';
+import { safeReact, warnInThread } from './utils.js';
 import { MAX_CONCURRENT_PROCESSES } from '../../core/engine.js';
+import { helpMessage, listUserChannels, ownerMention } from './onboarding.js';
+import { credsDmInstruction } from '../../creds-hint.js';
+import { getSecretStore } from '../../secrets.js';
 
 // --- Types ---
 
-type CommandScope = 'global' | 'channel';
+/** 'open' commands are informational and available to anyone, anywhere (incl. DMs). */
+type CommandScope = 'global' | 'channel' | 'open';
 
 interface CommandDef {
   name: string;
@@ -24,6 +36,7 @@ interface CommandContext {
   userId: string;
   client: WebClient;
   config: Config;
+  botUserId?: string;
 }
 
 // --- Helpers ---
@@ -100,12 +113,13 @@ function isMagicCommandAllowed(
   channelId: string,
   scope: CommandScope,
 ): boolean {
-  if (userId === config.botOwner) return true;
+  if (scope === 'open') return true;
+  if (isBotOwner(config, userId)) return true;
   if (scope === 'global') return false;
-  // DMs are botOwner-only (magic commands run before the DM gate)
+  // DMs are botOwners-only (magic commands run before the DM gate);
+  // the sole exception is !creds, which is dispatched before this check
   if (channelId.startsWith('D')) return false;
-  const resolved = resolvedChannelConfig(config, channelId);
-  return isUserAllowed(resolved?.allowedUsers, userId);
+  return isUserAllowedInChannel(config, channelId, userId);
 }
 
 async function denyMagicCommand(
@@ -126,8 +140,7 @@ async function denyMagicCommand(
 
 async function psHandler(ctx: CommandContext): Promise<void> {
   const { channelId, userId, config, client, threadTs } = ctx;
-  const isBotOwner = userId === config.botOwner;
-  const filterChannelId = isBotOwner ? undefined : channelId;
+  const filterChannelId = isBotOwner(config, userId) ? undefined : channelId;
 
   const allProcesses = getActiveProcesses();
   const processes = filterChannelId
@@ -285,6 +298,57 @@ async function configHandler(ctx: CommandContext): Promise<void> {
   await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text });
 }
 
+async function helpHandler(ctx: CommandContext): Promise<void> {
+  const { channelId, threadTs, client, config } = ctx;
+  await client.chat.postMessage({
+    channel: channelId,
+    thread_ts: threadTs,
+    text: helpMessage(config, channelId),
+  });
+}
+
+async function whoamiHandler(ctx: CommandContext): Promise<void> {
+  const { channelId, threadTs, userId, client, config } = ctx;
+  const user = resolveUser(config, channelId, userId);
+  const lines = [':bust_in_silhouette: *Your access*'];
+
+  lines.push(
+    `• Identity: <@${userId}>${user.registered ? ` → \`${user.userId}\`` : ' (not in the user registry)'}${user.isBotOwner ? ' — bot owner' : ''}`,
+  );
+
+  const channels = listUserChannels(config, userId);
+  lines.push(
+    `• Channels: ${channels.length > 0 ? channels.map((id) => `<#${id}>`).join(', ') : 'none yet'}`,
+  );
+
+  if (config.channels[channelId]) {
+    const allowed = isUserAllowedInChannel(config, channelId, userId) || user.isBotOwner;
+    const perms = [...user.permissions].sort();
+    lines.push(
+      `• This channel: ${allowed ? `allowed — ${perms.length > 0 ? perms.join(', ') : 'read-only'}` : 'not a member'}`,
+    );
+  }
+
+  if (config.userCredentials && Object.keys(config.userCredentials).length > 0) {
+    const store = getSecretStore();
+    const names = store ? store.listNames(resolveCanonicalUserId(config, userId)) : [];
+    lines.push(
+      `• Credentials: ${
+        names.length > 0
+          ? names.map((n) => `\`${n}\``).join(', ')
+          : `none — ${credsDmInstruction('connect your own')}`
+      }`,
+    );
+  }
+
+  lines.push(`Need more access? Ask ${ownerMention(config)}.`);
+  await client.chat.postMessage({
+    channel: channelId,
+    thread_ts: threadTs,
+    text: lines.join('\n'),
+  });
+}
+
 // --- Registry ---
 
 const commands: CommandDef[] = [
@@ -293,6 +357,8 @@ const commands: CommandDef[] = [
   { name: 'kill', scope: 'channel', hasChannelArg: true, handler: killHandler },
   { name: 'killall', scope: 'global', handler: killAllHandler },
   { name: 'nudge', scope: 'channel', hasChannelArg: true, handler: nudgeHandler },
+  { name: 'help', scope: 'open', handler: helpHandler },
+  { name: 'whoami', scope: 'open', handler: whoamiHandler },
 ];
 
 // --- Dispatcher ---
@@ -308,9 +374,25 @@ export async function handleMagicCommand(
   messageTs: string,
   userId: string,
   client: WebClient,
+  botUserId?: string,
 ): Promise<boolean> {
   const trimmed = text.trim();
   if (!trimmed.startsWith('!')) return false;
+
+  // `!creds` has its own multi-arg grammar and its own auth (any allowed user,
+  // DM-only) — handled before the single-arg command regex below
+  if (trimmed === '!creds' || trimmed.startsWith('!creds ')) {
+    let config: Config;
+    try {
+      config = loadConfig();
+    } catch (err) {
+      console.error('Failed to load config in !creds command:', err);
+      await warnInThread(client, channelId, threadTs, 'Failed to load config. Check server logs.');
+      return true;
+    }
+    const { handleCredsCommand } = await import('./creds-command.js');
+    return handleCredsCommand(trimmed, channelId, threadTs, userId, client, config, botUserId);
+  }
 
   // Parse: "!cmd" or "!cmd <#C123|name>" or "!cmd #name" or "!cmd name"
   const match = trimmed.match(/^!(\S+)(?:\s+(?:<#(\w+)(?:\|[^>]*)?>|#?(\S+)))?$/);
@@ -380,6 +462,7 @@ export async function handleMagicCommand(
     userId,
     client,
     config,
+    botUserId,
   });
 
   return true;

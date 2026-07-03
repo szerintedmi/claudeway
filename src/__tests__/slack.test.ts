@@ -3,18 +3,18 @@ import {
   markdownToSlackMrkdwn,
   splitMessage,
   splitDetails,
+  inlineDetailsMarker,
+  DETAILS_INLINE_HEADER,
   FILE_THRESHOLD,
+  NARRATION_HOLDBACK_MAX_CHARS,
   STREAM_NATIVE_FLUSH_INTERVAL_MS,
   STREAM_NATIVE_KEEPALIVE_MS,
-  STREAM_KEEPALIVE_TOKEN,
+  formatToolTaskTitle,
 } from '../adapters/slack/formatting.js';
-import { isUserAllowed } from '../adapters/slack/utils.js';
 import { formatDuration, formatTimeout, formatChannelConfig } from '../adapters/slack/commands.js';
-import {
-  getSnippetType,
-  SlackChannelResponder,
-  __resetAppendRateLimiterForTest,
-} from '../adapters/slack/responder.js';
+import { getSnippetType, SlackChannelResponder } from '../adapters/slack/responder.js';
+import { __resetAppendRateLimiterForTest } from '../adapters/slack/stream.js';
+import { TaskTracker } from '../adapters/slack/thinking-steps.js';
 import type { WebClient } from '@slack/web-api';
 
 describe('markdownToSlackMrkdwn', () => {
@@ -280,6 +280,161 @@ describe('splitDetails', () => {
       details: null,
     });
   });
+
+  it('ignores a marker inside a fenced code block', () => {
+    const text = 'answer\n```\n--DETAILS--\ncode content\n```\ntail';
+    expect(splitDetails(text)).toEqual({ body: text, details: null });
+  });
+
+  it('splits on a real marker that follows a fence containing a decoy', () => {
+    const { body, details } = splitDetails(
+      'answer\n```md\n--DETAILS--\n```\n--DETAILS--\nreal details',
+    );
+    expect(body).toBe('answer\n```md\n--DETAILS--\n```');
+    expect(details).toBe('real details');
+  });
+});
+
+describe('inlineDetailsMarker', () => {
+  it('returns text without a marker unchanged', () => {
+    expect(inlineDetailsMarker('just an answer')).toBe('just an answer');
+  });
+
+  it('replaces the marker line with the inline header', () => {
+    expect(inlineDetailsMarker('TL;DR\n---DETAILS---\nthe long version')).toBe(
+      `TL;DR${DETAILS_INLINE_HEADER}the long version`,
+    );
+  });
+
+  it('drops the marker entirely when nothing follows it', () => {
+    expect(inlineDetailsMarker('answer\n---DETAILS---\n   ')).toBe('answer');
+  });
+
+  it('drops the header when nothing precedes the marker', () => {
+    expect(inlineDetailsMarker('---DETAILS---\nonly details')).toBe('only details');
+  });
+
+  it('ignores a marker inside a fenced code block', () => {
+    const text = 'answer\n```\n--DETAILS--\ncode\n```\ntail';
+    expect(inlineDetailsMarker(text)).toBe(text);
+  });
+});
+
+describe('TaskTracker step cards', () => {
+  it('opens an in_progress step card carrying the flattened narration text', () => {
+    const tracker = new TaskTracker();
+    const chunks = tracker.narration('Let me check\nthe   files first. ');
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toMatchObject({
+      type: 'task_update',
+      title: 'Let me check the files first.',
+      status: 'in_progress',
+    });
+  });
+
+  it('completes an open Thinking card before opening the step', () => {
+    const tracker = new TaskTracker();
+    tracker.seed();
+    const chunks = tracker.narration('Checking.');
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]).toMatchObject({ title: 'Thinking', status: 'complete' });
+    expect(chunks[1]).toMatchObject({ title: 'Checking.', status: 'in_progress' });
+  });
+
+  it('truncates long narration into the step title', () => {
+    const tracker = new TaskTracker();
+    const chunks = tracker.narration('word '.repeat(90)); // ~450 chars flattened
+    const card = chunks[0];
+    expect(card.title.length).toBeLessThanOrEqual(256);
+    expect(card.title.endsWith('…')).toBe(true);
+  });
+
+  it('emits nothing for whitespace-only narration', () => {
+    const tracker = new TaskTracker();
+    expect(tracker.narration('  \n ')).toHaveLength(0);
+  });
+
+  it('rolls tool activity through the open step details instead of new cards', () => {
+    const tracker = new TaskTracker();
+    const [step] = tracker.narration('Checking the config.');
+    // 'start' under a step emits nothing (details append server-side; the
+    // step spinner already shows activity) — the completed line is the entry.
+    expect(tracker.onToolEvent({ phase: 'start', toolName: 'Read' })).toHaveLength(0);
+    const doneChunks = tracker.onToolEvent({
+      phase: 'complete',
+      toolName: 'Read',
+      keyArg: 'config.yaml',
+    });
+    expect(doneChunks[0]).toMatchObject({
+      id: step.id,
+      status: 'in_progress',
+      details: 'Reading config.yaml\n',
+    });
+    // A second tool's chunk carries only ITS line — deltas, never re-sends.
+    tracker.onToolEvent({ phase: 'start', toolName: 'Bash' });
+    const second = tracker.onToolEvent({ phase: 'complete', toolName: 'Bash', keyArg: 'ls' });
+    expect(second[0].details).toBe('Running ls\n');
+  });
+
+  it('completes the previous step when the next narration opens a new one', () => {
+    const tracker = new TaskTracker();
+    const [first] = tracker.narration('Step one.');
+    const chunks = tracker.narration('Step two.');
+    expect(chunks[0]).toMatchObject({ id: first.id, status: 'complete' });
+    expect(chunks[1]).toMatchObject({ title: 'Step two.', status: 'in_progress' });
+  });
+
+  it('completes the active step when the answer starts', () => {
+    const tracker = new TaskTracker();
+    const [step] = tracker.narration('Working on it.');
+    const chunks = tracker.answerBoundary();
+    expect(chunks).toContainEqual(expect.objectContaining({ id: step.id, status: 'complete' }));
+  });
+
+  it('creates standalone tool cards when no step is open', () => {
+    const tracker = new TaskTracker();
+    const chunks = tracker.onToolEvent({ phase: 'start', toolName: 'Bash' });
+    expect(chunks[0]).toMatchObject({ title: 'Running', status: 'in_progress' });
+    const done = tracker.onToolEvent({ phase: 'complete', toolName: 'Bash', keyArg: 'ls' });
+    expect(done[0]).toMatchObject({ id: chunks[0].id, title: 'Running ls', status: 'complete' });
+  });
+
+  it('attaches subagent progress and output to the enclosing step', () => {
+    const tracker = new TaskTracker();
+    const [step] = tracker.narration('Delegating the research.');
+    tracker.onToolEvent({ phase: 'start', toolName: 'Task' });
+    const progress = tracker.onToolEvent({
+      phase: 'subagent_progress',
+      toolName: 'Task',
+      description: 'scanning docs',
+    });
+    expect(progress[0]).toMatchObject({ id: step.id, details: 'scanning docs\n' });
+    const completed = tracker.onToolEvent({
+      phase: 'subagent_completed',
+      toolName: 'Task',
+      description: 'found 3 findings',
+    });
+    expect(completed[0]).toMatchObject({ id: step.id, output: 'found 3 findings' });
+  });
+});
+
+describe('formatToolTaskTitle', () => {
+  it('uses the display verb with the key arg', () => {
+    expect(formatToolTaskTitle('Read', 'src/foo.ts')).toBe('Reading src/foo.ts');
+    expect(formatToolTaskTitle('Bash', null)).toBe('Running');
+  });
+
+  it('prettifies MCP tool ids as tool (server)', () => {
+    expect(formatToolTaskTitle('mcp__mcp-atlassian__jira_search', 'project = AI')).toBe(
+      'Using jira_search (mcp-atlassian) project = AI',
+    );
+  });
+
+  it('trims oversized key args to keep the title a one-liner', () => {
+    const title = formatToolTaskTitle('Bash', 'x'.repeat(500));
+    expect(title.length).toBeLessThanOrEqual(110);
+    expect(title.endsWith('…')).toBe(true);
+  });
 });
 
 describe('formatDuration', () => {
@@ -417,28 +572,6 @@ describe('getSnippetType', () => {
   });
 });
 
-describe('isUserAllowed', () => {
-  it('allows any user when allowedUsers is undefined', () => {
-    expect(isUserAllowed(undefined, 'U123')).toBe(true);
-  });
-
-  it('allows any user when allowedUsers is empty', () => {
-    expect(isUserAllowed([], 'U123')).toBe(true);
-  });
-
-  it('allows a user in the allowedUsers list', () => {
-    expect(isUserAllowed(['U123', 'U456'], 'U123')).toBe(true);
-  });
-
-  it('denies a user not in the allowedUsers list', () => {
-    expect(isUserAllowed(['U123', 'U456'], 'U789')).toBe(false);
-  });
-
-  it('denies unknown user when allowedUsers is set', () => {
-    expect(isUserAllowed(['U123'], 'unknown')).toBe(false);
-  });
-});
-
 describe('SlackChannelResponder.uploadFile payload', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function createMockClient(): { client: WebClient; uploadCalls: any[] } {
@@ -494,9 +627,9 @@ describe('SlackChannelResponder.uploadFile payload', () => {
   });
 });
 
-describe('SlackChannelResponder native streaming fallback', () => {
-  // Drain the responder's internal promise chains (thinking message → inner init →
-  // append flush) without advancing timers — these settle on microtasks.
+describe('SlackChannelResponder native streaming (Thinking Steps)', () => {
+  // Drain the responder's internal promise chains (stream open → append flush)
+  // without advancing timers — these settle on microtasks.
   async function microtasks(times = 30): Promise<void> {
     for (let i = 0; i < times; i++) await Promise.resolve();
   }
@@ -505,9 +638,20 @@ describe('SlackChannelResponder native streaming fallback', () => {
   // reset it so token budget from one case can't starve the next.
   beforeEach(() => __resetAppendRateLimiterForTest());
 
+  interface Chunk {
+    type: string;
+    id?: string;
+    title?: string;
+    status?: string;
+    details?: string;
+    output?: string;
+    text?: string;
+  }
+
   interface Send {
     kind: 'start' | 'append' | 'stop';
-    text?: string;
+    chunks?: Chunk[];
+    blocks?: Record<string, unknown>[];
     ts?: string;
   }
 
@@ -528,6 +672,8 @@ describe('SlackChannelResponder native streaming fallback', () => {
     transientAt?: number;
     /** stopStream throws a terminal error. */
     failStop?: boolean;
+    /** stopStream throws one transient error, then succeeds. */
+    stopTransientOnce?: boolean;
     /** uploadV2 rejects. */
     failUpload?: boolean;
   }
@@ -535,8 +681,9 @@ describe('SlackChannelResponder native streaming fallback', () => {
   const TERMINAL = { data: { error: 'message_not_in_streaming_state' } };
   const TRANSIENT = { data: { error: 'ratelimited' } };
 
-  // Models the direct startStream/appendStream/stopStream API the responder now
-  // drives — there is no hidden SDK buffer, so `sends` is the exact wire history.
+  // Models the chunk-based startStream/appendStream/stopStream API the
+  // responder drives — `sends` is the exact wire history (a send that threw is
+  // still recorded, matching a request that failed after being issued).
   function createMockClient(spec: MockSpec = {}): { client: WebClient; calls: Calls } {
     const calls: Calls = {
       posts: [],
@@ -548,7 +695,7 @@ describe('SlackChannelResponder native streaming fallback', () => {
       sequence: [],
     };
     let n = 0; // counts startStream + appendStream calls
-    let startN = 0; // counts startStream calls (one per distinct stream)
+    let stopTransientUsed = false;
     const maybeThrow = (): void => {
       if (spec.transientAt === n) throw TRANSIENT;
       if (spec.failFrom != null && n >= spec.failFrom) throw TERMINAL;
@@ -571,18 +718,14 @@ describe('SlackChannelResponder native streaming fallback', () => {
         },
         startStream: async (a: Record<string, unknown>) => {
           n += 1;
-          startN += 1;
-          // Distinct ts per stream so two-stream cases (notes + answer) are
-          // distinguishable. The first stream keeps the legacy 'stream-ts' id.
-          const ts = startN === 1 ? 'stream-ts' : `stream-ts-${startN}`;
-          calls.sends.push({ kind: 'start', text: a.markdown_text as string, ts });
+          calls.sends.push({ kind: 'start', chunks: a.chunks as Chunk[], ts: 'stream-ts' });
           calls.sequence.push('start');
           maybeThrow();
-          return { ts };
+          return { ts: 'stream-ts' };
         },
         appendStream: async (a: Record<string, unknown>) => {
           n += 1;
-          calls.sends.push({ kind: 'append', text: a.markdown_text as string, ts: a.ts as string });
+          calls.sends.push({ kind: 'append', chunks: a.chunks as Chunk[], ts: a.ts as string });
           calls.sequence.push('append');
           maybeThrow();
           return {};
@@ -590,11 +733,16 @@ describe('SlackChannelResponder native streaming fallback', () => {
         stopStream: async (a: Record<string, unknown>) => {
           calls.sends.push({
             kind: 'stop',
-            text: a.markdown_text as string | undefined,
+            chunks: a.chunks as Chunk[] | undefined,
+            blocks: a.blocks as Record<string, unknown>[] | undefined,
             ts: a.ts as string,
           });
           calls.sequence.push('stop');
           if (spec.failStop) throw TERMINAL;
+          if (spec.stopTransientOnce && !stopTransientUsed) {
+            stopTransientUsed = true;
+            throw TRANSIENT;
+          }
           return { ts: 'stream-ts' };
         },
       },
@@ -630,10 +778,18 @@ describe('SlackChannelResponder native streaming fallback', () => {
 
   const appendsOf = (calls: Calls): Send[] => calls.sends.filter((s) => s.kind === 'append');
   const stopsOf = (calls: Calls): Send[] => calls.sends.filter((s) => s.kind === 'stop');
+  /** Every chunk that hit the wire, in order (including sends that then failed). */
+  const wireChunks = (calls: Calls): Chunk[] => calls.sends.flatMap((s) => s.chunks ?? []);
+  const wireTasks = (calls: Calls): Chunk[] =>
+    wireChunks(calls).filter((c) => c.type === 'task_update');
+  /** Concatenated markdown that hit the wire. Only meaningful without failures. */
+  const wireMarkdown = (calls: Calls): string =>
+    wireChunks(calls)
+      .filter((c) => c.type === 'markdown_text')
+      .map((c) => c.text ?? '')
+      .join('');
 
-  // Default helper keeps collapse OFF so these tests exercise raw stream mechanics
-  // (no working-notes prefix or final collapse). Collapse behavior has its own tests.
-  function makeResponder(client: WebClient): SlackChannelResponder {
+  function makeResponder(client: WebClient, collapseWorkingNotes = true): SlackChannelResponder {
     return new SlackChannelResponder(
       client,
       'C123',
@@ -642,58 +798,28 @@ describe('SlackChannelResponder native streaming fallback', () => {
       'stream-native',
       'U1',
       'T1',
-      false, // collapseWorkingNotes
+      collapseWorkingNotes,
     );
   }
 
-  function makeCollapsingResponder(client: WebClient): SlackChannelResponder {
-    return new SlackChannelResponder(
-      client,
-      'C123',
-      'thread-ts',
-      'msg-ts',
-      'stream-native',
-      'U1',
-      'T1',
-      true, // collapseWorkingNotes
-    );
-  }
-
-  // The working-notes attachment text. Notes collapse via an in-place chat.update
-  // (with attachments), so look there rather than at posts.
-  function notesAttachmentText(calls: Calls): string | undefined {
-    const upd = calls.updates.find((p) => Array.isArray(p.attachments));
-    if (!upd) return undefined;
-    return (upd.attachments as Array<{ text?: string }>)[0]?.text;
-  }
-
-  it('repairs the partial message with the full text when the stream finalizes early', async () => {
-    const { client, calls } = createMockClient({ failFrom: 2 });
+  it('opens the stream eagerly with a Thinking card (instant feedback, no placeholder post)', async () => {
+    const { client, calls } = createMockClient();
     const responder = makeResponder(client);
-    jest.useFakeTimers();
-    try {
-      const sr = responder.createStreamingResponder();
+    responder.createStreamingResponder();
+    await microtasks();
 
-      sr.onTextDelta('Hello '); // first flush (startStream) succeeds, captures ts
-      await microtasks();
-      sr.onTextDelta('world'); // batched into pending
-      jest.advanceTimersByTime(STREAM_NATIVE_FLUSH_INTERVAL_MS); // timer flushes it
-      await microtasks(); // appendStream rejects (terminal) → stream marked broken mid-flight
-      await sr.finish();
-      await responder.onStreamComplete('Hello world', sr);
-
-      // The finalized message is overwritten in place with the complete text — no duplicate bubble.
-      expect(calls.updates).toHaveLength(1);
-      expect(calls.updates[0].ts).toBe('stream-ts');
-      expect(calls.updates[0].text).toBe('Hello world');
-      // No file upload for a small response.
-      expect(calls.uploads).toHaveLength(0);
-    } finally {
-      jest.useRealTimers();
-    }
+    expect(calls.posts).toHaveLength(0); // no placeholder message
+    const start = calls.sends.find((s) => s.kind === 'start');
+    // Plan-box title first, then the seed Thinking card — one grouped box.
+    expect(start?.chunks?.[0]).toMatchObject({ type: 'plan_update', title: 'Work log' });
+    expect(start?.chunks?.[1]).toMatchObject({
+      type: 'task_update',
+      title: 'Thinking',
+      status: 'in_progress',
+    });
   });
 
-  it('does not re-deliver when the native stream completes cleanly', async () => {
+  it('does not re-deliver when the stream completes cleanly', async () => {
     const { client, calls } = createMockClient();
     const responder = makeResponder(client);
     const sr = responder.createStreamingResponder();
@@ -705,55 +831,439 @@ describe('SlackChannelResponder native streaming fallback', () => {
     await sr.finish();
     await responder.onStreamComplete('Hello world', sr);
 
-    // Clean finish → native display already showed everything; no repair update/post/upload.
+    // Clean finish → the stream already showed everything; no repair or upload.
     expect(calls.updates).toHaveLength(0);
     expect(calls.uploads).toHaveLength(0);
-    // Only the initial thinking message was posted (later deleted when the stream started).
-    expect(calls.posts).toHaveLength(1);
+    expect(calls.posts).toHaveLength(0);
     expect(stopsOf(calls)).toHaveLength(1);
-    // The tail that arrived after the first flush rode along on stopStream.
-    expect(stopsOf(calls)[0].text).toBe('world');
+    // The short answer (held by the narration buffer) rode along on stopStream;
+    // the Thinking seed card was completed at close.
+    expect(wireMarkdown(calls)).toBe('Hello world');
+    const thinking = wireTasks(calls).filter((c) => c.title === 'Thinking');
+    expect(thinking[thinking.length - 1]?.status).toBe('complete');
   });
 
-  it('puts the streaming reaction on the work-log stream and removes it on finish', async () => {
+  it('rebuilds the message with work-log blocks when the stream finalizes early', async () => {
+    const { client, calls } = createMockClient({ failFrom: 2 });
+    const responder = makeResponder(client);
+    jest.useFakeTimers();
+    try {
+      const sr = responder.createStreamingResponder();
+      await microtasks(); // first flush (startStream) succeeded, captured ts
+
+      // Long enough to cross the narration holdback → released to the body.
+      const answer = `Hello world. ${'Lots more detail follows here. '.repeat(20)}`;
+      sr.onTextDelta(answer);
+      jest.advanceTimersByTime(STREAM_NATIVE_FLUSH_INTERVAL_MS);
+      await microtasks(); // appendStream rejects (terminal) → stream broken
+      await sr.finish();
+      await responder.onStreamComplete(answer, sr);
+
+      // The finalized message is rebuilt in place: plan block (work log) on top,
+      // the full answer as section blocks. No duplicate bubble, no upload.
+      expect(calls.updates).toHaveLength(1);
+      expect(calls.updates[0].ts).toBe('stream-ts');
+      const blocks = calls.updates[0].blocks as Record<string, unknown>[];
+      expect(blocks[0].type).toBe('plan');
+      expect(blocks.some((b) => b.type === 'section')).toBe(true);
+      expect(JSON.stringify(blocks)).toContain('Hello world');
+      expect(calls.uploads).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('maps tool start/complete to one task card updated in place (same id)', async () => {
     const { client, calls } = createMockClient();
-    const responder = makeCollapsingResponder(client);
+    const responder = makeResponder(client);
+    jest.useFakeTimers();
+    try {
+      const sr = responder.createStreamingResponder();
+      await microtasks();
+
+      sr.onToolEvent({ phase: 'start', toolName: 'Bash' });
+      jest.advanceTimersByTime(STREAM_NATIVE_FLUSH_INTERVAL_MS);
+      await microtasks(); // in_progress card flushed
+      sr.onToolEvent({ phase: 'complete', toolName: 'Bash', keyArg: 'ls -la' });
+      jest.advanceTimersByTime(STREAM_NATIVE_FLUSH_INTERVAL_MS);
+      await microtasks(); // complete card flushed
+      await sr.finish();
+      await responder.onStreamComplete('', sr);
+
+      const bashCards = wireTasks(calls).filter((c) => c.title?.startsWith('Running'));
+      expect(bashCards.length).toBeGreaterThanOrEqual(2);
+      const ids = new Set(bashCards.map((c) => c.id));
+      expect(ids.size).toBe(1); // same card updated, not a new one
+      expect(bashCards[0].status).toBe('in_progress');
+      expect(bashCards[bashCards.length - 1]).toMatchObject({
+        title: 'Running ls -la',
+        status: 'complete',
+      });
+      // Empty answer: the message stays (it holds the work log) — no delete.
+      expect(calls.deletes).toHaveLength(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('streams reasoning into the Thinking card as capped append deltas', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
     const sr = responder.createStreamingResponder();
 
-    // Reasoning opens the work-log stream first (ts 'stream-ts'); the answer
-    // stream opens later (ts 'stream-ts-2'). The reaction must land on the
-    // work-log stream — the message live for the whole turn.
-    sr.onReasoningDelta?.('thinking…');
+    const sentence = 'I should check the config first because ';
+    for (let i = 0; i < 16; i++) sr.onReasoningDelta?.(sentence); // ~650 chars total
     await microtasks();
-    sr.onTextDelta('the answer');
+    sr.onTextDelta('Answer.');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('Answer.', sr);
+
+    const thinking = wireTasks(calls).filter((c) => c.title === 'Thinking');
+    expect(thinking[thinking.length - 1]?.status).toBe('complete');
+    // Details append server-side, so chunks carry deltas: concatenated they
+    // reproduce the burst up to the live cap, then stop with an ellipsis.
+    const appended = thinking.map((c) => c.details ?? '').join('');
+    expect(appended.startsWith(sentence)).toBe(true);
+    expect(appended.endsWith('…')).toBe(true);
+    expect(appended.length).toBeLessThanOrEqual(501);
+    // The closing (boundary) chunk must not re-send details.
+    expect(thinking[thinking.length - 1]?.details).toBeUndefined();
+  });
+
+  it('suppresses reasoning details when collapseWorkingNotes is false', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client, false);
+    const sr = responder.createStreamingResponder();
+
+    sr.onReasoningDelta?.('secret internal thoughts');
+    await microtasks();
+    sr.onTextDelta('Answer.');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('Answer.', sr);
+
+    expect(JSON.stringify(calls.sends)).not.toContain('secret internal thoughts');
+  });
+
+  it('demotes a narration run to a step card whose details carry the tool line', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    sr.onTextDelta('Let me check the files first. '); // narration — a tool follows
+    await microtasks();
+    sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'a.ts' });
+    await microtasks();
+    sr.onTextDelta('The answer is 42.'); // the real answer (nothing follows)
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('The answer is 42.', sr);
+
+    // The narration run became a step card; the tool call rolled through its
+    // details line instead of getting its own card. Only the answer hit the
+    // body, and the live message is NOT rewritten (result matches the run).
+    expect(wireMarkdown(calls)).toBe('The answer is 42.');
+    const stepUpdates = wireTasks(calls).filter((c) => c.title === 'Let me check the files first.');
+    expect(stepUpdates.length).toBeGreaterThanOrEqual(2);
+    expect(stepUpdates.some((c) => c.details === 'Reading a.ts\n')).toBe(true);
+    expect(stepUpdates[stepUpdates.length - 1]?.status).toBe('complete');
+    expect(wireTasks(calls).some((c) => c.title === 'Reading a.ts')).toBe(false); // no own card
+    expect(calls.updates).toHaveLength(0);
+    expect(calls.uploads).toHaveLength(0);
+  });
+
+  it('releases a run past the narration holdback and leaves it in the body (accepted leak)', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    const longNarration = 'n'.repeat(NARRATION_HOLDBACK_MAX_CHARS + 10); // released mid-run
+    sr.onTextDelta(longNarration);
+    await microtasks();
+    sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'b.ts' });
+    await microtasks();
+    sr.onTextDelta('The answer is 42.');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('The answer is 42.', sr);
+
+    // Once released, a run stays in the body (streamed markdown can't be
+    // retracted) and is NOT duplicated as a narration card.
+    expect(wireMarkdown(calls)).toBe(`${longNarration}The answer is 42.`);
+    expect(wireTasks(calls).some((c) => c.title?.startsWith('nnn'))).toBe(false);
+    expect(calls.updates).toHaveLength(0);
+  });
+
+  it('streams narration straight to the body when collapseWorkingNotes is false', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client, false);
+    const sr = responder.createStreamingResponder();
+
+    sr.onTextDelta('Let me check. ');
+    await microtasks();
+    sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'c.ts' });
+    await microtasks();
+    sr.onTextDelta('The answer is 42.');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('The answer is 42.', sr);
+
+    expect(wireMarkdown(calls)).toBe('Let me check. The answer is 42.');
+    expect(wireTasks(calls).some((c) => c.title === 'Let me check.')).toBe(false);
+    expect(calls.updates).toHaveLength(0);
+  });
+
+  it('rebuilds from result when a late tool event followed the real answer', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    sr.onTextDelta('The answer is 42.');
+    await microtasks();
+    // A trailing tool/subagent event makes the final run empty — live answer unreliable.
+    sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'z.ts' });
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('The answer is 42.', sr);
+
+    expect(calls.updates).toHaveLength(1);
+    const blocks = calls.updates[0].blocks as Record<string, unknown>[];
+    expect(blocks[0].type).toBe('plan');
+    expect(JSON.stringify(blocks)).toContain('The answer is 42.');
+  });
+
+  it('does NOT rebuild for the missing-result fallback (streamed body stands)', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    sr.onTextDelta('partial narration ');
+    await microtasks();
+    sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'k.ts' }); // clears the run
+    await microtasks();
+    await sr.finish();
+    // Engine fallback: result.response was empty → finalText = getFullText().
+    await responder.onStreamComplete(sr.getFullText(), sr, { authoritative: false });
+
+    expect(calls.updates).toHaveLength(0);
+    expect(calls.uploads).toHaveLength(0);
+  });
+
+  it('streams the details inline, then folds them into a collapsed container at finish', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+    const full = 'TL;DR answer\n---DETAILS---\nthe long version';
+
+    sr.onTextDelta('TL;DR answer');
+    await microtasks();
+    sr.onTextDelta('\n---DETAILS---\nthe long version');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete(full, sr);
+
+    // Live: the marker line never hits the wire; the details stream in its
+    // place behind the inline header — all inside the same message.
+    expect(wireMarkdown(calls)).toBe(`TL;DR answer\n${DETAILS_INLINE_HEADER}the long version`);
+    expect(wireMarkdown(calls)).not.toContain('---DETAILS---');
+    expect(stopsOf(calls)[0].blocks).toBeUndefined();
+    // Finished: the message is rewritten in place — work-log cards on top, the
+    // body as sections, the details folded into a collapsed container.
+    expect(calls.updates).toHaveLength(1);
+    expect(calls.updates[0].ts).toBe('stream-ts');
+    const blocks = calls.updates[0].blocks as Record<string, unknown>[];
+    expect(blocks[0].type).toBe('plan');
+    expect(JSON.stringify(blocks)).toContain('TL;DR answer');
+    const container = blocks.find((b) => b.type === 'container') as Record<string, unknown>;
+    expect(container).toMatchObject({ is_collapsible: true, default_collapsed: true });
+    expect(JSON.stringify(container)).toContain('the long version');
+    expect(calls.posts).toHaveLength(0);
+  });
+
+  it('drops the marker when the details section stays empty', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+    const full = 'TL;DR answer\n---DETAILS---\n  ';
+
+    sr.onTextDelta(full);
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete(full, sr);
+
+    expect(wireMarkdown(calls)).toBe('TL;DR answer\n');
+    expect(wireMarkdown(calls)).not.toContain('Details');
+  });
+
+  it('streams a marker inside a code fence untouched (no fold)', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+    const full = 'Use this separator:\n```\n--DETAILS--\n```\nafter fence';
+
+    sr.onTextDelta(full);
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete(full, sr);
+
+    expect(wireMarkdown(calls)).toContain('--DETAILS--');
+    expect(stopsOf(calls)[0].blocks).toBeUndefined();
+    expect(calls.posts).toHaveLength(0);
+  });
+
+  it('flips open cards to error and still stops the stream on a failed turn', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    sr.onToolEvent({ phase: 'start', toolName: 'Bash' });
+    await microtasks();
+    await sr.finish({ ok: false, errorMessage: 'process exited with code 1' });
+
+    const stop = stopsOf(calls)[0];
+    expect(stop).toBeDefined();
+    const closing = (stop.chunks ?? []).filter((c) => c.type === 'task_update');
+    // The open Bash card ends as error, and a synthetic Error card carries the message.
+    expect(closing.some((c) => c.title?.startsWith('Running') && c.status === 'error')).toBe(true);
+    const errCard = closing.find((c) => c.title === 'Error');
+    expect(errCard?.details).toContain('process exited with code 1');
+  });
+
+  it('retries a transient append without losing or doubling text', async () => {
+    // transientAt: 2 → the first appendStream (call #2 after startStream) fails once.
+    const { client, calls } = createMockClient({ transientAt: 2 });
+    const responder = makeResponder(client);
+    jest.useFakeTimers();
+    try {
+      const sr = responder.createStreamingResponder();
+
+      // Crosses the narration holdback → released, streams live from here on.
+      const opening = `Hello. ${'More context here. '.repeat(30)}`;
+      sr.onTextDelta(opening); // startStream ok (carries seed; text pending)
+      await microtasks();
+      sr.onTextDelta('world');
+      jest.advanceTimersByTime(STREAM_NATIVE_FLUSH_INTERVAL_MS);
+      await microtasks(); // append throws transient → batch restored, NOT broken
+      jest.advanceTimersByTime(STREAM_NATIVE_FLUSH_INTERVAL_MS);
+      await microtasks(); // retried successfully
+      await sr.finish();
+      await responder.onStreamComplete(`${opening}world`, sr);
+
+      // Stream survived: no fallback delivery.
+      expect(calls.updates).toHaveLength(0);
+      expect(calls.uploads).toHaveLength(0);
+      // The failed and retried appends carried identical content — never doubled.
+      const appends = appendsOf(calls);
+      expect(appends).toHaveLength(2);
+      const texts = appends.map((a) =>
+        (a.chunks ?? [])
+          .filter((c) => c.type === 'markdown_text')
+          .map((c) => c.text)
+          .join(''),
+      );
+      expect(texts[0]).toBe(texts[1]);
+      expect(texts[0]).toContain('world');
+      expect(texts[0]).not.toContain('worldworld');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('retries a transient stopStream failure', async () => {
+    const { client, calls } = createMockClient({ stopTransientOnce: true });
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+
+    sr.onTextDelta('Hello');
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete('Hello', sr);
+
+    // First stop threw a transient error; the retry succeeded → no rebuild needed.
+    expect(stopsOf(calls)).toHaveLength(2);
+    expect(calls.updates).toHaveLength(0);
+  }, 10_000);
+
+  it('uploads a huge response as a file and keeps the card-bearing message', async () => {
+    const { client, calls } = createMockClient({ failStop: true });
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+    const huge = 'x'.repeat(FILE_THRESHOLD + 1);
+
+    sr.onTextDelta('partial ');
+    await microtasks();
+    await sr.finish(); // stopStream fails terminally → broken
+    await responder.onStreamComplete(huge, sr);
+
+    expect(calls.uploads).toHaveLength(1);
+    expect(calls.uploads[0].content).toBe(huge);
+    expect(calls.uploads[0].snippet_type).toBe('markdown');
+    // The streamed message holds the work-log cards — it is updated to point at
+    // the file, never deleted, and only after a successful upload.
+    expect(calls.deletes).toHaveLength(0);
+    expect(calls.updates).toHaveLength(1);
+    expect(calls.sequence.indexOf('upload')).toBeLessThan(calls.sequence.indexOf('update'));
+  });
+
+  it('keeps the partial message untouched if the huge-response upload fails', async () => {
+    const { client, calls } = createMockClient({ failStop: true, failUpload: true });
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
+    const huge = 'x'.repeat(FILE_THRESHOLD + 1);
+
+    sr.onTextDelta('partial ');
+    await microtasks();
+    await sr.finish();
+    await expect(responder.onStreamComplete(huge, sr)).rejects.toThrow();
+
+    // Upload attempted (with retries) but failed — nothing rewritten or dropped.
+    expect(calls.uploads.length).toBeGreaterThanOrEqual(1);
+    expect(calls.updates).toHaveLength(0);
+    expect(calls.deletes).toHaveLength(0);
+  }, 10_000);
+
+  it('re-sends the last task card as an invisible keepalive during idle gaps', async () => {
+    jest.useFakeTimers();
+    try {
+      const { client, calls } = createMockClient();
+      const responder = makeResponder(client);
+      const sr = responder.createStreamingResponder();
+      await microtasks(); // seed card flushed (startStream)
+
+      jest.advanceTimersByTime(STREAM_NATIVE_KEEPALIVE_MS + STREAM_NATIVE_FLUSH_INTERVAL_MS);
+      await microtasks(); // idle tick → keepalive flush
+
+      const keepalives = appendsOf(calls);
+      expect(keepalives.length).toBeGreaterThanOrEqual(1);
+      // The keepalive is an idempotent re-send of the last task_update — invisible.
+      expect(keepalives[0].chunks?.[0]).toMatchObject({
+        type: 'task_update',
+        title: 'Thinking',
+      });
+
+      await sr.finish();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('adds the streaming reaction when the stream opens and removes it on finish', async () => {
+    const { client, calls } = createMockClient();
+    const responder = makeResponder(client);
+    const sr = responder.createStreamingResponder();
     await microtasks();
 
     const added = calls.reactions.filter((r) => r.action === 'add' && r.name === 'partyparrot');
     expect(added).toHaveLength(1);
-    expect(added[0].ts).toBe('stream-ts'); // the work-log message, not the answer
+    expect(added[0].ts).toBe('stream-ts');
 
     await sr.finish();
-    await responder.onStreamComplete('the answer', sr);
-
     const removed = calls.reactions.filter(
       (r) => r.action === 'remove' && r.name === 'partyparrot',
     );
     expect(removed).toHaveLength(1);
     expect(removed[0].ts).toBe('stream-ts');
-  });
-
-  it('falls back to the answer stream for the reaction when there is no work log', async () => {
-    const { client, calls } = createMockClient();
-    const responder = makeResponder(client); // collapse off → no work-log stream
-    const sr = responder.createStreamingResponder();
-
-    sr.onTextDelta('Hello ');
-    await microtasks();
-    await sr.finish();
-
-    const added = calls.reactions.filter((r) => r.action === 'add' && r.name === 'partyparrot');
-    expect(added).toHaveLength(1);
-    expect(added[0].ts).toBe('stream-ts'); // the answer stream (the only bot message)
   });
 
   it('waits for the reaction add to land before removing it on a fast finish', async () => {
@@ -775,8 +1285,7 @@ describe('SlackChannelResponder native streaming fallback', () => {
 
     const responder = makeResponder(client);
     const sr = responder.createStreamingResponder();
-    sr.onTextDelta('hi'); // startStream → add fired (gated, in-flight)
-    await microtasks();
+    await microtasks(); // stream opened → add fired (gated, in-flight)
 
     const finishP = sr.finish();
     await microtasks();
@@ -787,316 +1296,6 @@ describe('SlackChannelResponder native streaming fallback', () => {
     await finishP;
     // Order is add-then-remove; the reaction never ends up stuck.
     expect(calls.reactions.map((r) => r.action)).toEqual(['add', 'remove']);
-  });
-
-  it('deletes a tool-status message posted mid-stream on a clean finish', async () => {
-    const { client, calls } = createMockClient();
-    const responder = makeResponder(client);
-    const sr = responder.createStreamingResponder();
-
-    sr.onTextDelta('Looking into it'); // startStream → thinking message (posted-1) deleted
-    await microtasks();
-    sr.onToolEvent({ phase: 'start', toolName: 'Bash' }); // posts a new status message (posted-2)
-    await microtasks();
-    sr.onTextDelta(' — done'); // more text appended to the stream
-    await microtasks();
-    await sr.finish();
-    await responder.onStreamComplete('Looking into it — done', sr);
-
-    // The mid-stream tool-status message must be cleaned up even though the
-    // stream finished cleanly (streamTs set, not broken).
-    const toolStatusTs = (calls.posts[1] as { ts?: string } | undefined)?.ts ?? 'posted-2';
-    expect(calls.deletes.some((d) => d.ts === toolStatusTs)).toBe(true);
-    // Sanity: a tool-status message was actually posted (thinking + tool status).
-    expect(calls.posts).toHaveLength(2);
-  });
-
-  it('collapses reasoning and tool steps into a working-notes attachment, keeping the answer', async () => {
-    const { client, calls } = createMockClient();
-    const responder = makeCollapsingResponder(client);
-    const sr = responder.createStreamingResponder();
-
-    // Reasoning streams first (as it does in real Claude output), so the notes
-    // stream opens before the answer stream and stays above it.
-    sr.onReasoningDelta?.('Let me think about the GCD approach.');
-    await microtasks();
-    sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'config.ts' });
-    await microtasks();
-    sr.onTextDelta('The answer is 42.');
-    await microtasks();
-    await sr.finish();
-    await responder.onStreamComplete('The answer is 42.', sr);
-
-    // The notes stream (opened first) is branded with the working-notes prefix.
-    const start = calls.sends.find((s) => s.kind === 'start');
-    expect(start?.text?.startsWith('🧠')).toBe(true);
-    // Notes collapsed IN PLACE on the notes ts (above the answer) as an attachment.
-    const notesUpdate = calls.updates.find((u) => Array.isArray(u.attachments));
-    expect(notesUpdate?.ts).toBe('stream-ts');
-    const notes = notesAttachmentText(calls);
-    expect(notes).toContain('Let me think about the GCD approach.'); // reasoning
-    expect(notes).toContain('config.ts'); // tool step
-    expect(notes).not.toContain('The answer is 42.'); // answer not duplicated in notes
-    // Clean answer streamed to its own (second) message and kept as-is — no rebuild.
-    expect(calls.uploads).toHaveLength(0);
-    expect(calls.updates.some((u) => u.ts === 'stream-ts-2')).toBe(false);
-  });
-
-  it('moves inter-tool narration into the notes and rebuilds the answer verbatim', async () => {
-    const { client, calls } = createMockClient();
-    const responder = makeCollapsingResponder(client);
-    const sr = responder.createStreamingResponder();
-
-    sr.onReasoningDelta?.('Planning the steps.');
-    await microtasks();
-    sr.onTextDelta('Let me check the files first.'); // narration (a tool follows)
-    await microtasks();
-    sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'a.ts' });
-    await microtasks();
-    sr.onTextDelta('Done — the answer is 42.'); // the real answer (nothing follows)
-    await microtasks();
-    await sr.finish();
-    await responder.onStreamComplete('Done — the answer is 42.', sr);
-
-    const notes = notesAttachmentText(calls);
-    expect(notes).toContain('Planning the steps.'); // reasoning
-    expect(notes).toContain('Let me check the files first.'); // narration archived
-    expect(notes).not.toContain('Done — the answer is 42.'); // answer not in notes
-    // The narration leaked into the live answer stream, so the answer is rebuilt
-    // in place from result.text on the answer ts.
-    const answerUpdate = calls.updates.find((u) => u.ts === 'stream-ts-2');
-    expect(answerUpdate?.text).toBe('Done — the answer is 42.');
-    // No live duplication: narration was archived in the notes attachment but NOT
-    // streamed to the live notes message (it was already visible in the answer
-    // bubble). The notes stream's wire (ts 'stream-ts') carries only reasoning/tools.
-    const notesWire = calls.sends
-      .filter((s) => s.ts === 'stream-ts')
-      .map((s) => s.text ?? '')
-      .join('');
-    expect(notesWire).toContain('Planning the steps.'); // reasoning streamed live
-    expect(notesWire).not.toContain('Let me check the files first.'); // narration NOT streamed live
-  });
-
-  it('separates a tool step from reasoning that resumes after it', async () => {
-    // Regression: reasoning that resumes after a tool/subagent line must not run
-    // onto the same line as the tool step.
-    const { client, calls } = createMockClient();
-    const responder = makeCollapsingResponder(client);
-    const sr = responder.createStreamingResponder();
-
-    sr.onReasoningDelta?.('First thought.');
-    await microtasks();
-    sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'x.ts' });
-    await microtasks();
-    sr.onReasoningDelta?.('Second thought after the tool.');
-    await microtasks();
-    sr.onTextDelta('Answer.');
-    await microtasks();
-    await sr.finish();
-    await responder.onStreamComplete('Answer.', sr);
-
-    const notes = notesAttachmentText(calls) ?? '';
-    // The tool line and the resumed reasoning are on separate lines, not glued.
-    expect(notes).not.toMatch(/x\.ts`_Second thought/);
-    expect(notes).toContain('First thought.');
-    expect(notes).toContain('Second thought after the tool.');
-    // There is a newline between the tool step and the resumed reasoning.
-    expect(notes).toMatch(/x\.ts`_\n+.*Second thought after the tool\./s);
-  });
-
-  it('reuses the thinking placeholder as the tool status (no double message) when collapse is off', async () => {
-    const { client, calls } = createMockClient();
-    const responder = makeResponder(client); // collapse disabled
-    const sr = responder.createStreamingResponder();
-
-    // Tool fires before any answer text — old behaviour reused the single
-    // "thinking…" bubble as the status rather than posting a second message.
-    await microtasks(); // let the placeholder post resolve (posted-1)
-    sr.onToolEvent({ phase: 'complete', toolName: 'Bash', keyArg: 'ls' });
-    await microtasks();
-
-    // Only the placeholder was posted; the tool status edits it in place.
-    expect(calls.posts).toHaveLength(1);
-    expect(calls.updates.some((u) => u.ts === 'posted-1')).toBe(true);
-
-    sr.onTextDelta('Done.');
-    await microtasks();
-    await sr.finish();
-    await responder.onStreamComplete('Done.', sr);
-
-    // When the answer stream opened, the adopted placeholder/status bubble was removed.
-    expect(calls.deletes.some((d) => d.ts === 'posted-1')).toBe(true);
-  });
-
-  it('keeps the live answer and creates no notes for an answer-only turn', async () => {
-    const { client, calls } = createMockClient();
-    const responder = makeCollapsingResponder(client);
-    const sr = responder.createStreamingResponder();
-
-    // No reasoning/tools/narration — straight to the answer.
-    sr.onTextDelta('The answer is 42.');
-    await microtasks();
-    await sr.finish();
-    await responder.onStreamComplete('The answer is 42.', sr);
-
-    // No notes stream opened, nothing collapsed.
-    expect(calls.updates.some((u) => Array.isArray(u.attachments))).toBe(false);
-    // Clean answer streamed live and kept as-is (no rebuild, no upload).
-    expect(calls.updates).toHaveLength(0);
-    expect(calls.uploads).toHaveLength(0);
-    // Only one stream was ever opened (the answer).
-    expect(calls.sends.filter((s) => s.kind === 'start')).toHaveLength(1);
-  });
-
-  it('leaves the live message untouched when collapseWorkingNotes is false', async () => {
-    const { client, calls } = createMockClient();
-    const responder = makeResponder(client); // collapse disabled
-    const sr = responder.createStreamingResponder();
-
-    sr.onTextDelta('Let me check.');
-    await microtasks();
-    sr.onToolEvent({ phase: 'start', toolName: 'Read' });
-    await microtasks();
-    sr.onTextDelta('Answer: 42.');
-    await microtasks();
-    await sr.finish();
-    await responder.onStreamComplete('Answer: 42.', sr);
-
-    // No prefix added, no collapse, no in-place rewrite.
-    const start = calls.sends.find((s) => s.kind === 'start');
-    expect(start?.text?.startsWith('🧠')).toBe(false);
-    expect(calls.uploads).toHaveLength(0);
-    expect(calls.updates).toHaveLength(0);
-  });
-
-  it('retries a transient append exactly once, without doubling the text', async () => {
-    // transientAt: 2 → the first appendStream (call #2 after startStream) fails once.
-    const { client, calls } = createMockClient({ transientAt: 2 });
-    const responder = makeResponder(client);
-    jest.useFakeTimers();
-    try {
-      const sr = responder.createStreamingResponder();
-
-      sr.onTextDelta('Hello '); // startStream ok
-      await microtasks();
-      sr.onTextDelta('world'); // pending
-      jest.advanceTimersByTime(STREAM_NATIVE_FLUSH_INTERVAL_MS);
-      await microtasks(); // appendStream('world') throws transient → pending kept, NOT broken
-      jest.advanceTimersByTime(STREAM_NATIVE_FLUSH_INTERVAL_MS);
-      await microtasks(); // appendStream('world') retried successfully
-      await sr.finish();
-      await responder.onStreamComplete('Hello world', sr);
-
-      // Stream survived the transient error: no fallback delivery.
-      expect(calls.updates).toHaveLength(0);
-      expect(calls.uploads).toHaveLength(0);
-      // Each appendStream carried 'world' exactly once — never the doubled
-      // 'worldworld' that a second buffer would have produced.
-      const appends = appendsOf(calls);
-      expect(appends).toHaveLength(2);
-      expect(appends.every((a) => a.text === 'world')).toBe(true);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  it('uploads a file BEFORE dropping the partial message for a huge early-finalized response', async () => {
-    const { client, calls } = createMockClient({ failStop: true });
-    const responder = makeResponder(client);
-    const sr = responder.createStreamingResponder();
-    const huge = 'x'.repeat(FILE_THRESHOLD + 1);
-
-    sr.onTextDelta('partial ');
-    await microtasks();
-    sr.onTextDelta('more');
-    await microtasks();
-    await sr.finish(); // stopStream fails → broken
-    await responder.onStreamComplete(huge, sr);
-
-    expect(calls.uploads).toHaveLength(1);
-    expect(calls.uploads[0].content).toBe(huge);
-    expect(calls.uploads[0].snippet_type).toBe('markdown');
-    // The partial message is dropped only AFTER a successful upload.
-    expect(calls.deletes.some((d) => d.ts === 'stream-ts')).toBe(true);
-    expect(calls.sequence.indexOf('upload')).toBeLessThan(
-      calls.sequence.indexOf('delete:stream-ts'),
-    );
-  });
-
-  it('keeps the partial message if the huge-response upload fails', async () => {
-    const { client, calls } = createMockClient({ failStop: true, failUpload: true });
-    const responder = makeResponder(client);
-    const sr = responder.createStreamingResponder();
-    const huge = 'x'.repeat(FILE_THRESHOLD + 1);
-
-    sr.onTextDelta('partial ');
-    await microtasks();
-    await sr.finish();
-    await expect(responder.onStreamComplete(huge, sr)).rejects.toThrow();
-
-    // Upload was attempted but failed — the partial streamed message must NOT be dropped.
-    expect(calls.uploads).toHaveLength(1);
-    expect(calls.deletes.some((d) => d.ts === 'stream-ts')).toBe(false);
-  });
-
-  it('sends an invisible keepalive append during an idle gap', async () => {
-    jest.useFakeTimers();
-    try {
-      const { client, calls } = createMockClient();
-      const responder = makeResponder(client);
-      const sr = responder.createStreamingResponder();
-
-      sr.onTextDelta('Working on it');
-      await microtasks(); // inner init + first append (resets the idle clock)
-
-      // No further text — advance past the keepalive window so an idle tick fires.
-      jest.advanceTimersByTime(STREAM_NATIVE_KEEPALIVE_MS + STREAM_NATIVE_FLUSH_INTERVAL_MS);
-      await microtasks(); // queued keepalive flush runs
-
-      expect(appendsOf(calls).some((a) => a.text === STREAM_KEEPALIVE_TOKEN)).toBe(true);
-      // The keepalive token is zero-width — it must not be visible content.
-      expect(STREAM_KEEPALIVE_TOKEN).toBe('\u200b');
-
-      await sr.finish(); // clears the flush interval
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  it('folds the detail section into an attachment and trims the answer bubble', async () => {
-    const { client, calls } = createMockClient();
-    const responder = makeResponder(client);
-    const sr = responder.createStreamingResponder();
-    const full = 'TL;DR answer\n---DETAILS---\nthe long version';
-
-    sr.onTextDelta('TL;DR answer');
-    await microtasks();
-    sr.onTextDelta('\n---DETAILS---\nthe long version');
-    await microtasks();
-    await sr.finish();
-    await responder.onStreamComplete(full, sr);
-
-    // The live answer bubble is rebuilt in place to hold only the TL;DR.
-    expect(calls.updates.some((u) => u.ts === 'stream-ts' && u.text === 'TL;DR answer')).toBe(true);
-    // The detail section is posted as a separate attachment after the answer.
-    const detailPost = calls.posts.find((p) => Array.isArray(p.attachments));
-    expect(detailPost).toBeDefined();
-    expect((detailPost!.attachments as Array<{ text?: string }>)[0].text).toContain(
-      'the long version',
-    );
-  });
-
-  it('does not post a detail attachment when no marker is present', async () => {
-    const { client, calls } = createMockClient();
-    const responder = makeResponder(client);
-    const sr = responder.createStreamingResponder();
-
-    sr.onTextDelta('Just the answer.');
-    await microtasks();
-    await sr.finish();
-    await responder.onStreamComplete('Just the answer.', sr);
-
-    expect(calls.posts.some((p) => Array.isArray(p.attachments))).toBe(false);
   });
 });
 

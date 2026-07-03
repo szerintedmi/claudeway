@@ -4,13 +4,17 @@ dist/
 .env
 config.yaml
 mcp.json
-mcp-readonly.json
+mcp-readonly*.json
 *.tsbuildinfo
 *.log
 *.pid
 .claudeway-tmp/
 .git-credentials
 .docker/
+
+# Per-user credentials (encrypted store, master key, git credential helper files)
+.secrets/
+.claudeway-audit.jsonl
 
 # Docker skill sync (scripts/docker-build.sh)
 docker-skills.conf

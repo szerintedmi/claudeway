@@ -13,6 +13,8 @@ export interface QueuedMessage {
   userName?: string;
   /** Which adapter enqueued this message (default: "slack") */
   adapter?: 'slack' | 'voice';
+  /** Bot's own Slack user id — lets engine replies render a clickable @bot mention */
+  botUserId?: string;
   /** Per-turn model override parsed from a `!model:<name>` message prefix */
   modelOverride?: string;
   /** Per-turn effort override parsed from a `!effort:<level>` message prefix */

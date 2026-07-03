@@ -25,9 +25,7 @@ export function syncRepos(): void {
       mkdirSync(repoPath, { recursive: true });
       console.log(`[sync-repos] Cloning ${name} from ${repo.url}`);
       const branchArg = repo.branch ? `--branch ${repo.branch}` : '';
-      run(
-        `git clone ${branchArg} --recurse-submodules --shallow-submodules ${repo.url} ${repoPath}`,
-      );
+      run(`git clone ${branchArg} --recurse-submodules ${repo.url} ${repoPath}`);
     } else {
       // Update
       console.log(`[sync-repos] Updating ${name}`);
@@ -55,7 +53,17 @@ export function syncRepos(): void {
           );
         }
 
-        run('git submodule update --init --depth 1', repoPath);
+        run('git submodule update --init --recursive', repoPath);
+        try {
+          run(
+            `git submodule foreach --recursive 'if test "$(git rev-parse --is-shallow-repository)" = true; then git fetch --unshallow; fi'`,
+            repoPath,
+          );
+        } catch {
+          console.log(
+            `[sync-repos] WARNING: ${name} submodule unshallow failed (history may be partial)`,
+          );
+        }
 
         if (hadStash) {
           console.log(

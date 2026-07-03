@@ -1,76 +1,36 @@
 # Claudeway
 
-Multi-channel Claude Code CLI gateway for solo developers — Slack, voice, and Android.
+Multi-channel Claude Code CLI gateway — Slack, voice, and Android.
 
-## Design Concept
-
-Claudeway is a **personal tool for a single developer** using their own Claude Max subscription through the official Claude Code CLI. It is not a multi-user service, does not extract OAuth tokens, and does not route requests through third-party backends.
-
-It's just a remote terminal with Slack and voice as transport layers. You type in Slack or speak through the Android app / browser, Claude Code runs on your machine, and the response comes back through the originating channel. No TOS violations.
+Messages arrive via Slack (Socket Mode) or a WebSocket voice interface, get processed by the Claude CLI (`claude -p`) on your machine, and responses return through the originating channel. It's a remote terminal with Slack and voice as transport layers — no third-party backends, no token extraction.
 
 ```
-You (Slack)    --> Socket Mode --> Claudeway (your machine) --> claude CLI --> response --> Slack
-You (Voice)    --> WebSocket   --> Claudeway (your machine) --> claude CLI --> response --> TTS audio
-You (Android)  --> WebSocket   --> Claudeway (your machine) --> claude CLI --> response --> TTS audio
+You (Slack)   --> Socket Mode --> Claudeway (your machine) --> claude CLI --> Slack thread
+You (Voice)   --> WebSocket   --> Claudeway (your machine) --> claude CLI --> TTS audio
 ```
+
+Auth is **per-user**: everyone (bot owner included) enrolls their own Claude token via a `!creds` DM, and downstream actions (git, Jira) run under their own accounts. See [docs/per-user-credentials.md](docs/per-user-credentials.md).
 
 ## How It Works
 
-1. You send a message (with optional image attachments) in a configured Slack channel
-2. Claudeway downloads any attached images to a temp directory, then either spawns a fresh `claude -p` process or pipes the message into a long-lived persistent process — depending on `processMode`
-3. Claude Code reads your codebase, analyzes any attached images, runs tools, and produces a response
-4. The response is posted back as a threaded reply in Slack
-5. Reactions show status: `📥` (queued/received), ⏳ (processing), ✅ (done), ❌ (error). Deleting a queued message (📥) removes it from the queue — if it's already processing (⏳), use `!kill` instead.
-6. Temp image files are cleaned up after processing
+1. You send a message (optionally with images) in a configured Slack channel
+2. Claudeway spawns `claude -p` (or pipes into a long-lived process, per `processMode`) in the channel's repo
+3. The response is posted back as a threaded reply
+4. Reactions show status: 📥 queued, ⏳ processing, ✅ done, ❌ error. Deleting a queued (📥) message removes it from the queue; if already processing (⏳), use `!kill`.
 
-Each channel maps to a repo, so you can have `#dashboard` pointing to your dashboard repo, `#api` pointing to your API, etc. Session IDs are derived deterministically from the channel + repo pair, so conversations persist across restarts — Claude remembers what you discussed earlier in the same channel.
-
-## Voice Channel
-
-Claudeway includes a WebSocket-based voice interface with speech-to-text and text-to-speech support (Deepgram Nova-3 / Aura-2). Three ways to use it:
-
-- **Android companion app** — Kotlin/Jetpack Compose app with push-to-talk and hands-free modes, Bluetooth headset support, barge-in, and Meta glasses integration. See `android/README.md` for setup.
-- **Web test UI** — Browser-based interface at the voice adapter's HTTP endpoint. Supports new chat, TTS mute, and audio device selection.
-- **Any WebSocket client** — Connect to the voice WebSocket endpoint and implement the protocol (see `src/adapters/voice/`).
-
-TTS modes are configurable per connection: server-side (Deepgram Aura-2), client-side (client handles TTS), or local (Android built-in TTS).
-
-## Self-Configuration
-
-Dedicate one Slack channel to Claudeway itself (mapped to the claudeway folder). Then you can manage config through natural language:
-
-- "Add channel C0123456789 named 'my-project' mapped to repo my-project"
-- "Remove the dashboard channel"
-- "Change the model for #api to sonnet"
-
-Claude Code edits the config file directly, and changes take effect on the next message.
+Each channel maps to a repo. Session IDs derive deterministically from the channel + repo pair, so conversations survive restarts. Repo-backed channels run each Slack thread in its own git worktree, so concurrent threads don't collide. Submodule paths in those thread worktrees are read-only symlinks to the main synced checkout.
 
 ## Setup
 
-### 1. Create a Slack App
+### 1. Create a Slack app
 
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app
-2. **Enable Socket Mode** (Settings > Socket Mode) and generate an App-Level Token with `connections:write` scope
-3. **Add Bot Token Scopes** (OAuth & Permissions):
-   - `channels:history`
-   - `channels:read`
-   - `chat:write`
-   - `files:read` (for image attachments)
-   - `files:write` (for file attachments in responses)
-   - `groups:history` (for private channels)
-   - `im:history` (for receiving DMs from botOwner)
-   - `im:read`
-   - `im:write` (for botOwner DM notifications)
-   - `reactions:write`
-   - `users:read` (for resolving display names in thread context)
-4. **Subscribe to Bot Events** (Event Subscriptions):
-   - `message.channels`
-   - `message.groups` (for private channels)
-   - `message.im` (for DMs to the bot)
-5. **Install the app** to your workspace and copy the Bot Token (`xoxb-...`)
-6. Invite the bot to your channels: `/invite @YourBot`
+Create the app from the included manifest — it defines all required scopes, events, and Socket Mode settings:
 
-### 2. Configure Claudeway
+1. [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From a manifest** → paste [`slack-app-manifest.example.yaml`](slack-app-manifest.example.yaml)
+2. Generate an **App-Level Token** with the `connections:write` scope (manifests can't create these)
+3. Install the app to your workspace, copy the Bot Token (`xoxb-...`), and `/invite @YourBot` to your channels
+
+### 2. Install and configure
 
 ```bash
 git clone https://github.com/ktamas77/claudeway.git
@@ -78,324 +38,124 @@ cd claudeway
 bun install
 ```
 
-Create `.env` (see [`.env.example`](.env.example)):
-```
-SLACK_BOT_TOKEN=xoxb-your-bot-token
-SLACK_APP_TOKEN=xapp-your-app-level-token
-CLAUDE_CODE_OAUTH_TOKEN=<run `claude setup-token` to generate>
-```
+Create `.env` (full list in [`.env.example`](.env.example)):
 
-The `CLAUDE_CODE_OAUTH_TOKEN` is required for Docker deployments and optional when running locally (where the CLI uses its own auth). Generate it with `claude setup-token` on a machine where Claude Code is already authenticated.
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `SLACK_BOT_TOKEN` | yes | Bot token (`xoxb-...`) |
+| `SLACK_APP_TOKEN` | yes | App-level token (`xapp-...`) |
+| `CLAUDEWAY_SECRETS_KEY` | yes* | Master key for the encrypted per-user credential store (`openssl rand -hex 32`) |
+| `VOICE_AUTH_TOKEN` | voice only | WebSocket voice client auth token |
+| `DEEPGRAM_API_KEY` | voice only | STT/TTS provider key |
+| `SHARED_*` | optional | Shared credential defaults referenced by `userCredentials.*.defaultFromEnv` |
+| `GIT_SSH_KEY` | Docker only | SSH key path for repo cloning |
 
-Create `config.yaml` (see [`config.example.yaml`](config.example.yaml) for a full example):
+\* Alternatively put the key in `.secrets/key`. The server refuses to start without it.
+
+Create `config.yaml` — minimal example (full reference: [docs/configuration.md](docs/configuration.md), complete annotated example: [`config.example.yaml`](config.example.yaml)):
 
 ```yaml
-botOwner: "U0123456789"
+botOwners: [alice]
+
+baseUrl: "http://192.168.1.10:8791"  # required — how users reach the !creds enrollment form
+
+users:
+  alice: { name: "Alice Doe", slack: U0123456789 }
 
 repos:
   my-project:
     url: https://github.com/org/my-project.git
-    branch: main
 
 channels:
   C0123456789:
     name: my-project
     repo: my-project
+    members: [alice]
 
 defaults:
   model: opus
-  systemPrompt: >-
-    Format all responses using Slack mrkdwn syntax (NOT standard Markdown).
-    Key rules: *bold* (single asterisk), _italic_ (underscore),
-    ~strikethrough~ (single tilde), `code`, ```code blocks``` (no language tag),
-    > blockquote, <URL|label> for links (NOT [label](url)), :emoji: shortcodes.
-    Keep responses concise.
   timeoutMs: 1800000
   processMode: oneshot
   responseMode: batch
 ```
 
-Optionally, create `mcp.json` to give Claude access to MCP servers (e.g. persistent memory). See `mcp.example.json`:
-```json
-{
-  "mcpServers": {
-    "forever": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["@squidcode/forever-plugin"]
-    }
-  }
-}
-```
+Optionally add `mcp.json` to give Claude access to MCP servers (see [`mcp.example.json`](mcp.example.json)).
 
 ### 3. Run
 
 ```bash
-bun start
+bun start    # or: bun dev (auto-reload)
 ```
 
-For development with auto-reload:
-```bash
-bun dev
-```
-
-To run dev mode with a Cloudflare tunnel (e.g., for the Android companion app or Meta glasses) while preventing macOS sleep:
-```bash
-caffeinate -i bash -c 'bun run dev & cloudflared tunnel run <tunnel_name> & wait'
-```
-
-### 4. Run as a Background Service (macOS)
-
-The included install script sets up a macOS LaunchAgent that:
-- Starts Claudeway automatically on login
-- Restarts it automatically if it crashes (with a 10-second throttle to prevent crash loops)
-- Only restarts on abnormal exits (clean `SIGTERM`/`SIGINT` shutdowns stay stopped)
+Recommended for local use — keep the Mac awake and expose the voice/creds endpoints through a Cloudflare tunnel:
 
 ```bash
-./scripts/install.sh
+caffeinate -i bash -c 'bun run start & cloudflared tunnel run claudeway & wait'
 ```
 
-To stop and remove the service:
-```bash
-./scripts/uninstall.sh
-```
+Then each user DMs the bot `!creds` and pastes the output of `claude setup-token` into the enrollment form.
 
-Useful commands:
-```bash
-launchctl list | grep claudeway                    # check status
-tail -f claudeway.log                              # view logs
-launchctl unload ~/Library/LaunchAgents/com.claudeway.plist   # stop temporarily
-launchctl load -w ~/Library/LaunchAgents/com.claudeway.plist  # start again
-```
+Tunnel setup (including the ingress config for the creds form): [docs/deployment.md](docs/deployment.md) and [docs/cloudflare.md](docs/cloudflare.md). For macOS background service or Docker, see [docs/deployment.md](docs/deployment.md).
 
-The install script auto-detects your `bun` path, project directory, and user environment. The generated plist is placed at `~/Library/LaunchAgents/com.claudeway.plist`.
+## Slack Commands
 
-### 5. Run with Docker
+Magic commands bypass the message queue and execute immediately.
 
-Docker provides filesystem isolation — Claude CLI can only access repos defined in `config.yaml`.
+| Command | Description | Who |
+|---------|-------------|-----|
+| `!help` | List commands and channel info | anyone, anywhere |
+| `!whoami` | Show your identity, channels, permissions, enrolled credentials | anyone, anywhere |
+| `!ps` | Active processes + queue depth (non-owners see their channel only) | channel members |
+| `!kill` | Kill the process in the current channel | channel members |
+| `!nudge` | SIGINT the current process — interrupts a tool call, prompts wrap-up | channel members |
+| `!kill #chan` / `!nudge #chan` | Same, targeting another channel | bot owners |
+| `!killall` | Kill all running processes | bot owners |
+| `!config` | Show channel/bot configuration | bot owners |
+| `!creds` | Get a credential enrollment link (DM only) | any allowed user |
+| `!creds list` / `!creds revoke <name>\|all` | Manage your own credentials (DM only) | any allowed user |
+| `!creds list @user` / `!creds revoke @user [name\|all]` | Inspect/offboard another user | bot owners |
 
-1. Generate an auth token on a machine where Claude Code is authenticated:
-   ```bash
-   claude setup-token
-   ```
-   Add the token to your `.env` as `CLAUDE_CODE_OAUTH_TOKEN`.
+**Per-message overrides** ride the normal queue — prefix a message with either or both:
 
-2. Define repos in `config.yaml` and map channels to them (see `config.example.yaml`). Repos are automatically cloned/pulled on every startup (both `bun start` and Docker).
+- `!model:<name>` — run one message on a different model (passed straight to `claude --model`)
+- `!effort:<level>` — thinking effort for one message (`low`|`medium`|`high`|`xhigh`|`max`; validated, invalid levels rejected in-thread)
 
-3. Mount your SSH private key for git access — edit `docker-compose.yml` to point to your key:
-   ```yaml
-   - ~/.ssh/id_ed25519:/home/claudeway/.ssh/id_ed25519:ro
-   ```
+Overrides compose with magic commands and are re-parsed if you edit a still-queued message. Persistent sessions respawn with `--resume`, preserving context.
 
-4. (Optional) Include Claude CLI skills (e.g., markitdown, qmd) in the image:
-   ```bash
-   cp docker-skills.conf.example docker-skills.conf
-   # Add paths to your global skills (one per line), then:
-   bash scripts/docker-build.sh
-   ```
-   `docker-skills.conf` is gitignored — each developer maintains their own. If you don't need skills, use `docker compose build` directly.
+## Voice Channel
 
-5. Start the container:
-   ```bash
-   docker compose up -d
-   ```
+WebSocket-based voice interface with configurable STT/TTS (Deepgram Nova-3 / Aura-2). Three clients:
 
-Session state, repos, queue, and files are persisted in named Docker volumes across restarts.
+- **Android companion app** — push-to-talk / hands-free, Bluetooth, barge-in, Meta glasses integration. See [android/README.md](android/README.md).
+- **Web test UI** — served at the voice adapter's HTTP endpoint.
+- **Any WebSocket client** — implement the protocol in `src/adapters/voice/`.
 
-**Env var security:** `docker-compose.yml` lists env vars explicitly (what enters the container). The `env` and `permissions` sections in `config.yaml` then control which of those reach the Claude subprocess (see [Permissions](#permissions) below).
+TTS runs server-side (Deepgram), client-side, or local (Android built-in TTS). To expose the WebSocket beyond your LAN, see [docs/cloudflare.md](docs/cloudflare.md).
 
-## Config Options
+## Documentation
 
-### Top-level
-
-| Field | Description | Default |
-|-------|-------------|---------|
-| `botOwner` | Slack user ID — receives startup/shutdown DMs, can use magic commands | none (disabled) |
-| `repos` | Repo definitions (`url`, optional `branch`) — cloned into `.docker/repos/` | none |
-| `channels` | Channel-to-repo mappings | required |
-| `defaults` | Default model, prompt, timeout, and response mode | required |
-| `defaults.tempDir` | Temp directory for per-request file attachments (relative to project root) | `.claudeway-tmp` |
-| `defaults.tempMaxAgeDays` | Delete temp files older than N days on startup (0 to disable) | `90` |
-| `env` | Global env var names for Claude subprocesses | none (baseline only) |
-| `permissions` | Permission definitions with env var bundles (see below) | none |
-
-Set `botOwner` to your Slack user ID. Claudeway will DM you on startup and shutdown, and you can send magic commands (`!config`, `!ps`, etc.) in that DM as an admin console.
-
-### Channel Config
-
-| Field | Description | Default |
-|-------|-------------|---------|
-| `name` | Display name for logs | required |
-| `repo` | Repo name from `repos` map (resolved to `.docker/repos/<name>`) | required |
-| `model` | Claude model (`opus`, `sonnet`) | from defaults |
-| `systemPrompt` | Custom system prompt | from defaults |
-| `timeoutMs` | Idle timeout in ms (resets on activity) | 1800000 (30 min) |
-| `responseMode` | How responses are delivered (see below) | from defaults |
-| `processMode` | How the Claude CLI process is managed (see below) | from defaults |
-| `triggerMode` | When to respond: `all` or `mention` (see below) | `all` |
-| `collapseWorkingNotes` | `stream-native` only: show live "Working notes" (reasoning + tool steps) and collapse them into an attachment on completion (see below) | `true` |
-| `effort` | Claude CLI thinking effort (`low`, `medium`, `high`, `xhigh`, `max`); per-message override via `!effort:<level>` | from defaults |
-| `allowedUsers` | Slack user IDs allowed to interact with the bot in this channel. Permissions also gate env var exposure. | everyone |
-
-### Permissions
-
-Each permission is defined in the top-level `permissions` section and bundles env vars that are exposed when the permission is granted. `git` and `jiraWrite` are known names with built-in enforcement; any other name is custom (env-var-only).
-
-| Field | Description |
-|-------|-------------|
-| `env` | Global env var names — every Claude subprocess gets these |
-| `permissions.<name>.env` | Env var names exposed when a user has this permission |
-
-**Built-in enforcement** for known permission names:
-- `git` — enables git credentials + author identity; without it, git auth is blocked
-- `jiraWrite` — enables full MCP config; without it, MCP is read-only
-
-See `config.example.yaml` for a full example.
-
-### Trigger Modes
-
-Set `triggerMode` in `defaults` or per channel:
-
-| Mode | Description |
-|------|-------------|
-| `all` | Respond to every message in the channel. Default — works for dedicated bot channels. |
-| `mention` | Only respond when `@mentioned`. For shared channels where colleagues have their own conversations and you pull Claude in on demand. |
-
-In `mention` mode, the `@bot` mention is stripped from the prompt before sending to Claude. When invoked inside a thread (in either mode), the full thread history is fetched and prepended as context so Claude can see the conversation it's joining.
-
-### Process Modes
-
-Set `processMode` in `defaults` or per channel:
-
-| Mode | Description |
-|------|-------------|
-| `oneshot` | Spawn a fresh `claude -p` process for every message. Default, simple, fully isolated. ~2-3s startup per message. |
-| `persistent` | Keep one long-lived `claude -p` process per channel. Messages piped via stdin. Eliminates startup overhead and avoids re-loading session context on each turn. Idle-kills after `timeoutMs` of inactivity and auto-respawns on next message. |
-
-`processMode` and `responseMode` are fully independent — any combination works.
-
-### Response Modes
-
-Set `responseMode` in `defaults` or per channel:
-
-| Mode | Description |
-|------|-------------|
-| `batch` | Wait for the full response, then post it. Default, most reliable. |
-| `stream-update` | Post a message immediately, then update it every ~500ms as text arrives. Uses `chat.update`. Recommended streaming mode. |
-| `stream-native` | Use Slack's native streaming API (`chat.startStream`/`appendStream`/`stopStream`) directly. Sends `markdown_text` so Slack renders native Markdown. Shows a `:thinking_face:` placeholder until the first token arrives, and live "Working notes" while Claude works (see below). Requires Enterprise Grid or `recipient_team_id` — will not work on standard Slack workspaces. |
-
-Streaming modes give real-time feedback for long responses instead of showing an hourglass for 30+ seconds. If the final response exceeds the file upload threshold (12KB), streaming modes automatically fall back to uploading a file.
-
-### Working Notes (`stream-native`)
-
-When `collapseWorkingNotes` is `true` (the default), `stream-native` shows what Claude is doing while it works:
-
-- A live **🧠 Working notes** message streams Claude's extended-thinking reasoning and a running list of tool steps (`Reading config.ts`, `Delegating to agent…`, etc.). The answer streams in its own message.
-- When the turn finishes, the working notes **collapse into an expandable attachment** (Slack's "Show more…") above the clean final answer.
-
-Reasoning comes from the CLI's `stream-json` `thinking_delta` events, so the notes are populated even on turns where Claude jumps straight from tool calls to an answer with no prose in between. Inter-tool narration is shown live once (in the answer) and archived into the notes attachment — never duplicated.
-
-Set `collapseWorkingNotes: false` to disable: the answer streams as the sole live output, tool activity shows as a single self-replacing status line, and reasoning is not shown.
-
-## Process Management
-
-Control running Claude CLI processes directly from Slack with magic commands. These bypass the message queue and execute immediately.
-
-| Command | Description |
-|---------|-------------|
-| `!ps` | List active processes with channel, runtime, message count, token usage, and queue depth |
-| `!kill` | Kill the process running in the current channel |
-| `!kill #channel` | Kill a process in another channel by name |
-| `!killall` | Kill all running processes |
-| `!nudge` | Send SIGINT to the process in the current channel — interrupts a long tool call and prompts Claude to wrap up |
-| `!nudge #channel` | Nudge a process in another channel by name |
-| `!config` | Show channel/bot configuration |
-
-Magic commands require authorization. `botOwner` can run all commands. Channel `allowedUsers` can run `!ps`, `!kill`, and `!nudge` in their own channel. Cross-channel `!kill`/`!nudge`, `!killall`, and `!config` are `botOwner`-only.
-
-Example `!ps` output:
-```
-:gear: Active Processes (2/8)
-
-• #recycler — 18m 30s — 4 msgs — 18,234 tokens — "ok and don't forget to update your work log..." (idle)
-• #claudeway — 26m 39s — 2 msgs — 9,103 tokens — "i think we can kill the reminders service..." :hourglass_flowing_sand:
-
-Queued: 5 messages (3 recycler, 2 claudeway)
-```
-
-Killed processes are handled gracefully — the error handler posts a message in the thread and the channel's queue continues draining.
-
-### Per-Turn Model Override
-
-Prefix a message with `!model:<name>` to run just that message with a different model:
-
-```
-@bot !model:opus refactor the queue module
-!model:claude-opus-4-8 deep review of this thread
-```
-
-Unlike magic commands, this rides the normal message queue — only the model changes. The override applies to that one message; the next message uses the channel/default model again. The model name is not validated: it's passed straight to `claude --model`, and if the CLI rejects it the error is reported in the thread. Editing a still-queued message re-parses the prefix, so you can add, change, or remove the override before processing starts. In persistent process mode the session is transparently respawned with `--resume`, so conversation context is preserved across model switches.
-
-### Per-Turn Effort Override
-
-Prefix a message with `!effort:<level>` to run just that message at a different thinking-effort level (`low`, `medium`, `high`, `xhigh`, `max`):
-
-```
-@bot !effort:high refactor the queue module
-!effort:max deep review of this thread
-```
-
-Same mechanics as the model override — per-turn only, rides the normal queue, edits re-parse the prefix, and persistent sessions respawn with `--resume`. It combines with `!model:` in any order (e.g. `!model:opus !effort:high …`), and override prefixes compose with magic commands (`!effort:high !kill` still executes the kill). Unlike the model name, the effort value **is** validated: an unrecognized level (e.g. `!effort:turbo`) is rejected in-thread with the valid list instead of running — because the CLI would otherwise silently fall back to the default effort. Validation replies are only sent in channels/threads where the bot is configured, triggered, and the sender is authorized; editing a queued message to an invalid level applies the rest of the edit and warns that the effort override was dropped. The `effort` values in `config.yaml` itself are validated at load time the same way.
+- [docs/configuration.md](docs/configuration.md) — full config reference (channels, modes, credentials, env)
+- [docs/per-user-credentials.md](docs/per-user-credentials.md) — per-user credential setup & operations
+- [docs/deployment.md](docs/deployment.md) — macOS LaunchAgent and Docker
+- [docs/troubleshooting.md](docs/troubleshooting.md) — common issues
 
 ## Development
 
 ```bash
-bun start          # Run with bun
-bun dev            # Run with bun --watch (auto-reload)
-bun run build      # TypeScript compile
-bun run typecheck  # Type check only
-bun run lint       # ESLint
-bun run format     # Prettier
-bun test           # Run unit tests
-bun test --watch   # Watch mode
+make help          # all targets (server + android)
+make server-dev    # run with auto-reload
+make test          # run all tests
+make lint          # lint everything
 ```
 
-Unit tests cover the pure-function layer: NDJSON stream-json line parsing (the Claude CLI wire format), Slack mrkdwn conversion, message splitting, config resolution, session ID derivation, and path encoding. Tests run automatically on every commit via the pre-commit hook.
-
-## Troubleshooting
-
-**Messages queuing unexpectedly:** There's a global limit of 8 concurrent Claude CLI processes. If all slots are busy, new messages wait in queue until a slot frees up. Each channel also serializes its own messages (one at a time per channel).
-
-**Process killed too early:** The `timeoutMs` setting is an idle timeout — it only kills the process after that many milliseconds of inactivity (no stdout/stderr). There's also a hard 12-hour absolute safety net. Increase `timeoutMs` per channel for long-running tasks.
-
-**Claude hangs / no response:** Make sure stdin is not piped to the Claude process. Claudeway handles this internally by using `stdio: ['ignore', 'pipe', 'pipe']` when spawning the CLI.
-
-**"Session ID already in use":** This happens when a previous Claude session didn't exit cleanly. Claudeway automatically clears stale session artifacts and retries once. No manual intervention needed.
-
-**Service won't start via launchd:** Ensure `HOME` and `USER` are set in the plist's `EnvironmentVariables`. Claude Code needs these to find its auth credentials.
-
-**"Cannot be launched inside another Claude Code session":** Don't start Claudeway from within a Claude Code terminal. The `CLAUDECODE` env var is inherited and blocks nested sessions. Start from a regular terminal or use the LaunchAgent.
-
-**Only one instance runs at a time:** Claudeway uses a pidfile lock (`claudeway.pid`). If the service crashes, the stale pidfile is detected and cleaned up automatically.
-
-**Images not being analyzed:** Make sure your Slack app has the `files:read` bot token scope. Supported formats: PNG, JPEG, GIF, WebP (max 5MB per image). Non-image files (PDFs, zips) are silently ignored.
-
-## Pairs Well With
-
-[maxassist](https://github.com/ktamas77/maxassist) - Use Claudeway as the communication layer and maxassist for orchestrating complex multi-step AI workflows. Together they form a powerful remote development setup.
-
-[Forever Memory](https://forever.squidcode.com) - Persistent memory for Claude Code across folders and machines. Give your Claudeway channels shared context that survives session boundaries.
+Direct `bun` scripts also work (`bun dev`, `bun test`, …) — see `package.json`. Unit tests cover the pure-function layer and run on every commit via the pre-commit hook.
 
 ## Requirements
 
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- Claude Pro or Max subscription
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed
+- A Claude Pro/Max subscription per user (each user enrolls their own token)
 - [Bun](https://bun.sh) 1.0+
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 
-MIT
+MIT — see [CHANGELOG.md](CHANGELOG.md) for release history.

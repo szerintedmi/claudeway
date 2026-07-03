@@ -1,0 +1,35 @@
+# Slack app manifest for Claudeway.
+# Create your app from this file at https://api.slack.com/apps > "Create New App" > "From a manifest".
+# After creating the app you still need to generate an App-Level Token
+# (Settings > Basic Information > App-Level Tokens) with the connections:write
+# scope for Socket Mode — manifests cannot create app-level tokens.
+display_information:
+  name: Claudeway
+  description: Claude Code gateway — ask me about your repos
+features:
+  bot_user:
+    display_name: Claudeway
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - channels:history
+      - channels:read
+      - chat:write
+      - files:read # image attachments
+      - files:write # file attachments in responses
+      - groups:history # private channels
+      - im:history # DMs to the bot (!creds, bot-owner admin console)
+      - im:read
+      - im:write # bot owner DM notifications
+      - reactions:write # status reactions (queued/processing/done)
+      - users.profile:read
+      - users:read # resolving display names in thread context
+      - users:read.email
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.channels
+      - message.groups # private channels
+      - message.im # DMs to the bot
+  socket_mode_enabled: true

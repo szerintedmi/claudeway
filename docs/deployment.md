@@ -1,0 +1,69 @@
+# Deployment
+
+## macOS LaunchAgent
+
+The install script sets up a LaunchAgent that starts Claudeway on login and restarts it on crashes (10s throttle; clean `SIGTERM`/`SIGINT` exits stay stopped). It auto-detects your `bun` path, project directory, and user environment.
+
+```bash
+./scripts/install.sh      # install + start
+./scripts/uninstall.sh    # stop + remove
+```
+
+Useful commands:
+
+```bash
+launchctl list | grep claudeway                                # status
+tail -f claudeway.log                                          # logs
+launchctl unload ~/Library/LaunchAgents/com.claudeway.plist    # stop temporarily
+launchctl load -w ~/Library/LaunchAgents/com.claudeway.plist   # start again
+```
+
+## Docker
+
+Docker provides filesystem isolation — the Claude CLI only sees repos defined in `config.yaml`.
+
+1. Define repos in `config.yaml` and map channels to them. Repos are cloned/pulled on every startup.
+2. Make sure `baseUrl` points at a host/port reachable from users' browsers and the creds form port (default 8791) is published — after the container is up, each user enrolls via `!creds` as usual.
+3. Mount your SSH private key for git access — edit `docker-compose.yml`:
+   ```yaml
+   - ~/.ssh/id_ed25519:/home/claudeway/.ssh/id_ed25519:ro
+   ```
+4. (Optional) Include Claude CLI skills in the image:
+   ```bash
+   cp docker-skills.conf.example docker-skills.conf
+   # add paths to your global skills (one per line), then:
+   bash scripts/docker-build.sh
+   ```
+   Without skills, `docker compose build` works directly.
+5. Start:
+   ```bash
+   docker compose up -d
+   ```
+
+Session state, repos, queue, and files persist in named Docker volumes.
+
+**Env var security:** `docker-compose.yml` lists env vars explicitly (what enters the container); `config.yaml` controls what reaches the Claude subprocess or tool adapters. Prefer `userCredentials` for API keys/tokens so shared defaults and per-user overrides are declared in one place.
+
+## Running locally with a Cloudflare tunnel
+
+The recommended way to run locally while reachable from outside (Android app, Meta glasses, `!creds` enrollment links) is `caffeinate` (prevents macOS sleep) + a named Cloudflare tunnel:
+
+```bash
+caffeinate -i bash -c 'bun run start & cloudflared tunnel run claudeway & wait'
+```
+
+Route both servers through one hostname in `~/.cloudflared/config.yml` — the creds form (8791) by path, everything else to the voice server (8765):
+
+```yaml
+ingress:
+  # credential enrollment form (separate server on 8791)
+  - hostname: claudeway.yourdomain.com
+    path: ^/creds
+    service: http://localhost:8791
+  # voice web UI + WebSocket — everything else on this host
+  - hostname: claudeway.yourdomain.com
+    service: http://localhost:8765
+  - service: http_status:404
+```
+
+Set `baseUrl: "https://claudeway.yourdomain.com"` in `config.yaml` so `!creds` magic links point at the tunnel. Full tunnel setup (create, DNS route, Cloudflare Access): [cloudflare.md](cloudflare.md). For dev, swap in `bun run dev` for auto-reload.

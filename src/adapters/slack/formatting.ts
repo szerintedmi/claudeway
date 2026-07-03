@@ -107,14 +107,14 @@ const STREAM_NATIVE_APPEND_BURST = 8;
  * Idle keepalive interval. Slack auto-finalizes a streaming message after an
  * (undocumented) idle period; once that happens every append fails with
  * `message_not_in_streaming_state`. While a stream is open with no pending
- * text, we append an invisible keepalive token this often to keep it alive
- * through long tool-execution gaps.
+ * chunks, we re-send the last task_update (an idempotent, invisible no-op)
+ * this often to keep it alive through long tool-execution gaps.
  *
- * NOTE: Slack does not publish the idle-timeout value, so this is a
- * conservative guess — tune it down if streams still die on long tasks. The
- * onStreamComplete fallback still delivers the full text if a stream dies.
+ * Spike-verified 2026-07-02: a chunk-mode stream survived 95s of total
+ * silence, and idempotent task_update re-sends are accepted indefinitely —
+ * so 15s is comfortably safe while staying cheap on the append budget.
  */
-const STREAM_NATIVE_KEEPALIVE_MS = 5000;
+const STREAM_NATIVE_KEEPALIVE_MS = 15_000;
 
 /**
  * Keepalive token: a zero-width space. Stream content is append-only (it can't
@@ -125,19 +125,38 @@ const STREAM_NATIVE_KEEPALIVE_MS = 5000;
 const STREAM_KEEPALIVE_TOKEN = '\u200b';
 
 /**
- * Hardcoded prefix prepended to the live streamed message when working-notes
- * collapsing is enabled. It is NOT model-instructed \u2014 it gives the live updates a
- * fixed visual identity ("\ud83e\udde0 Working notes") that matches the collapsed snippet's
- * title once the turn completes, so the reader connects the two. Kept out of the
- * accumulated text so it never leaks into the final answer or the archived notes.
+ * Title of the plan box that groups the turn's task cards (live stream and
+ * rebuilt messages). Plain text without emoji \u2014 plan/container titles render
+ * emoji shortcodes literally instead of as emoji.
  */
-const STREAM_LIVE_NOTES_PREFIX = '\ud83e\udde0 *Work log* :partyparrot:\n\n';
+const WORK_LOG_TITLE = 'Work log';
 
-/** Title shared by the live prefix and the working-notes attachment. */
-const WORKING_NOTES_TITLE = '\ud83e\udde0 Work log';
+/**
+ * Inline replacement for the `-- DETAILS --` marker line: a divider + bold
+ * header, streamed in place so the details section streams live instead of
+ * arriving as a folded block at stop. Standard Markdown \u2014 the native stream
+ * renders it directly; non-stream paths run it through markdownToSlackMrkdwn.
+ */
+const DETAILS_INLINE_HEADER = '\n---\n\n**\ud83d\udccb Details**\n\n';
 
-/** Title for the collapsible attachment that holds the folded detail section. */
-const DETAILS_TITLE = '\ud83d\udccb Details';
+/**
+ * How much of a text run is held back before it is presumed to be the final
+ * answer and released to the message body. Runs interrupted by a tool or
+ * reasoning event while still under this cap were narration ("Let me check
+ * the files\u2026") and are demoted to a work-log card instead. Narration runs are
+ * near-always short; answers cross this within a couple of seconds.
+ */
+const NARRATION_HOLDBACK_MAX_CHARS = 500;
+
+/**
+ * Slack caps `task_update` title/details/output at 256 chars per update.
+ * TASK_DETAILS_MAX leaves headroom for the `\u2026` prefix on rolling reasoning tails.
+ */
+const TASK_TITLE_MAX = 256;
+const TASK_DETAILS_MAX = 250;
+
+/** Title of the rolling reasoning task card. */
+const THINKING_TASK_TITLE = 'Thinking';
 
 export {
   STREAM_UPDATE_INTERVAL_MS,
@@ -146,9 +165,12 @@ export {
   STREAM_NATIVE_FLUSH_INTERVAL_MS,
   STREAM_NATIVE_KEEPALIVE_MS,
   STREAM_KEEPALIVE_TOKEN,
-  STREAM_LIVE_NOTES_PREFIX,
-  WORKING_NOTES_TITLE,
-  DETAILS_TITLE,
+  WORK_LOG_TITLE,
+  DETAILS_INLINE_HEADER,
+  NARRATION_HOLDBACK_MAX_CHARS,
+  TASK_TITLE_MAX,
+  TASK_DETAILS_MAX,
+  THINKING_TASK_TITLE,
   STREAM_NATIVE_APPEND_RATE_PER_MIN,
   STREAM_NATIVE_APPEND_BURST,
 };
@@ -162,20 +184,51 @@ export {
 const DETAILS_MARKER = /(?:^|\n)[ \t]*-{2,}[ \t]*DETAILS[ \t]*-{2,}[ \t]*(?=\n|$)/i;
 
 /**
+ * Find the first {@link DETAILS_MARKER} that is NOT inside a fenced code block
+ * (a marker in a fence is content the model is showing, not a fold directive).
+ * Uses the same fence regex as {@link markdownToSlackMrkdwn} so both agree on
+ * what counts as code.
+ */
+export function findDetailsMarker(text: string): { index: number; length: number } | null {
+  const codeBlockRe = /```\w*\n[\s\S]*?```/g;
+  let lastIndex = 0;
+  for (const m of text.matchAll(codeBlockRe)) {
+    const hit = DETAILS_MARKER.exec(text.slice(lastIndex, m.index));
+    if (hit) return { index: lastIndex + hit.index, length: hit[0].length };
+    lastIndex = m.index + m[0].length;
+  }
+  const hit = DETAILS_MARKER.exec(text.slice(lastIndex));
+  return hit ? { index: lastIndex + hit.index, length: hit[0].length } : null;
+}
+
+/**
  * Split model output into the TL;DR `body` and an optional `details` section on
- * the first {@link DETAILS_MARKER}. Returns `details: null` (whole text as body,
- * unfolded) when the marker is absent or nothing follows it; if nothing precedes
- * it, the post-marker content becomes the body. The marker line itself is always
- * dropped so it never leaks into a delivered message.
+ * the first {@link DETAILS_MARKER} outside a code fence. Returns `details: null`
+ * (whole text as body, unfolded) when the marker is absent or nothing follows
+ * it; if nothing precedes it, the post-marker content becomes the body. The
+ * marker line itself is always dropped so it never leaks into a delivered
+ * message.
  */
 export function splitDetails(text: string): { body: string; details: string | null } {
-  const match = DETAILS_MARKER.exec(text);
+  const match = findDetailsMarker(text);
   if (!match) return { body: text, details: null };
   const body = text.slice(0, match.index).trimEnd();
-  const details = text.slice(match.index + match[0].length).trim();
+  const details = text.slice(match.index + match.length).trim();
   if (!details) return { body, details: null };
   if (!body) return { body: details, details: null };
   return { body, details };
+}
+
+/**
+ * Render the details fold inline: the first {@link DETAILS_MARKER} outside a
+ * code fence becomes {@link DETAILS_INLINE_HEADER}. Same edge-case semantics as
+ * {@link splitDetails}: an empty details section drops the marker entirely, and
+ * a marker with nothing before it drops the header (details become the body).
+ */
+export function inlineDetailsMarker(text: string): string {
+  const { body, details } = splitDetails(text);
+  if (details === null) return body;
+  return body + DETAILS_INLINE_HEADER + details;
 }
 
 const TOOL_DISPLAY_VERBS: Record<string, string> = {
@@ -201,15 +254,27 @@ export function formatToolStatus(toolName: string, keyArg: string | null): strin
   return `:thinking_face: _${verb}..._`;
 }
 
+/** Key args longer than this add noise, not information, to a one-line card title. */
+const TASK_TITLE_KEY_ARG_MAX = 100;
+
 /**
- * Format a tool step as a single line for the live "working notes" log (a
- * growing list of steps), as opposed to {@link formatToolStatus} which renders a
- * single self-replacing status message. No trailing ellipsis — each line is a
- * completed step in the narrative.
+ * Format a tool step as a task-card title for the live Thinking Steps work log.
+ * Plain text (task_card titles don't render mrkdwn). MCP tool ids
+ * (`mcp__<server>__<tool>`) are shown as `<tool> (<server>)`; long key args are
+ * trimmed so the card stays a readable one-liner.
  */
-export function formatToolNote(toolName: string, keyArg: string | null): string {
-  const verb = TOOL_DISPLAY_VERBS[toolName] ?? `Using ${toolName}`;
-  return keyArg ? `:small_blue_diamond: _${verb} \`${keyArg}\`_` : `:small_blue_diamond: _${verb}_`;
+export function formatToolTaskTitle(toolName: string, keyArg: string | null): string {
+  let verb = TOOL_DISPLAY_VERBS[toolName];
+  if (!verb) {
+    const mcp = toolName.match(/^mcp__(.+?)__(.+)$/);
+    verb = mcp ? `Using ${mcp[2]} (${mcp[1]})` : `Using ${toolName}`;
+  }
+  const arg =
+    keyArg && keyArg.length > TASK_TITLE_KEY_ARG_MAX
+      ? `${keyArg.slice(0, TASK_TITLE_KEY_ARG_MAX - 1)}…`
+      : keyArg;
+  const title = arg ? `${verb} ${arg}` : verb;
+  return title.length > TASK_TITLE_MAX ? `${title.slice(0, TASK_TITLE_MAX - 1)}…` : title;
 }
 
 export function splitMessage(text: string): string[] {

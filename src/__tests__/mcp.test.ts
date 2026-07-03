@@ -14,35 +14,36 @@ describe('generateReadOnlyMcpConfig', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('injects READ_ONLY_MODE into each server env', () => {
+  it('injects READ_ONLY_MODE only into the named servers', () => {
     const mcpPath = join(tmpDir, 'mcp.json');
     writeFileSync(
       mcpPath,
       JSON.stringify({
         mcpServers: {
-          atlassian: {
+          'mcp-atlassian': {
             type: 'stdio',
-            command: 'npx',
+            command: 'uvx',
             args: ['mcp-atlassian'],
             env: { JIRA_URL: 'https://jira.example.com' },
           },
+          other: { type: 'stdio', command: 'npx', env: { FOO: 'bar' } },
         },
       }),
     );
 
-    generateReadOnlyMcpConfig(mcpPath);
+    const destPath = generateReadOnlyMcpConfig(mcpPath, ['mcp-atlassian']);
 
-    const readonlyPath = join(tmpDir, 'mcp-readonly.json');
-    expect(existsSync(readonlyPath)).toBe(true);
-
-    const config = JSON.parse(readFileSync(readonlyPath, 'utf-8'));
-    expect(config.mcpServers.atlassian.env).toEqual({
+    expect(existsSync(destPath)).toBe(true);
+    const config = JSON.parse(readFileSync(destPath, 'utf-8'));
+    expect(config.mcpServers['mcp-atlassian'].env).toEqual({
       JIRA_URL: 'https://jira.example.com',
       READ_ONLY_MODE: 'true',
     });
+    // Unlisted servers are left untouched
+    expect(config.mcpServers.other.env).toEqual({ FOO: 'bar' });
   });
 
-  it('creates env object when server has no env', () => {
+  it('creates env object when the named server has no env', () => {
     const mcpPath = join(tmpDir, 'mcp.json');
     writeFileSync(
       mcpPath,
@@ -53,58 +54,53 @@ describe('generateReadOnlyMcpConfig', () => {
       }),
     );
 
-    generateReadOnlyMcpConfig(mcpPath);
+    const destPath = generateReadOnlyMcpConfig(mcpPath, ['simple']);
 
-    const readonlyPath = join(tmpDir, 'mcp-readonly.json');
-    const config = JSON.parse(readFileSync(readonlyPath, 'utf-8'));
+    const config = JSON.parse(readFileSync(destPath, 'utf-8'));
     expect(config.mcpServers.simple.env).toEqual({ READ_ONLY_MODE: 'true' });
   });
 
-  it('handles multiple servers', () => {
+  it('treats servers without a type as stdio', () => {
     const mcpPath = join(tmpDir, 'mcp.json');
-    writeFileSync(
-      mcpPath,
-      JSON.stringify({
-        mcpServers: {
-          server1: { type: 'stdio', command: 'a', env: { FOO: 'bar' } },
-          server2: { type: 'stdio', command: 'b' },
-        },
-      }),
-    );
+    writeFileSync(mcpPath, JSON.stringify({ mcpServers: { untyped: { command: 'echo' } } }));
 
-    generateReadOnlyMcpConfig(mcpPath);
+    const destPath = generateReadOnlyMcpConfig(mcpPath, ['untyped']);
 
-    const config = JSON.parse(readFileSync(join(tmpDir, 'mcp-readonly.json'), 'utf-8'));
-    expect(config.mcpServers.server1.env.READ_ONLY_MODE).toBe('true');
-    expect(config.mcpServers.server1.env.FOO).toBe('bar');
-    expect(config.mcpServers.server2.env.READ_ONLY_MODE).toBe('true');
+    const config = JSON.parse(readFileSync(destPath, 'utf-8'));
+    expect(config.mcpServers.untyped.env).toEqual({ READ_ONLY_MODE: 'true' });
   });
 
-  it('skips READ_ONLY_MODE for http/sse servers (no subprocess to read env)', () => {
+  it('skips named http/sse servers (no subprocess to read env)', () => {
     const mcpPath = join(tmpDir, 'mcp.json');
     writeFileSync(
       mcpPath,
       JSON.stringify({
         mcpServers: {
-          stdioServer: { type: 'stdio', command: 'a' },
           httpServer: {
             type: 'http',
             url: 'https://mcp.example.com/mcp/',
             headers: { 'Api-Key': '${SOME_KEY}' },
           },
-          sseServer: { type: 'sse', url: 'https://sse.example.com/' },
         },
       }),
     );
 
-    generateReadOnlyMcpConfig(mcpPath);
+    const destPath = generateReadOnlyMcpConfig(mcpPath, ['httpServer']);
 
-    const config = JSON.parse(readFileSync(join(tmpDir, 'mcp-readonly.json'), 'utf-8'));
-    expect(config.mcpServers.stdioServer.env).toEqual({ READ_ONLY_MODE: 'true' });
-    // http/sse entries left untouched — no env injected
+    const config = JSON.parse(readFileSync(destPath, 'utf-8'));
     expect(config.mcpServers.httpServer.env).toBeUndefined();
     expect(config.mcpServers.httpServer.headers).toEqual({ 'Api-Key': '${SOME_KEY}' });
-    expect(config.mcpServers.sseServer.env).toBeUndefined();
+  });
+
+  it('skips names not present in the config without failing', () => {
+    const mcpPath = join(tmpDir, 'mcp.json');
+    writeFileSync(mcpPath, JSON.stringify({ mcpServers: { real: { command: 'a' } } }));
+
+    const destPath = generateReadOnlyMcpConfig(mcpPath, ['missing', 'real']);
+
+    const config = JSON.parse(readFileSync(destPath, 'utf-8'));
+    expect(config.mcpServers.real.env).toEqual({ READ_ONLY_MODE: 'true' });
+    expect(config.mcpServers.missing).toBeUndefined();
   });
 
   it('preserves non-env fields', () => {
@@ -118,9 +114,9 @@ describe('generateReadOnlyMcpConfig', () => {
       }),
     );
 
-    generateReadOnlyMcpConfig(mcpPath);
+    const destPath = generateReadOnlyMcpConfig(mcpPath, ['test']);
 
-    const config = JSON.parse(readFileSync(join(tmpDir, 'mcp-readonly.json'), 'utf-8'));
+    const config = JSON.parse(readFileSync(destPath, 'utf-8'));
     expect(config.mcpServers.test.type).toBe('stdio');
     expect(config.mcpServers.test.command).toBe('npx');
     expect(config.mcpServers.test.args).toEqual(['@test/plugin']);
@@ -128,8 +124,21 @@ describe('generateReadOnlyMcpConfig', () => {
 });
 
 describe('readOnlyMcpConfigPath', () => {
-  it('returns mcp-readonly.json alongside the source', () => {
-    expect(readOnlyMcpConfigPath('/path/to/mcp.json')).toBe('/path/to/mcp-readonly.json');
+  it('returns a hashed mcp-readonly path alongside the source', () => {
+    const p = readOnlyMcpConfigPath('/path/to/mcp.json', ['mcp-atlassian']);
+    expect(p).toMatch(/^\/path\/to\/mcp-readonly-[0-9a-f]{8}\.json$/);
+  });
+
+  it('is stable across server-name ordering', () => {
+    expect(readOnlyMcpConfigPath('/x/mcp.json', ['a', 'b'])).toBe(
+      readOnlyMcpConfigPath('/x/mcp.json', ['b', 'a']),
+    );
+  });
+
+  it('differs for different server sets', () => {
+    expect(readOnlyMcpConfigPath('/x/mcp.json', ['a'])).not.toBe(
+      readOnlyMcpConfigPath('/x/mcp.json', ['b']),
+    );
   });
 });
 
@@ -144,29 +153,42 @@ describe('getMcpConfigPath', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('returns mcp.json when jiraWrite is granted', () => {
+  it('returns mcp.json when no servers need read-only mode', () => {
     writeFileSync(join(tmpDir, 'mcp.json'), '{}');
-    writeFileSync(join(tmpDir, 'mcp-readonly.json'), '{}');
-    expect(getMcpConfigPath(new Set(['git', 'jiraWrite']), tmpDir)).toBe(join(tmpDir, 'mcp.json'));
+    expect(getMcpConfigPath([], tmpDir)).toBe(join(tmpDir, 'mcp.json'));
   });
 
-  it('returns mcp-readonly.json when jiraWrite is not granted and file exists', () => {
-    writeFileSync(join(tmpDir, 'mcp.json'), '{}');
-    writeFileSync(join(tmpDir, 'mcp-readonly.json'), '{}');
-    expect(getMcpConfigPath(new Set(), tmpDir)).toBe(join(tmpDir, 'mcp-readonly.json'));
+  it('generates and returns a read-only config when servers are listed', () => {
+    writeFileSync(
+      join(tmpDir, 'mcp.json'),
+      JSON.stringify({ mcpServers: { 'mcp-atlassian': { command: 'uvx' } } }),
+    );
+
+    const path = getMcpConfigPath(['mcp-atlassian'], tmpDir);
+
+    expect(path).toBe(readOnlyMcpConfigPath(join(tmpDir, 'mcp.json'), ['mcp-atlassian']));
+    const config = JSON.parse(readFileSync(path!, 'utf-8'));
+    expect(config.mcpServers['mcp-atlassian'].env.READ_ONLY_MODE).toBe('true');
   });
 
-  it('returns null when jiraWrite is not granted and readonly does not exist', () => {
-    writeFileSync(join(tmpDir, 'mcp.json'), '{}');
-    expect(getMcpConfigPath(new Set(), tmpDir)).toBeNull();
+  it('regenerates the read-only config from the current mcp.json', () => {
+    const mcpPath = join(tmpDir, 'mcp.json');
+    writeFileSync(mcpPath, JSON.stringify({ mcpServers: { s: { command: 'a' } } }));
+    getMcpConfigPath(['s'], tmpDir);
+
+    // mcp.json edited between spawns — the generated variant must follow
+    writeFileSync(
+      mcpPath,
+      JSON.stringify({ mcpServers: { s: { command: 'a', env: { NEW: 'yes' } } } }),
+    );
+    const path = getMcpConfigPath(['s'], tmpDir);
+
+    const config = JSON.parse(readFileSync(path!, 'utf-8'));
+    expect(config.mcpServers.s.env).toEqual({ NEW: 'yes', READ_ONLY_MODE: 'true' });
   });
 
   it('returns null when no MCP config exists', () => {
-    expect(getMcpConfigPath(new Set(['git', 'jiraWrite']), tmpDir)).toBeNull();
-  });
-
-  it('returns mcp.json for undefined permissions (full access default)', () => {
-    writeFileSync(join(tmpDir, 'mcp.json'), '{}');
-    expect(getMcpConfigPath(undefined, tmpDir)).toBe(join(tmpDir, 'mcp.json'));
+    expect(getMcpConfigPath([], tmpDir)).toBeNull();
+    expect(getMcpConfigPath(['mcp-atlassian'], tmpDir)).toBeNull();
   });
 });

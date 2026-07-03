@@ -9,6 +9,9 @@ import {
   type UserPermissions,
 } from './config.js';
 import { getMcpConfigPath } from './mcp.js';
+import { gitCredConfigured, type ResolvedCredentials } from './credentials.js';
+import { ensureGitCredentialFiles } from './git-credentials.js';
+import { scrubSecrets } from './secrets.js';
 
 // Re-export ProcessMode for consumers that only import from claude.ts
 export type { ProcessMode } from './config.js';
@@ -27,10 +30,20 @@ export interface ClaudeOptions {
   tempBaseDir?: string;
   config: Config;
   userPermissions: UserPermissions;
+  /** Canonical user id (users: registry key, or external id when unregistered). */
   userId: string;
   userName?: string;
   channelName?: string;
   scratchDir?: string;
+  /** Resolved per-user credentials (env injection, git token, scrub values). */
+  credentials?: ResolvedCredentials;
+  /** True when the sender is the botOwner — the git adapter is skipped (own creds). */
+  isBotOwner?: boolean;
+  /**
+   * Logical repo folder for session-ID derivation when cwd is a per-thread
+   * worktree — keeps existing session IDs stable (merged-plan decision #9).
+   */
+  sessionFolder?: string;
 }
 
 export interface ClaudeStreamingOptions extends ClaudeOptions {
@@ -424,6 +437,34 @@ function buildGitAuthorEnv(userName: string, channelName: string): Record<string
   };
 }
 
+/**
+ * Git enforcement env (merged-plan decisions #7/#8).
+ * - Resolved git token (personal or explicit shared default): per-spawn
+ *   gitconfig with SSH→HTTPS rewrite + credential helper. The token never
+ *   enters the subprocess env.
+ * - Adapter configured but no token resolved: hard block git authentication.
+ * - Adapter not configured: leave ambient git behavior unchanged.
+ */
+function buildGitEnv(options: ClaudeOptions): Record<string, string> {
+  const gitCred = options.credentials?.git ?? null;
+  if (gitCred) {
+    const gitconfigPath = ensureGitCredentialFiles(gitCred);
+    return {
+      GIT_TERMINAL_PROMPT: '0',
+      GIT_ASKPASS: '/bin/false',
+      GIT_SSH_COMMAND: '/bin/false', // force HTTPS — the gitconfig rewrites SSH remotes
+      GIT_CONFIG_GLOBAL: gitconfigPath,
+      GIT_CONFIG_SYSTEM: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+      SSH_AUTH_SOCK: '',
+      SSH_AGENT_PID: '',
+    };
+  }
+
+  if (gitCredConfigured(options.config)) return buildGitReadOnlyEnv();
+  return {};
+}
+
 /** Build all permission-related env vars for a Claude subprocess. */
 function buildPermissionsEnv(options: ClaudeOptions): Record<string, string> {
   const env: Record<string, string> = {};
@@ -433,10 +474,7 @@ function buildPermissionsEnv(options: ClaudeOptions): Record<string, string> {
     Object.assign(env, buildGitAuthorEnv(options.userName, options.channelName));
   }
 
-  // Git credential stripping for users without git permission
-  if (options.userPermissions && !options.userPermissions.has('git')) {
-    Object.assign(env, buildGitReadOnlyEnv());
-  }
+  Object.assign(env, buildGitEnv(options));
 
   // Scratch directory
   if (options.scratchDir) {
@@ -444,6 +482,11 @@ function buildPermissionsEnv(options: ClaudeOptions): Record<string, string> {
   }
 
   return env;
+}
+
+/** Scrub resolved secret values from text before it is logged or surfaced. */
+function scrub(text: string, secretValues: readonly string[] | undefined): string {
+  return secretValues && secretValues.length > 0 ? scrubSecrets(text, secretValues) : text;
 }
 
 /** Env vars always passed through to Claude subprocess (safe, non-secret). */
@@ -467,11 +510,14 @@ interface AllowedEnvContext {
   userPermissions: UserPermissions;
   /** Explicitly injected vars (git author, git read-only, scratch/temp dirs) */
   extraEnv?: Record<string, string>;
+  /** Per-user credential env (personal or explicit shared default) — highest precedence. */
+  userCredEnv?: Record<string, string>;
 }
 
 /**
  * Build the complete env for a Claude subprocess using an allowlist approach.
- * Only baseline vars + global env + permission-linked env + injected vars are included.
+ * Only baseline vars + global env + permission-linked env + injected vars +
+ * per-user credential env are included.
  */
 export function buildAllowedEnv(ctx: AllowedEnvContext): Record<string, string> {
   const env: Record<string, string> = {};
@@ -496,7 +542,10 @@ export function buildAllowedEnv(ctx: AllowedEnvContext): Record<string, string> 
   // 4. Explicit injected vars (git author, git read-only enforcement, CLAUDEWAY_* spawn vars)
   if (ctx.extraEnv) Object.assign(env, ctx.extraEnv);
 
-  // 5. HOME fallback
+  // 5. Per-user credentials — highest precedence (user secret > explicit shared default > unset)
+  if (ctx.userCredEnv) Object.assign(env, ctx.userCredEnv);
+
+  // 6. HOME fallback
   if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
 
   return env;
@@ -526,7 +575,10 @@ function resolveExposedEnvVarNames(
 
 /**
  * Compute a composite identity key for persistent process restart comparison.
- * Includes user identity, permissions, and resolved env var names.
+ * Includes user identity, permissions, resolved env var names, a hash of the
+ * user's resolved secret VALUES (never the values themselves), and the set of
+ * MCP servers forced read-only — so a token change or read-only/full MCP
+ * switch mid-thread triggers the existing kill/respawn path.
  */
 export function processIdentityKey(
   userId: string,
@@ -535,10 +587,12 @@ export function processIdentityKey(
   channelId: string,
   model: string,
   effort: string,
+  secretsHash = '',
+  readOnlyMcpServers: string[] = [],
 ): string {
   const permPart = permissionKeyStr(permissions);
   const envPart = resolveExposedEnvVarNames(config, channelId, permissions).join(',');
-  return `${userId}|${permPart}|${envPart}|${model}|${effort}`;
+  return `${userId}|${permPart}|${envPart}|${model}|${effort}|${secretsHash}|${readOnlyMcpServers.join(',')}`;
 }
 
 function spawnClaudeProcess(args: string[], cwd: string, env: Record<string, string>) {
@@ -558,6 +612,7 @@ function runClaudeProcess(
   message: string,
   regKey: string,
   env: Record<string, string>,
+  secretValues?: readonly string[],
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
     const proc = spawnClaudeProcess(args, cwd, env);
@@ -610,7 +665,7 @@ function runClaudeProcess(
       clearTimeout(absoluteTimer);
 
       if (code !== 0) {
-        reject(new Error(`Claude exited with code ${code}: ${stderr.trim()}`));
+        reject(new Error(`Claude exited with code ${code}: ${scrub(stderr.trim(), secretValues)}`));
         return;
       }
 
@@ -655,6 +710,7 @@ function runClaudeStreamingProcess(
   env?: Record<string, string>,
   onProcessSpawned?: (kill: () => void) => void,
   onReasoningDelta?: (text: string) => void,
+  secretValues?: readonly string[],
 ): Promise<ClaudeResult> {
   return new Promise((resolve, reject) => {
     const proc = spawnClaudeProcess(args, cwd, env ?? {});
@@ -753,7 +809,7 @@ function runClaudeStreamingProcess(
     proc.stderr.on('data', (data: Buffer) => {
       const chunk = data.toString();
       stderr += chunk;
-      console.error(`[claude-stderr] ${chunk.trimEnd()}`);
+      console.error(`[claude-stderr] ${scrub(chunk.trimEnd(), secretValues)}`);
       resetTimer();
     });
 
@@ -777,7 +833,7 @@ function runClaudeStreamingProcess(
       }
 
       if (code !== 0) {
-        reject(new Error(`Claude exited with code ${code}: ${stderr.trim()}`));
+        reject(new Error(`Claude exited with code ${code}: ${scrub(stderr.trim(), secretValues)}`));
         return;
       }
 
@@ -785,7 +841,7 @@ function runClaudeStreamingProcess(
         const details: string[] = [];
         if (stderr) details.push(`stderr: ${stderr.trimEnd().slice(-500)}`);
         if (rawStdout) details.push(`stdout(last 500): ${rawStdout.trimEnd().slice(-500)}`);
-        const detail = details.length > 0 ? ` ${details.join(' | ')}` : '';
+        const detail = details.length > 0 ? ` ${scrub(details.join(' | '), secretValues)}` : '';
         console.error(`[claude] Process produced no response (exit 0).${detail}`);
         reject(new Error('Claude process produced no response.'));
         return;
@@ -852,7 +908,13 @@ function buildClaudeArgs(
 
   const configPath = getConfigPath();
   const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
-  const sessionId = deriveSessionId(channelId, cwd, threadTs);
+  // Session IDs derive from the LOGICAL repo folder, not the worktree path —
+  // otherwise every pre-worktree session ID would change (decision #9 caveat).
+  const sessionId = deriveSessionId(
+    channelId,
+    options.sessionFolder ? resolve(options.sessionFolder) : cwd,
+    threadTs,
+  );
 
   const { jsonl: sessionFile } = sessionArtifactPaths(sessionId, cwd);
   const resuming = existsSync(sessionFile);
@@ -873,10 +935,17 @@ function buildClaudeArgs(
   // --mcp-config is variadic (<configs...>) — it greedily consumes every
   // following non-flag arg. Insert it before another flag so the variadic
   // terminates and the trailing positional user message isn't slurped in.
-  const mcpConfigPath = getMcpConfigPath(options.userPermissions, process.cwd());
+  const mcpConfigPath = getMcpConfigPath(
+    options.credentials?.readOnlyMcpServers ?? [],
+    process.cwd(),
+  );
   if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath);
   }
+  // Only the gateway-provided MCP config may load — without this the subprocess
+  // also picks up the operator's ~/.claude.json servers (and any personal
+  // credentials embedded in them), bypassing per-user credential resolution.
+  args.push('--strict-mcp-config');
   args.push('--dangerously-skip-permissions');
 
   args.push(buildMessageWithFiles(message, options.filePaths));
@@ -915,6 +984,7 @@ function buildSpawnEnv(options: ClaudeOptions): Record<string, string> {
     channelId: options.channelId,
     userPermissions: options.userPermissions,
     extraEnv: buildInjectedEnv(options),
+    userCredEnv: options.credentials?.env,
   });
 }
 
@@ -927,6 +997,8 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
     `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} session ${sessionId} [${permissionKeyStr(options.userPermissions) || 'read-only'}]`,
   );
 
+  const secretValues = options.credentials?.secretValues;
+
   try {
     return await runClaudeProcess(
       args,
@@ -937,6 +1009,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
       options.message,
       regKey,
       spawnEnv,
+      secretValues,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -954,6 +1027,7 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
         options.message,
         regKey,
         spawnEnv,
+        secretValues,
       );
     }
     throw err;
@@ -969,6 +1043,8 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
     `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} streaming session ${sessionId} [${permissionKeyStr(options.userPermissions) || 'read-only'}]`,
   );
 
+  const secretValues = options.credentials?.secretValues;
+
   try {
     return await runClaudeStreamingProcess(
       args,
@@ -983,6 +1059,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
       spawnEnv,
       options.onProcessSpawned,
       options.onReasoningDelta,
+      secretValues,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1004,6 +1081,7 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
         spawnEnv,
         options.onProcessSpawned,
         options.onReasoningDelta,
+        secretValues,
       );
     }
     throw err;
@@ -1023,7 +1101,12 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
 
   const configPath = getConfigPath();
   const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
-  const sessionId = deriveSessionId(channelId, cwd, threadTs);
+  // See buildClaudeArgs: session IDs stay keyed to the logical repo folder
+  const sessionId = deriveSessionId(
+    channelId,
+    options.sessionFolder ? resolve(options.sessionFolder) : cwd,
+    threadTs,
+  );
 
   const { jsonl: sessionFile } = sessionArtifactPaths(sessionId, cwd);
   const resuming = existsSync(sessionFile);
@@ -1047,10 +1130,16 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
 
   // See note on the batch path: --mcp-config is variadic, so put another flag
   // after it to terminate the variadic.
-  const mcpConfigPath = getMcpConfigPath(options.userPermissions, process.cwd());
+  const mcpConfigPath = getMcpConfigPath(
+    options.credentials?.readOnlyMcpServers ?? [],
+    process.cwd(),
+  );
   if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath);
   }
+  // See note on the batch path: strict mode keeps the operator's ~/.claude.json
+  // MCP servers (and embedded credentials) out of gateway-spawned sessions.
+  args.push('--strict-mcp-config');
   args.push('--dangerously-skip-permissions');
 
   return { args, sessionId, cwd, resuming };
@@ -1080,6 +1169,7 @@ function createPersistentProcess(
     channelId: options.channelId,
     userPermissions: options.userPermissions,
     extraEnv: injected,
+    userCredEnv: options.credentials?.env,
   });
 
   const proc = spawn('claude', args, {
@@ -1095,6 +1185,8 @@ function createPersistentProcess(
     options.channelId,
     options.model,
     options.effort ?? '',
+    options.credentials?.secretsHash ?? '',
+    options.credentials?.readOnlyMcpServers ?? [],
   );
 
   const entry: PersistentProcessEntry = {
@@ -1137,7 +1229,8 @@ function createPersistentProcess(
 
   proc.stderr.on('data', (data: Buffer) => {
     resetIdleTimer();
-    const text = data.toString();
+    // Scrub secret values BEFORE buffering/logging — the buffer feeds error replies
+    const text = scrub(data.toString(), options.credentials?.secretValues);
     // Keep the tail so the close handler can include the current turn's stderr
     entry.stderrBuf = (entry.stderrBuf + text).slice(-2048);
     console.error(`[${options.channelId}] Persistent stderr: ${text.trim()}`);
@@ -1312,6 +1405,8 @@ export async function runClaudePersistentStreaming(
     channelId,
     options.model,
     options.effort ?? '',
+    options.credentials?.secretsHash ?? '',
+    options.credentials?.readOnlyMcpServers ?? [],
   );
   if (entry && !entry.proc.killed && entry.identityKey !== incomingIdentityKey) {
     console.log(`[${channelId}] Process identity changed — respawning persistent process`);
@@ -1347,6 +1442,19 @@ export async function runClaudePersistentStreaming(
   return new Promise((resolve, reject) => {
     if (!entry) {
       reject(new Error('Persistent process entry missing'));
+      return;
+    }
+
+    // Single-slot turn guard: the engine serializes per channel (channelBusy),
+    // so an occupied slot means that serialization was defeated somewhere.
+    // Overwriting would orphan the running turn's promise forever (frozen
+    // stream, leaked process slot) — surface the bug loudly instead.
+    if (entry.currentTurn) {
+      reject(
+        new Error(
+          `A turn is already in progress for ${regKey} — refusing to overwrite it. This indicates a serialization bug.`,
+        ),
+      );
       return;
     }
 

@@ -82,20 +82,21 @@ describe('resolvedChannelConfig', () => {
     expect(resolvedChannelConfig(config, 'C004')?.responseMode).toBe('stream-native');
   });
 
-  it('preserves allowedUsers in resolved config', () => {
+  it('preserves members in resolved config', () => {
     const config: Config = {
       channels: {
-        C005: { name: 'restricted', folder: '/r', allowedUsers: ['U111', 'U222'] },
+        C005: { name: 'restricted', folder: '/r', members: ['alice', 'bob'] },
       },
       defaults: { model: 'opus', systemPrompt: '', timeoutMs: 300_000, responseMode: 'batch' },
+      users: { alice: {}, bob: {} },
     };
     const result = resolvedChannelConfig(config, 'C005');
-    expect(result?.allowedUsers).toEqual(['U111', 'U222']);
+    expect(result?.members).toEqual(['alice', 'bob']);
   });
 
-  it('returns undefined allowedUsers when not set', () => {
+  it('returns undefined members when not set', () => {
     const result = resolvedChannelConfig(baseConfig, 'C001');
-    expect(result?.allowedUsers).toBeUndefined();
+    expect(result?.members).toBeUndefined();
   });
 });
 
@@ -275,14 +276,14 @@ defaults:
     expect(() => loadConfig()).not.toThrow();
   });
 
-  it('rejects unknown permissions in allowedUsers', () => {
+  it('rejects the removed allowedUsers shape with a migration hint', () => {
     const yaml = `
 channels:
   C001:
     name: test
     folder: /test
     allowedUsers:
-      - "U001": [git, jireWrite]
+      - "U001": [git]
 permissions:
   git:
     env: []
@@ -293,18 +294,19 @@ defaults:
   responseMode: batch
 `;
     writeFileSync(join(tmpDir, 'config.yaml'), yaml);
-    expect(() => loadConfig()).toThrow('unknown permission "jireWrite"');
+    expect(() => loadConfig()).toThrow('"allowedUsers", which has been removed');
   });
 
-  it('accepts valid permissions in allowedUsers', () => {
+  it('accepts valid permissions via users + members', () => {
     const yaml = `
 channels:
   C001:
     name: test
     folder: /test
-    allowedUsers:
-      - "U001": [git, jiraWrite]
-      - "U002"
+    members: [alice, bob]
+users:
+  alice: { permissions: [git, jiraWrite] }
+  bob: {}
 permissions:
   git:
     env: []
@@ -320,14 +322,14 @@ defaults:
     expect(() => loadConfig()).not.toThrow();
   });
 
-  it('accepts custom permissions in allowedUsers', () => {
+  it('accepts custom permissions in the users registry', () => {
     const yaml = `
 channels:
   C001:
     name: test
     folder: /test
-    allowedUsers:
-      - "U001": [git, langfuse]
+users:
+  alice: { permissions: [git, langfuse] }
 permissions:
   git:
     env: []
@@ -349,8 +351,8 @@ channels:
   C001:
     name: test
     folder: /test
-    allowedUsers:
-      - "U001": [git, undefined_perm]
+users:
+  alice: { permissions: [git, undefined_perm] }
 permissions:
   git:
     env: []
@@ -362,6 +364,136 @@ defaults:
 `;
     writeFileSync(join(tmpDir, 'config.yaml'), yaml);
     expect(() => loadConfig()).toThrow('unknown permission "undefined_perm"');
+  });
+
+  it('injects the built-in claude credential on load', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    const config = loadConfig();
+    expect(config.userCredentials?.claude?.fields).toEqual({
+      CLAUDE_CODE_OAUTH_TOKEN: { label: 'Claude Code OAuth token' },
+    });
+  });
+
+  it('accepts userCredentials fields with explicit defaultFromEnv and exposeAs', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+userCredentials:
+  jira:
+    label: Jira
+    exposeAs: env
+    fields:
+      JIRA_USERNAME:
+        label: Jira email
+        secret: false
+        defaultFromEnv: SHARED_JIRA_USERNAME
+      JIRA_API_TOKEN:
+        defaultFromEnv: SHARED_JIRA_API_TOKEN
+  github:
+    label: GitHub
+    exposeAs: git-credential-helper
+    fields:
+      GITHUB_TOKEN:
+        defaultFromEnv: SHARED_GITHUB_TOKEN
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    expect(() => loadConfig()).not.toThrow();
+  });
+
+  it('rejects legacy userCredentials env/inject/fallback/requiresPermission keys', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+userCredentials:
+  jira:
+    label: Jira
+    env: [JIRA_USERNAME, JIRA_API_TOKEN]
+    fallback: shared
+    inject: env
+    requiresPermission: jiraWrite
+permissions:
+  jiraWrite:
+    env: []
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    expect(() => loadConfig()).toThrow('userCredentials.jira.env is no longer supported');
+  });
+
+  it('rejects a user-defined claude credential (built-in)', () => {
+    const yaml = `
+channels:
+  C001:
+    name: test
+    folder: /test
+userCredentials:
+  claude:
+    label: "Claude token"
+    env: [CLAUDE_CODE_OAUTH_TOKEN]
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), yaml);
+    expect(() => loadConfig()).toThrow('userCredentials.claude is built-in');
+  });
+
+  it('accepts a valid mcpReadOnlyServers list and rejects non-string entries', () => {
+    const base = (mcpReadOnlyServers: string) => `
+channels:
+  C001:
+    name: test
+    folder: /test
+userCredentials:
+  jira:
+    label: Jira
+    fields:
+      JIRA_API_TOKEN: {}
+    mcpReadOnlyServers: ${mcpReadOnlyServers}
+defaults:
+  model: opus
+  systemPrompt: test
+  timeoutMs: 300000
+  responseMode: batch
+`;
+    writeFileSync(join(tmpDir, 'config.yaml'), base('[mcp-atlassian]'));
+    expect(() => loadConfig()).not.toThrow();
+
+    writeFileSync(join(tmpDir, 'config.yaml'), base('"mcp-atlassian"'));
+    expect(() => loadConfig()).toThrow(
+      'userCredentials.jira.mcpReadOnlyServers must be a list of MCP server names',
+    );
+
+    writeFileSync(join(tmpDir, 'config.yaml'), base('[""]'));
+    expect(() => loadConfig()).toThrow(
+      'userCredentials.jira.mcpReadOnlyServers must be a list of MCP server names',
+    );
   });
 });
 

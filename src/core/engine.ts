@@ -2,15 +2,21 @@ import {
   loadConfig,
   resolvedChannelConfig,
   resolvedDmConfig,
-  resolveUserPermissions,
+  resolveUser,
   resolvedTempDir,
+  botOwnerIds,
   isEffortLevel,
   type ResolvedChannelConfig,
   type UserPermissions,
 } from '../config.js';
 import { runClaude, runClaudeStreaming, runClaudePersistentStreaming } from '../claude.js';
+import { resolveUserCredentials, type ResolvedCredentials } from '../credentials.js';
+import { credsDmInstruction } from '../creds-hint.js';
+import { buildCredentialStatus } from '../prompt.js';
+import { scrubSecrets } from '../secrets.js';
+import { audit } from '../audit.js';
+import { buildReadonlySubmodulePrompt, ensureThreadWorktree } from '../worktrees.js';
 import { dequeue, getPendingForChannel, type QueuedMessage } from '../queue.js';
-import { appendAccessRestrictions } from '../prompt.js';
 import {
   createRequestTempDir,
   cleanupRequestTempDir,
@@ -56,10 +62,13 @@ function releaseProcessSlot(): void {
 interface PermissionContext {
   config: import('../config.js').Config;
   userPermissions: UserPermissions;
+  /** Canonical user id (users: registry key when registered). */
   userId: string;
   userName?: string;
   channelName: string;
   scratchDir: string;
+  credentials: ResolvedCredentials;
+  isBotOwner: boolean;
 }
 
 export async function processQueuedMessage(
@@ -79,7 +88,7 @@ export async function processQueuedMessage(
   const resolvedCh = resolvedChannelConfig(config, queued.channelId);
   const channelConfig = resolvedCh
     ? resolvedCh
-    : queued.channelId.startsWith('D') && config.botOwner
+    : queued.channelId.startsWith('D') && botOwnerIds(config).length > 0
       ? resolvedDmConfig(config)
       : null;
   if (!channelConfig) {
@@ -87,18 +96,48 @@ export async function processQueuedMessage(
     return;
   }
 
-  // Resolve user permissions and prepare effective config
-  const permissions = resolveUserPermissions(config, queued.channelId, queued.userId);
+  // Resolve canonical user identity + permissions and prepare effective config
+  const user = resolveUser(config, queued.channelId, queued.userId);
+  const permissions = user.permissions;
+
+  // Resolve credentials (personal > explicit shared default > unset)
+  const credentials = resolveUserCredentials(config, user.userId);
+
+  // BYO Claude hard gate: when userCredentials.claude is configured, every
+  // user — bot owner included — must run on their own enrolled token. An
+  // unconfigured registry keeps today's behavior (owner's ~/.claude auth).
+  if (credentials.missingClaudeCred) {
+    audit({
+      event: 'spawn.denied',
+      userId: user.userId,
+      userName: user.name ?? queued.userName,
+      channelId: queued.channelId,
+      credNames: ['claude'],
+      detail: 'no personal Claude credential',
+    });
+    await responder
+      .warn(
+        `This server requires your own Claude credential — ${credsDmInstruction('connect it')}, then resend your message here.`,
+      )
+      .catch(() => {});
+    dequeue(queued.channelId, queued.ts);
+    return;
+  }
+
   const baseDir = resolvedTempDir(config);
   const scratchDir = ensureScratchDir(baseDir, queued.channelId);
-  const effectiveSystemPrompt = appendAccessRestrictions(
-    channelConfig.systemPrompt,
-    permissions,
-    scratchDir,
-  );
+
+  // Tell the agent which credentials this user is running on shared/absent
+  // tokens for, so it warns preemptively instead of attempting doomed writes.
+  // Slack senders get their mention token (consistent with the user directory
+  // block); voice senders fall back to the registry name / canonical id.
+  const userLabel = /^U[A-Z0-9]+$/.test(queued.userId)
+    ? `<@${queued.userId}>${user.name ? ` (${user.name})` : ''}`
+    : (user.name ?? user.userId);
   const effectiveConfig: ResolvedChannelConfig = {
     ...channelConfig,
-    systemPrompt: effectiveSystemPrompt,
+    systemPrompt:
+      channelConfig.systemPrompt + buildCredentialStatus(credentials.statuses, userLabel),
   };
 
   processingMessages.add(processingKey(queued.channelId, queued.ts));
@@ -142,30 +181,68 @@ export async function processQueuedMessage(
 
   const tempDir = createRequestTempDir(baseDir, queued.channelId);
 
-  // Permission context passed through to Claude spawn
+  // Permission context passed through to Claude spawn — keyed on the CANONICAL
+  // user id so the secret store, audit log, and process identity all agree
   const permCtx: PermissionContext = {
     config,
     userPermissions: permissions,
-    userId: queued.userId,
-    userName: queued.userName,
+    userId: user.userId,
+    userName: user.name ?? queued.userName,
     channelName: channelConfig.name,
     scratchDir,
+    credentials,
+    isBotOwner: user.isBotOwner,
   };
+
+  // Per-thread worktree (decision #9): repo-backed channels run each thread in
+  // its own worktree so concurrent threads don't collide and thread participants
+  // share files. Session IDs keep deriving from the logical repo folder.
+  let cwd = channelConfig.folder;
+  let sessionFolder: string | undefined;
+  let systemPrompt = effectiveConfig.systemPrompt;
+  const repoName = (channelConfig as { repo?: string }).repo;
+  const worktreesEnabled = (channelConfig as { threadWorktrees?: boolean }).threadWorktrees ?? true;
+  if (config.repos && repoName && queued.threadTs && worktreesEnabled) {
+    const worktree = ensureThreadWorktree(repoName, queued.channelId, queued.threadTs, {
+      baseBranch: config.repos[repoName]?.branch,
+    });
+    if (worktree) {
+      cwd = worktree;
+      sessionFolder = channelConfig.folder;
+      systemPrompt += buildReadonlySubmodulePrompt(worktree);
+    }
+  }
+
+  // Audit which credential names (never values) back this spawn
+  if (credentials.personalCredNames.length > 0 || credentials.sharedCredNames.length > 0) {
+    audit({
+      event: 'spawn',
+      userId: user.userId,
+      userName: permCtx.userName,
+      channelId: queued.channelId,
+      credNames: [
+        ...credentials.personalCredNames,
+        ...credentials.sharedCredNames.map((n) => `${n}(shared)`),
+      ],
+    });
+  }
 
   // Hoisted so the finally block can finalize the stream even if the runner
   // throws — otherwise the native keepalive timer would leak and keep calling Slack.
   let sr: IStreamingResponder | null = null;
   let streamFinished = false;
+  let streamErrorMsg: string | undefined;
 
   try {
     if (mode === 'batch') {
       // Batch mode — run Claude, get full response, send at once
       const claudeOpts = {
         message: queued.text,
-        cwd: channelConfig.folder,
+        cwd,
+        sessionFolder,
         model,
         effort,
-        systemPrompt: effectiveConfig.systemPrompt,
+        systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
         threadTs: queued.threadTs,
@@ -193,10 +270,11 @@ export async function processQueuedMessage(
 
       const claudeStreamOpts = {
         message: queued.text,
-        cwd: channelConfig.folder,
+        cwd,
+        sessionFolder,
         model,
         effort,
-        systemPrompt: effectiveConfig.systemPrompt,
+        systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
         threadTs: queued.threadTs,
@@ -224,7 +302,9 @@ export async function processQueuedMessage(
       streamFinished = true;
 
       const finalText = result.response || streamer.getFullText();
-      await responder.onStreamComplete(finalText, streamer);
+      await responder.onStreamComplete(finalText, streamer, {
+        authoritative: result.response.trim().length > 0,
+      });
       await responder.onComplete();
 
       if (result.cost !== null) {
@@ -232,7 +312,12 @@ export async function processQueuedMessage(
       }
     }
   } catch (err) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
+    // Scrub secret values before the error reaches logs or the channel
+    const errorMsg = scrubSecrets(
+      err instanceof Error ? err.message : String(err),
+      credentials.secretValues,
+    );
+    streamErrorMsg = errorMsg;
     console.error(`[${channelConfig.name}] Error:`, errorMsg);
     try {
       await responder.onError(errorMsg);
@@ -240,11 +325,13 @@ export async function processQueuedMessage(
       console.error('[engine] onError threw:', e);
     }
   } finally {
-    // If the runner threw before finish() ran, finalize the stream here so its
-    // keepalive timer is cleared and the open stream is stopped (best effort).
+    // If the runner threw before finish() ran, finalize the stream here with the
+    // failure outcome so the live UI is closed out (open task cards flip to
+    // error, the stream is stopped, keepalive timers are cleared) — the work log
+    // must never be left dangling/expanded.
     if (sr && !streamFinished) {
       try {
-        await sr.finish();
+        await sr.finish({ ok: false, errorMessage: streamErrorMsg });
       } catch (e) {
         console.error('[engine] stream finalize during cleanup failed:', e);
       }

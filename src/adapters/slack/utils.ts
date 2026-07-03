@@ -1,19 +1,4 @@
 import type { WebClient } from '@slack/web-api';
-import { extractAllowedUserIds, type AllowedUserEntry } from '../../config.js';
-
-/**
- * Check if a user is allowed to use a channel.
- * Returns true if allowedUsers is not set or empty (open to everyone),
- * or if the user's Slack ID is in the list.
- * Supports both plain string entries and permission-mapped entries.
- */
-export function isUserAllowed(
-  allowedUsers: AllowedUserEntry[] | undefined,
-  userId: string,
-): boolean {
-  if (!allowedUsers || allowedUsers.length === 0) return true;
-  return extractAllowedUserIds(allowedUsers).includes(userId);
-}
 
 /**
  * Post a warning to a Slack thread. Swallows errors — safe to call without disrupting the caller.
