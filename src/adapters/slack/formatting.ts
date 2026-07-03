@@ -131,11 +131,22 @@ const STREAM_KEEPALIVE_TOKEN = '\u200b';
  */
 const WORK_LOG_TITLE = 'Work log';
 
-/** Title for the details message text fallback / legacy attachment (mrkdwn-rendered). */
-const DETAILS_TITLE = '\ud83d\udccb Details';
+/**
+ * Inline replacement for the `-- DETAILS --` marker line: a divider + bold
+ * header, streamed in place so the details section streams live instead of
+ * arriving as a folded block at stop. Standard Markdown \u2014 the native stream
+ * renders it directly; non-stream paths run it through markdownToSlackMrkdwn.
+ */
+const DETAILS_INLINE_HEADER = '\n---\n\n**\ud83d\udccb Details**\n\n';
 
-/** Title of the collapsible details container \u2014 plain text, no emoji (see above). */
-const DETAILS_CONTAINER_TITLE = 'Details';
+/**
+ * How much of a text run is held back before it is presumed to be the final
+ * answer and released to the message body. Runs interrupted by a tool or
+ * reasoning event while still under this cap were narration ("Let me check
+ * the files\u2026") and are demoted to a work-log card instead. Narration runs are
+ * near-always short; answers cross this within a couple of seconds.
+ */
+const NARRATION_HOLDBACK_MAX_CHARS = 500;
 
 /**
  * Slack caps `task_update` title/details/output at 256 chars per update.
@@ -155,8 +166,8 @@ export {
   STREAM_NATIVE_KEEPALIVE_MS,
   STREAM_KEEPALIVE_TOKEN,
   WORK_LOG_TITLE,
-  DETAILS_TITLE,
-  DETAILS_CONTAINER_TITLE,
+  DETAILS_INLINE_HEADER,
+  NARRATION_HOLDBACK_MAX_CHARS,
   TASK_TITLE_MAX,
   TASK_DETAILS_MAX,
   THINKING_TASK_TITLE,
@@ -206,6 +217,18 @@ export function splitDetails(text: string): { body: string; details: string | nu
   if (!details) return { body, details: null };
   if (!body) return { body: details, details: null };
   return { body, details };
+}
+
+/**
+ * Render the details fold inline: the first {@link DETAILS_MARKER} outside a
+ * code fence becomes {@link DETAILS_INLINE_HEADER}. Same edge-case semantics as
+ * {@link splitDetails}: an empty details section drops the marker entirely, and
+ * a marker with nothing before it drops the header (details become the body).
+ */
+export function inlineDetailsMarker(text: string): string {
+  const { body, details } = splitDetails(text);
+  if (details === null) return body;
+  return body + DETAILS_INLINE_HEADER + details;
 }
 
 const TOOL_DISPLAY_VERBS: Record<string, string> = {

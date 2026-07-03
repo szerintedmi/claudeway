@@ -1,6 +1,5 @@
 import type { WebClient } from '@slack/web-api';
 import type { AnyChunk, MarkdownTextChunk, TaskUpdateChunk } from '@slack/types';
-import type { Block, KnownBlock } from '@slack/types';
 import {
   STREAM_NATIVE_FLUSH_INTERVAL_MS,
   STREAM_NATIVE_KEEPALIVE_MS,
@@ -129,12 +128,24 @@ export class SlackTurnStream {
     this.ensureStarted();
   }
 
-  /** Queue a task card update; coalesces adjacent same-id updates (last wins). */
+  /**
+   * Queue a task card update; coalesces adjacent same-id updates. `title` and
+   * `status` replace server-side (latest wins) but `details`/`output` APPEND
+   * (spike-verified 2026-07-03), so those deltas are concatenated — replacing
+   * them would silently drop appended text.
+   */
   appendTask(update: TaskUpdateChunk): void {
     if (this.streamBroken || this.finished) return;
     const last = this.pending[this.pending.length - 1];
     if (last?.type === 'task_update' && (last as TaskUpdateChunk).id === update.id) {
-      this.pending[this.pending.length - 1] = update;
+      const prev = last as TaskUpdateChunk;
+      const details = (prev.details ?? '') + (update.details ?? '');
+      const output = (prev.output ?? '') + (update.output ?? '');
+      this.pending[this.pending.length - 1] = {
+        ...update,
+        ...(details ? { details } : {}),
+        ...(output ? { output } : {}),
+      };
     } else {
       this.pending.push(update);
     }
@@ -174,12 +185,17 @@ export class SlackTurnStream {
   }
 
   /**
-   * Invisible keepalive chunk: prefer an idempotent re-send of the last
-   * task_update (renders as a no-op); before any task exists, fall back to a
-   * zero-width space markdown chunk.
+   * Invisible keepalive chunk: re-send the last task_update WITHOUT its
+   * details/output — title and status replace idempotently, but details/output
+   * append on every send (spike-verified), so re-sending them would duplicate
+   * text. Before any task exists, fall back to a zero-width space markdown
+   * chunk.
    */
   private keepaliveChunks(): AnyChunk[] {
-    if (this.lastTaskUpdate) return [{ ...this.lastTaskUpdate }];
+    if (this.lastTaskUpdate) {
+      const { id, title, status } = this.lastTaskUpdate;
+      return [{ type: 'task_update', id, title, status }];
+    }
     return [{ type: 'markdown_text', text: STREAM_KEEPALIVE_TOKEN }];
   }
 
@@ -251,11 +267,10 @@ export class SlackTurnStream {
 
   /**
    * Finalize the stream: stopStream with any queued tail plus the given closing
-   * chunks and optional final blocks (Slack appends them to the message end).
-   * Retries transient failures so a single 429/network blip can't leave the
-   * message expanded/live. Idempotent.
+   * chunks. Retries transient failures so a single 429/network blip can't leave
+   * the message expanded/live. Idempotent.
    */
-  async stop(opts: { chunks?: AnyChunk[]; blocks?: (KnownBlock | Block)[] } = {}): Promise<void> {
+  async stop(opts: { chunks?: AnyChunk[] } = {}): Promise<void> {
     if (this.finished) return;
     this.finished = true;
     this.stopFlushLoop();
@@ -269,7 +284,6 @@ export class SlackTurnStream {
           channel: this.channel,
           ts: this.streamTs,
           ...(tail.length > 0 ? { chunks: tail } : {}),
-          ...(opts.blocks ? { blocks: opts.blocks } : {}),
         });
         return;
       } catch (err) {
@@ -278,15 +292,6 @@ export class SlackTurnStream {
           this.streamBroken = true;
           console.error('[native-stream] stream already finalized at stop:', code);
           return;
-        }
-        // Final blocks rejected (e.g. container block not accepted) — retry once
-        // without blocks so the stream still finalizes; the caller detects the
-        // missing delivery via `finalBlocksDelivered` and falls back.
-        if ((code === 'invalid_blocks' || code === 'invalid_arguments') && opts.blocks) {
-          console.error('[native-stream] final blocks rejected, stopping without them:', code);
-          opts = { ...opts, blocks: undefined };
-          this.finalBlocksRejected = true;
-          continue;
         }
         if (attempt >= FINALIZE_RETRY_DELAYS_MS.length) {
           this.streamBroken = true;
@@ -302,8 +307,6 @@ export class SlackTurnStream {
     }
   }
 
-  private finalBlocksRejected = false;
-
   get ts(): string | null {
     return this.streamTs;
   }
@@ -311,10 +314,5 @@ export class SlackTurnStream {
   /** True only if the stream message exists and was not finalized early by Slack. */
   get deliveredOk(): boolean {
     return this.streamTs !== null && !this.streamBroken;
-  }
-
-  /** True if `stop` had to drop the final blocks to get the stream finalized. */
-  get droppedFinalBlocks(): boolean {
-    return this.finalBlocksRejected;
   }
 }

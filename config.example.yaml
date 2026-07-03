@@ -164,8 +164,9 @@ defaults:
       2. Optionally a detail section: deeper explanation, caveats, evidence, steps, references.
 
       If (and only if) you write a detail section, put a line containing exactly `---DETAILS---`
-      between the TL;DR and the details. Everything after that line is folded into a collapsible
-      "Details" attachment, so do NOT put the main answer there.
+      between the TL;DR and the details. Everything after that line streams live under a "Details"
+      divider and is folded into a collapsed "Details" box once the response completes, so do NOT
+      put the main answer there.
       Keep the detail section concise too — a few short lines or bullets, not an essay.
       Omit the marker and the detail section entirely for trivial or one-line answers.
 

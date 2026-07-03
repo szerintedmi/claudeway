@@ -32,7 +32,7 @@
 | `timeoutMs` | Idle timeout in ms (resets on activity) | from defaults |
 | `processMode` / `responseMode` / `triggerMode` | See below | from defaults |
 | `threadWorktrees` | Run each thread in its own git worktree (repo-backed channels) | `true` |
-| `collapseWorkingNotes` | `stream-native` only: live work log, collapsed on completion | `true` |
+| `collapseWorkingNotes` | `stream-native` only: live work log of step cards (narration titles, tool/subagent activity as details lines), collapsed on completion; `false` drops reasoning and streams narration into the answer body | `true` |
 
 Defaults-only fields: `tempDir` (`.claudeway-tmp`), `tempMaxAgeDays` (`90`, `0` disables), `threadWorktreeMaxAgeDays` (`14`, `0` disables).
 
@@ -58,7 +58,7 @@ Defaults-only fields: `tempDir` (`.claudeway-tmp`), `tempMaxAgeDays` (`90`, `0` 
 |------|-------------|
 | `batch` | Wait for the full response, then post. Default, most reliable. |
 | `stream-update` | Post immediately, update every ~500ms via `chat.update`. Recommended streaming mode. |
-| `stream-native` | Slack's native streaming API with real Markdown rendering. Shows live "Working notes" (reasoning + tool steps) that collapse into an expandable attachment when done (`collapseWorkingNotes: false` disables). **Requires Enterprise Grid** — won't work on standard workspaces. |
+| `stream-native` | Slack's native streaming API with real Markdown rendering. Shows a live "Work log" of step cards (one per narrated step, tool activity as its rolling details line) that collapses when done (`collapseWorkingNotes: false` disables); the optional `---DETAILS---` section streams live and folds into a collapsed "Details" box once the turn completes. **Requires Enterprise Grid** — won't work on standard workspaces. |
 
 If a streamed response exceeds 12KB, it falls back to a file upload.
 

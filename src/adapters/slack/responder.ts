@@ -9,20 +9,19 @@ import type {
 import type { ResponseMode } from '../../config.js';
 import {
   markdownToSlackMrkdwn,
-  splitMessage,
   splitDetails,
   formatToolStatus,
   MAX_MESSAGE_LENGTH,
   FILE_THRESHOLD,
+  NARRATION_HOLDBACK_MAX_CHARS,
   STREAM_UPDATE_INTERVAL_MS,
   STREAMING_INDICATOR,
   ANSWER_STREAMING_REACTION,
-  DETAILS_CONTAINER_TITLE,
   WORK_LOG_TITLE,
 } from './formatting.js';
 import { SlackTurnStream } from './stream.js';
-import { TaskTracker, DetailsGate, buildDetailsContainer } from './thinking-steps.js';
-import { deliverText, postDetailsMessage } from './delivery.js';
+import { TaskTracker, DetailsGate } from './thinking-steps.js';
+import { deliverText } from './delivery.js';
 import { safeReact, warnInThread } from './utils.js';
 
 /** Map file extensions to Slack snippet_type values for inline preview. */
@@ -201,11 +200,14 @@ class StreamingResponder implements IStreamingResponder {
  * - tool events and (when enabled) reasoning bursts become live `task_update`
  *   cards, which Slack renders expandable while streaming and collapsed by
  *   default once done — the work log needs no post-hoc collapsing;
- * - answer/narration text streams as `markdown_text` chunks, interleaved with
- *   the cards in arrival order;
- * - a {@link DetailsGate} keeps the `-- DETAILS --` marker and everything after
- *   it off the wire; the folded section is delivered at stop as a collapsed
- *   `container` block inside the same message.
+ * - answer-role text is buffered per run and classified: a run interrupted by
+ *   a tool/reasoning event was narration ("Let me check the files…") and is
+ *   demoted to a completed work-log card; a run that outgrows the holdback
+ *   cap (or survives to the end of the turn) is the answer and streams to the
+ *   body as `markdown_text` chunks;
+ * - a {@link DetailsGate} rewrites the `-- DETAILS --` marker line into an
+ *   inline header, so the details section streams live inside the same
+ *   message instead of arriving as a folded block at stop.
  *
  * The stream opens eagerly with a "Thinking" card, which doubles as the
  * instant-feedback placeholder. `finish` is crash-proof: on a failed turn the
@@ -227,9 +229,11 @@ class NativeStreamingResponder implements IStreamingResponder {
   private fullText = '';
   /** Raw text since the last tool/reasoning boundary — the presumptive answer. */
   private lastTextRun = '';
+  /** Unreleased text of the current run (narration until proven otherwise). */
+  private runBuffer = '';
+  /** True once the current run was released to the body and streams live. */
+  private runReleased = false;
   private finished = false;
-  private details: string | null = null;
-  private detailsInMessage = false;
 
   /** ts the streaming reaction was placed on, if any. */
   private reactionTs: string | null = null;
@@ -264,9 +268,7 @@ class NativeStreamingResponder implements IStreamingResponder {
 
   onReasoningDelta(text: string): void {
     if (this.finished || text.length === 0) return;
-    // Any answer text streamed before this point was narration — it stays in
-    // the body (correct in context); only the boundary bookkeeping resets.
-    this.lastTextRun = '';
+    this.demoteBufferedRun();
     if (!this.reasoningCards) return;
     const chunk = this.tracker.onReasoningDelta(text);
     if (chunk) this.stream.appendTask(chunk);
@@ -276,18 +278,59 @@ class NativeStreamingResponder implements IStreamingResponder {
     if (this.finished || text.length === 0) return;
     this.fullText += text;
     this.lastTextRun += text;
-    const boundary = this.tracker.boundary();
-    if (boundary) this.stream.appendTask(boundary);
-    const visible = this.gate.push(text);
-    if (visible) this.stream.appendMarkdown(visible);
+    if (!this.reasoningCards) {
+      // Classification off: text runs stream straight to the body.
+      const boundary = this.tracker.boundary();
+      if (boundary) this.stream.appendTask(boundary);
+      this.emitVisible(text);
+      return;
+    }
+    if (this.runReleased) {
+      this.emitVisible(text);
+      return;
+    }
+    this.runBuffer += text;
+    if (this.runBuffer.length > NARRATION_HOLDBACK_MAX_CHARS) this.releaseRun();
   }
 
   onToolEvent(event: ToolEventPayload): void {
     if (this.finished) return;
-    this.lastTextRun = '';
+    this.demoteBufferedRun();
     for (const chunk of this.tracker.onToolEvent(event)) {
       this.stream.appendTask(chunk);
     }
+  }
+
+  private emitVisible(text: string): void {
+    const visible = this.gate.push(text);
+    if (visible) this.stream.appendMarkdown(visible);
+  }
+
+  /** The buffered run outgrew the narration holdback — it is the answer. */
+  private releaseRun(): void {
+    for (const chunk of this.tracker.answerBoundary()) {
+      this.stream.appendTask(chunk);
+    }
+    this.emitVisible(this.runBuffer);
+    this.runBuffer = '';
+    this.runReleased = true;
+  }
+
+  /**
+   * A tool/reasoning event ends the current text run. A run still held in the
+   * buffer was narration, not the answer — surface it as a completed work-log
+   * card instead of body text. A run already released to the body stays there
+   * (streamed markdown can't be retracted; over-cap narration is rare).
+   */
+  private demoteBufferedRun(): void {
+    if (this.runBuffer.trim().length > 0) {
+      for (const chunk of this.tracker.narration(this.runBuffer)) {
+        this.stream.appendTask(chunk);
+      }
+    }
+    this.runBuffer = '';
+    this.runReleased = false;
+    this.lastTextRun = '';
   }
 
   /**
@@ -305,24 +348,18 @@ class NativeStreamingResponder implements IStreamingResponder {
     this.finished = true;
     const ok = outcome?.ok !== false;
 
-    // Resolve any text held back by the details gate.
-    const { tail, details } = this.gate.finish();
-    this.details = details;
-    const tailChunks = tail ? [{ type: 'markdown_text' as const, text: tail }] : [];
+    // A run still buffered at end of turn is the answer — release it now, then
+    // resolve any text held back by the details gate.
+    let tailText = '';
+    if (!this.runReleased && this.runBuffer.length > 0) {
+      tailText += this.gate.push(this.runBuffer);
+      this.runBuffer = '';
+    }
+    tailText += this.gate.finish().tail;
+    const tailChunks = tailText ? [{ type: 'markdown_text' as const, text: tailText }] : [];
     const closeChunks = this.tracker.closeAll(ok ? 'complete' : 'error', outcome?.errorMessage);
 
-    await this.stream.stop({
-      chunks: [...tailChunks, ...closeChunks],
-      ...(details
-        ? {
-            blocks: [
-              buildDetailsContainer(markdownToSlackMrkdwn(details), DETAILS_CONTAINER_TITLE),
-            ],
-          }
-        : {}),
-    });
-    this.detailsInMessage =
-      details !== null && this.stream.deliveredOk && !this.stream.droppedFinalBlocks;
+    await this.stream.stop({ chunks: [...tailChunks, ...closeChunks] });
 
     // Streaming done — drop the reaction from the (now-finalized) message. Await
     // the add first so a fast finish can't remove before the add lands.
@@ -345,16 +382,6 @@ class NativeStreamingResponder implements IStreamingResponder {
   /** Raw text of the final run (nothing streamed after it) — the live answer. */
   getLastTextRun(): string {
     return this.lastTextRun;
-  }
-
-  /** Folded details section resolved by the gate at finish, if any. */
-  getDetails(): string | null {
-    return this.details;
-  }
-
-  /** True when the details container was delivered inside the stream message. */
-  detailsDelivered(): boolean {
-    return this.detailsInMessage;
   }
 
   /** ts of the turn's stream message, if it ever opened. */
@@ -478,15 +505,18 @@ export class SlackChannelResponder implements ChannelResponder {
       // matches Claude's authoritative `result` text. A mismatch means the
       // answer got lost/garbled live (e.g. a late tool event followed the real
       // answer) — rebuild the message from `result` with the work-log cards on
-      // top. Oversized responses always take the file-upload path.
+      // top. A details section streamed inline (visible while live) and is
+      // folded into a collapsed container by the same rebuild once the turn
+      // ends. Oversized responses always take the file-upload path.
       const answerAlreadyLive =
         normalizeForCompare(stripDetailsForCompare(nsr.getLastTextRun())) ===
         normalizeForCompare(stripDetailsForCompare(finalText));
+      const hasDetails = splitDetails(finalText).details !== null;
       const needsRebuild =
         clean.length > 0 &&
         (finalText.length > FILE_THRESHOLD ||
           !nsr.streamDeliveredOk() ||
-          (!isFallback && !answerAlreadyLive));
+          (!isFallback && (!answerAlreadyLive || hasDetails)));
 
       if (needsRebuild) {
         await deliverText(this.client, {
@@ -499,41 +529,26 @@ export class SlackChannelResponder implements ChannelResponder {
         return;
       }
 
-      // Live message stands. Deliver the folded details separately if the
-      // stream couldn't carry the container at stop.
-      const details = nsr.getDetails() ?? splitDetails(finalText).details;
-      if (details && !nsr.detailsDelivered()) {
-        await postDetailsMessage(this.client, this.channelId, this.threadTs, details);
-      }
-      // An empty-answer turn keeps its message — it holds the work-log cards.
+      // Live message stands. An empty-answer turn keeps its message — it holds
+      // the work-log cards.
       return;
     }
 
     // stream-update mode: the streamed plain message is already correct unless
-    // the response is oversized or holds a details fold.
+    // the response is oversized or holds a details marker (folded by rewriting
+    // the bubble through the block layout).
     const sr = responder as StreamingResponder;
-    if (finalText.length > FILE_THRESHOLD || finalText.length > MAX_MESSAGE_LENGTH) {
+    if (
+      finalText.length > FILE_THRESHOLD ||
+      finalText.length > MAX_MESSAGE_LENGTH ||
+      splitDetails(finalText).details !== null
+    ) {
       await deliverText(this.client, {
         channel: this.channelId,
         threadTs: this.threadTs,
         text: finalText,
         replaceTs: sr.getMessageTs(),
       });
-      return;
-    }
-    const { body, details } = splitDetails(finalText);
-    if (details !== null) {
-      // Strip the fold out of the live bubble, then post the details message.
-      const msgTs = sr.getMessageTs();
-      const chunks = splitMessage(markdownToSlackMrkdwn(body));
-      if (msgTs && chunks.length > 0) {
-        try {
-          await this.client.chat.update({ channel: this.channelId, ts: msgTs, text: chunks[0] });
-        } catch {
-          // Best effort — worst case the marker stays visible in the bubble
-        }
-      }
-      await postDetailsMessage(this.client, this.channelId, this.threadTs, details);
     }
   }
 

@@ -4,17 +4,65 @@ import {
   markdownToSlackMrkdwn,
   splitMessage,
   splitDetails,
+  inlineDetailsMarker,
   FILE_THRESHOLD,
-  DETAILS_TITLE,
-  DETAILS_CONTAINER_TITLE,
 } from './formatting.js';
-import { buildDetailsContainer, DETAILS_MAX_CHARS } from './thinking-steps.js';
-
-/** Grey-blue accent for the folded "📋 Details" attachment (container fallback). */
-const DETAILS_ATTACHMENT_COLOR = '#6a8fb5';
 
 /** Section blocks cap text at 3000 chars; stay under when chunking a body into blocks. */
 const SECTION_MAX_CHARS = 2900;
+
+/** Total cap on folded details content (Slack hard-truncates around 8000). */
+export const DETAILS_MAX_CHARS = 7000;
+/** Container blocks accept at most 10 child blocks. */
+const CONTAINER_MAX_CHILDREN = 10;
+/** Title of the collapsed details container — plain text (emoji shortcodes render literally). */
+const DETAILS_CONTAINER_TITLE = 'Details';
+
+/**
+ * `container` block (GA 2026-06-29) — not yet in @slack/types 7.x, so declared
+ * locally. Spike-verified: the API requires `title` as a plain_text object
+ * (the docs' "string" is the text inside it).
+ */
+interface ContainerBlock {
+  type: 'container';
+  title: { type: 'plain_text'; text: string; emoji?: boolean };
+  is_collapsible?: boolean;
+  default_collapsed?: boolean;
+  /** Rendered width; default 'standard' looks boxed-in next to message text. */
+  width?: 'narrow' | 'standard' | 'wide' | 'full';
+  child_blocks: Block[];
+}
+
+/**
+ * Build the collapsed "Details" container for the folded detail section.
+ * Content is capped and chunked into section blocks under the container's
+ * child-block limit.
+ */
+export function buildDetailsContainer(details: string): ContainerBlock {
+  const capped =
+    details.length > DETAILS_MAX_CHARS
+      ? `${details.slice(0, DETAILS_MAX_CHARS)}\n\n_…(truncated)_`
+      : details;
+  const children: Block[] = [];
+  for (
+    let i = 0;
+    i < capped.length && children.length < CONTAINER_MAX_CHILDREN;
+    i += SECTION_MAX_CHARS
+  ) {
+    children.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: capped.slice(i, i + SECTION_MAX_CHARS) },
+    } as Block);
+  }
+  return {
+    type: 'container',
+    title: { type: 'plain_text', text: DETAILS_CONTAINER_TITLE, emoji: true },
+    is_collapsible: true,
+    default_collapsed: true,
+    width: 'full',
+    child_blocks: children,
+  };
+}
 
 /** Retry delays for final delivery calls (update/post) — a single transient
  * failure must not leave a turn undelivered or a live message unrewritten. */
@@ -31,72 +79,6 @@ async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
       console.error(`[slack] ${label} failed (attempt ${attempt + 1}), retrying:`, err);
       await sleep(RETRY_DELAYS_MS[attempt]);
     }
-  }
-}
-
-/**
- * Post the folded detail section as its own attachment message. Slack
- * auto-collapses attachment text behind "Show more…" past ~700 chars / 5 line
- * breaks. Fallback path for workspaces/clients where the `container` block is
- * rejected. Best effort — a failure here must never block the answer that was
- * already delivered.
- */
-export async function postDetailsAttachment(
-  client: WebClient,
-  channel: string,
-  threadTs: string,
-  details: string,
-): Promise<void> {
-  const trimmed = details.trim();
-  if (!trimmed) return;
-  const body =
-    trimmed.length > DETAILS_MAX_CHARS
-      ? `${trimmed.slice(0, DETAILS_MAX_CHARS)}\n\n_…(truncated)_`
-      : trimmed;
-  try {
-    await client.chat.postMessage({
-      channel,
-      thread_ts: threadTs,
-      text: DETAILS_TITLE,
-      attachments: [
-        {
-          color: DETAILS_ATTACHMENT_COLOR,
-          fallback: DETAILS_TITLE,
-          text: markdownToSlackMrkdwn(body),
-          mrkdwn_in: ['text' as const],
-        },
-      ],
-    });
-  } catch (err) {
-    console.error('[slack] Failed to post details attachment:', err);
-  }
-}
-
-/**
- * Deliver the folded detail section as a fresh message holding a collapsed
- * container block (a single "📋 Details" title row); falls back to the legacy
- * auto-folding attachment when the container is rejected.
- */
-export async function postDetailsMessage(
-  client: WebClient,
-  channel: string,
-  threadTs: string,
-  details: string,
-): Promise<void> {
-  const trimmed = details.trim();
-  if (!trimmed) return;
-  try {
-    await client.chat.postMessage({
-      channel,
-      thread_ts: threadTs,
-      text: DETAILS_TITLE,
-      blocks: [
-        buildDetailsContainer(markdownToSlackMrkdwn(trimmed), DETAILS_CONTAINER_TITLE),
-      ] as never,
-    });
-  } catch (err) {
-    console.error('[slack] Details container rejected, falling back to attachment:', err);
-    await postDetailsAttachment(client, channel, threadTs, trimmed);
   }
 }
 
@@ -133,10 +115,12 @@ export interface DeliverTextOptions {
 
 /**
  * Single delivery path for a complete response: oversized text becomes a file
- * upload, the fold marker splits out a Details section (container with
- * attachment fallback), the body replaces `replaceTs` in place when given
- * (posting overflow chunks as follow-ups) or posts fresh. Final calls retried
- * on transient failures.
+ * upload; a details section folds into a collapsed container below the body
+ * (block layout, with the work-log cards kept on top when rewriting); plain
+ * text otherwise, replacing `replaceTs` in place when given (posting overflow
+ * chunks as follow-ups) or posting fresh. When the block layout is rejected,
+ * falls back to plain text with the details rendered behind the inline header.
+ * Final calls retried on transient failures.
  */
 export async function deliverText(client: WebClient, opts: DeliverTextOptions): Promise<void> {
   const { channel, threadTs, text, replaceTs, replaceBlocksPrefix } = opts;
@@ -148,7 +132,7 @@ export async function deliverText(client: WebClient, opts: DeliverTextOptions): 
       client.files.uploadV2({
         channel_id: channel,
         thread_ts: threadTs,
-        content: text,
+        content: inlineDetailsMarker(text),
         filename: 'response.md',
         snippet_type: 'markdown',
         title: 'Response',
@@ -187,44 +171,60 @@ export async function deliverText(client: WebClient, opts: DeliverTextOptions): 
     return;
   }
 
+  // Block layout when there is a details section to fold and/or work-log cards
+  // to keep: cards on top, body as section blocks, details as a collapsed
+  // container at the bottom. Sections cap at 2900 chars, so the whole body
+  // fits in one message.
   const { body, details } = splitDetails(text);
-  const formatted = markdownToSlackMrkdwn(body);
+  const hasPrefix = replaceTs != null && (replaceBlocksPrefix?.length ?? 0) > 0;
+  if (body.trim().length > 0 && (details !== null || hasPrefix)) {
+    const bodyMrkdwn = markdownToSlackMrkdwn(body);
+    const blocks = [
+      ...(hasPrefix ? replaceBlocksPrefix! : []),
+      ...mrkdwnSections(bodyMrkdwn),
+      ...(details !== null ? [buildDetailsContainer(markdownToSlackMrkdwn(details))] : []),
+    ];
+    const notification = splitMessage(bodyMrkdwn)[0];
+    try {
+      if (replaceTs) {
+        await withRetry('final message rebuild', () =>
+          client.chat.update({
+            channel,
+            ts: replaceTs,
+            text: notification,
+            blocks: blocks as never,
+          }),
+        );
+      } else {
+        await withRetry('response post', () =>
+          client.chat.postMessage({
+            channel,
+            thread_ts: threadTs,
+            text: notification,
+            blocks: blocks as never,
+          }),
+        );
+      }
+      return;
+    } catch (err) {
+      // Block layout rejected (e.g. container/plan refused on this surface) —
+      // fall through to plain text with the details behind the inline header.
+      console.error('[slack] block delivery failed, falling back to plain text:', err);
+    }
+  }
+
+  const formatted = markdownToSlackMrkdwn(inlineDetailsMarker(text));
   const chunks = splitMessage(formatted);
 
   let startIdx = 0;
   if (replaceTs && chunks.length > 0) {
     try {
-      if (replaceBlocksPrefix && replaceBlocksPrefix.length > 0) {
-        // Block layout rebuild: work-log cards on top, body as section blocks.
-        // Sections cap at 2900 chars, so the whole body fits in one update.
-        await withRetry('final message rebuild', () =>
-          client.chat.update({
-            channel,
-            ts: replaceTs,
-            text: chunks[0],
-            blocks: [...replaceBlocksPrefix, ...mrkdwnSections(formatted)] as never,
-          }),
-        );
-        startIdx = chunks.length;
-      } else {
-        await withRetry('final message update', () =>
-          client.chat.update({ channel, ts: replaceTs, text: chunks[0] }),
-        );
-        startIdx = 1;
-      }
+      await withRetry('final message update', () =>
+        client.chat.update({ channel, ts: replaceTs, text: chunks[0] }),
+      );
+      startIdx = 1;
     } catch (err) {
-      if (replaceBlocksPrefix && replaceBlocksPrefix.length > 0) {
-        // Block rebuild rejected (e.g. plan/task_card refused on this message) —
-        // retry as a plain-text rewrite before posting everything fresh.
-        try {
-          await client.chat.update({ channel, ts: replaceTs, text: chunks[0] });
-          startIdx = 1;
-        } catch {
-          console.error('[slack] in-place rewrite failed, posting fresh:', err);
-        }
-      } else {
-        console.error('[slack] in-place rewrite failed, posting fresh:', err);
-      }
+      console.error('[slack] in-place rewrite failed, posting fresh:', err);
     }
   }
   for (let i = startIdx; i < chunks.length; i++) {
@@ -232,5 +232,4 @@ export async function deliverText(client: WebClient, opts: DeliverTextOptions): 
       client.chat.postMessage({ channel, thread_ts: threadTs, text: chunks[i] }),
     );
   }
-  if (details) await postDetailsMessage(client, channel, threadTs, details);
 }
