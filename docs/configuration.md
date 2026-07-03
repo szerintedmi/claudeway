@@ -31,7 +31,7 @@
 | `systemPrompt` | Custom system prompt | from defaults |
 | `timeoutMs` | Idle timeout in ms (resets on activity) | from defaults |
 | `processMode` / `responseMode` / `triggerMode` | See below | from defaults |
-| `threadWorktrees` | Run each thread in its own git worktree (repo-backed channels) | `true` |
+| `threadWorktrees` | Run each thread in its own git worktree (repo-backed channels). Submodule paths inside thread worktrees are read-only symlinks to the main synced checkout. | `true` |
 | `collapseWorkingNotes` | `stream-native` only: live work log of step cards (narration titles, tool/subagent activity as details lines), collapsed on completion; `false` drops reasoning and streams narration into the answer body | `true` |
 
 Defaults-only fields: `tempDir` (`.claudeway-tmp`), `tempMaxAgeDays` (`90`, `0` disables), `threadWorktreeMaxAgeDays` (`14`, `0` disables).

@@ -15,7 +15,7 @@ import { credsDmInstruction } from '../creds-hint.js';
 import { buildCredentialStatus } from '../prompt.js';
 import { scrubSecrets } from '../secrets.js';
 import { audit } from '../audit.js';
-import { ensureThreadWorktree } from '../worktrees.js';
+import { buildReadonlySubmodulePrompt, ensureThreadWorktree } from '../worktrees.js';
 import { dequeue, getPendingForChannel, type QueuedMessage } from '../queue.js';
 import {
   createRequestTempDir,
@@ -199,6 +199,7 @@ export async function processQueuedMessage(
   // share files. Session IDs keep deriving from the logical repo folder.
   let cwd = channelConfig.folder;
   let sessionFolder: string | undefined;
+  let systemPrompt = effectiveConfig.systemPrompt;
   const repoName = (channelConfig as { repo?: string }).repo;
   const worktreesEnabled = (channelConfig as { threadWorktrees?: boolean }).threadWorktrees ?? true;
   if (config.repos && repoName && queued.threadTs && worktreesEnabled) {
@@ -208,6 +209,7 @@ export async function processQueuedMessage(
     if (worktree) {
       cwd = worktree;
       sessionFolder = channelConfig.folder;
+      systemPrompt += buildReadonlySubmodulePrompt(worktree);
     }
   }
 
@@ -240,7 +242,7 @@ export async function processQueuedMessage(
         sessionFolder,
         model,
         effort,
-        systemPrompt: effectiveConfig.systemPrompt,
+        systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
         threadTs: queued.threadTs,
@@ -272,7 +274,7 @@ export async function processQueuedMessage(
         sessionFolder,
         model,
         effort,
-        systemPrompt: effectiveConfig.systemPrompt,
+        systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
         threadTs: queued.threadTs,

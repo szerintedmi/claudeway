@@ -18,7 +18,7 @@ Auth is **per-user**: everyone (bot owner included) enrolls their own Claude tok
 3. The response is posted back as a threaded reply
 4. Reactions show status: 📥 queued, ⏳ processing, ✅ done, ❌ error. Deleting a queued (📥) message removes it from the queue; if already processing (⏳), use `!kill`.
 
-Each channel maps to a repo. Session IDs derive deterministically from the channel + repo pair, so conversations survive restarts. Repo-backed channels run each Slack thread in its own git worktree, so concurrent threads don't collide.
+Each channel maps to a repo. Session IDs derive deterministically from the channel + repo pair, so conversations survive restarts. Repo-backed channels run each Slack thread in its own git worktree, so concurrent threads don't collide. Submodule paths in those thread worktrees are read-only symlinks to the main synced checkout.
 
 ## Setup
 

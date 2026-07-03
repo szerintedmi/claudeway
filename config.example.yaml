@@ -193,6 +193,7 @@ defaults:
   # threadWorktreeMaxAgeDays: 14  # Prune per-thread git worktrees idle for N days (default: 14, 0 to disable)
   # threadWorktrees: true  # Run each conversation of a repo-backed channel in its own git worktree
   #                        # (default: true; also settable per channel — disable on busy Q&A channels)
+  #                        # Submodules in thread worktrees are read-only symlinks to the main synced checkout.
   timeoutMs: 300000
   processMode: oneshot # oneshot = new session per message; persistent = reuse session
   responseMode: batch # batch | stream-update | stream-native

@@ -1,8 +1,20 @@
-import { mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync } from 'fs';
-import { join } from 'path';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'fs';
+import { isAbsolute, join } from 'path';
 import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
 import {
+  buildReadonlySubmodulePrompt,
   ensureThreadWorktree,
   cleanupStaleWorktrees,
   threadWorktreePath,
@@ -45,9 +57,31 @@ beforeEach(() => {
 });
 afterEach(() => {
   rmSync(base, { recursive: true, force: true });
+  delete process.env.GIT_CONFIG_COUNT;
+  delete process.env.GIT_CONFIG_KEY_0;
+  delete process.env.GIT_CONFIG_VALUE_0;
 });
 
 const opts = () => ({ repoFolder: repo, worktreesBase: wtBase });
+
+/** Add a committed submodule at refs/sub pointing at a sibling repo. */
+function addSubmodule(): void {
+  const sub = join(base, 'subrepo');
+  git(['init', '-b', 'main', sub], base);
+  git(['config', 'user.email', 'test@test'], sub);
+  git(['config', 'user.name', 'Test'], sub);
+  writeFileSync(join(sub, 'sub.txt'), 'sub content\n');
+  git(['add', '.'], sub);
+  git(['commit', '-m', 'sub init'], sub);
+  // file-protocol submodule clones are blocked by default (CVE-2022-39253).
+  // Repo-local config doesn't reach the clone subprocess `submodule update`
+  // spawns, so allow it via env — inherited by production git() calls too.
+  process.env.GIT_CONFIG_COUNT = '1';
+  process.env.GIT_CONFIG_KEY_0 = 'protocol.file.allow';
+  process.env.GIT_CONFIG_VALUE_0 = 'always';
+  git(['submodule', 'add', sub, 'refs/sub'], repo);
+  git(['commit', '-m', 'add submodule'], repo);
+}
 
 describe('ensureThreadWorktree', () => {
   it('lazily creates a worktree on branch wt/<channel>/<threadTs>', () => {
@@ -106,6 +140,54 @@ describe('ensureThreadWorktree', () => {
   it('bases a new worktree on local HEAD when there is no origin remote', () => {
     const dir = ensureThreadWorktree('myrepo', 'C001', '111.1', opts());
     expect(git(['rev-parse', 'HEAD'], dir!)).toBe(git(['rev-parse', 'HEAD'], repo));
+  });
+
+  it('links submodules in a new worktree to the main checkout as shared read-only refs', () => {
+    addSubmodule();
+    const dir = ensureThreadWorktree('myrepo', 'C001', '111.1', opts());
+    expect(existsSync(join(dir!, 'refs', 'sub', 'sub.txt'))).toBe(true);
+    expect(lstatSync(join(dir!, 'refs', 'sub')).isSymbolicLink()).toBe(true);
+    // Relative link: DATA_DIR is mounted at a different absolute path in
+    // Docker than on the host, so an absolute target would dangle there
+    expect(isAbsolute(readlinkSync(join(dir!, 'refs', 'sub')))).toBe(false);
+    expect(readFileSync(join(dir!, 'refs', 'sub', 'sub.txt'), 'utf-8')).toBe('sub content\n');
+    expect(git(['status', '--porcelain'], dir!)).not.toContain('refs/sub');
+  });
+
+  it('replaces a dangling submodule symlink (absolute link from the other side of the Docker mount)', () => {
+    addSubmodule();
+    const dir = ensureThreadWorktree('myrepo', 'C001', '111.1', opts());
+    rmSync(join(dir!, 'refs', 'sub'));
+    symlinkSync('/app/.docker/repos/myrepo/refs/sub', join(dir!, 'refs', 'sub'), 'dir');
+    expect(existsSync(join(dir!, 'refs', 'sub', 'sub.txt'))).toBe(false);
+
+    const again = ensureThreadWorktree('myrepo', 'C001', '111.1', opts());
+    expect(again).toBe(dir);
+    expect(readFileSync(join(again!, 'refs', 'sub', 'sub.txt'), 'utf-8')).toBe('sub content\n');
+    expect(isAbsolute(readlinkSync(join(again!, 'refs', 'sub')))).toBe(false);
+  });
+
+  it('heals unpopulated submodules when reusing an older worktree', () => {
+    addSubmodule();
+    const dir = ensureThreadWorktree('myrepo', 'C001', '111.1', opts());
+    // Simulate a pre-fix worktree: submodule registered but not populated.
+    rmSync(join(dir!, 'refs', 'sub'));
+    mkdirSync(join(dir!, 'refs', 'sub'), { recursive: true });
+    expect(existsSync(join(dir!, 'refs', 'sub', 'sub.txt'))).toBe(false);
+
+    const again = ensureThreadWorktree('myrepo', 'C001', '111.1', opts());
+    expect(again).toBe(dir);
+    expect(existsSync(join(again!, 'refs', 'sub', 'sub.txt'))).toBe(true);
+    expect(lstatSync(join(again!, 'refs', 'sub')).isSymbolicLink()).toBe(true);
+  });
+
+  it('builds an agent prompt note for linked read-only submodules', () => {
+    addSubmodule();
+    const dir = ensureThreadWorktree('myrepo', 'C001', '111.1', opts());
+    const prompt = buildReadonlySubmodulePrompt(dir!);
+    expect(prompt).toContain('Read-only shared submodules');
+    expect(prompt).toContain('- refs/sub');
+    expect(prompt).toContain('Do not edit files under these paths');
   });
 
   it('recreates a worktree whose branch survived a previous prune', () => {

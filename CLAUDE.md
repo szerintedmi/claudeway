@@ -56,7 +56,7 @@ User-facing docs: `README.md` (quick start, commands) + `docs/configuration.md`,
 - Bot does NOT programmatically join Slack channels — requires manual `/invite` + config entry
 - Magic commands (`src/adapters/slack/commands.ts`) have scoped authorization: `!help`/`!whoami` are open to anyone anywhere; `!ps`/`!kill`/`!nudge` require channel membership; `!config`/`!killall`/cross-channel targeting require `botOwners`; `!creds` (+ `list`/`revoke`) is DM-only
 - Subprocess env vars are allowlisted in `buildAllowedEnv()` in `src/claude.ts`. Only baseline vars (`HOME`, `PATH`, etc.) + non-credential `env` + permission-linked env vars + explicitly injected vars + resolved user credentials reach the subprocess.
-- Repo-backed channels run each Slack thread in its own git worktree (`wt/<channel>/<threadTs>`, `src/worktrees.ts`) — thread participants share files, concurrent threads are isolated, session IDs keep deriving from the logical repo folder. New worktrees are based on `origin/<branch>` after a throttled fetch (fallback: local HEAD); startup GC keeps worktrees with uncommitted or unmerged work regardless of age.
+- Repo-backed channels run each Slack thread in its own git worktree (`wt/<channel>/<threadTs>`, `src/worktrees.ts`) — thread participants share files, concurrent threads are isolated, session IDs keep deriving from the logical repo folder. New worktrees are based on `origin/<branch>` after a throttled fetch (fallback: local HEAD); unpopulated submodules are replaced with read-only symlinks to the main synced checkout on create/reuse (`git worktree add` doesn't recurse; populated ones are never touched); startup GC keeps worktrees with uncommitted or unmerged work regardless of age.
 
 ## Users & Per-User Credentials
 

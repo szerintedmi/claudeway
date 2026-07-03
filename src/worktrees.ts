@@ -1,14 +1,18 @@
 import { execFileSync } from 'child_process';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
+  readFileSync,
+  readlinkSync,
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'fs';
-import { join, resolve } from 'path';
+import { dirname, join, relative, resolve, sep } from 'path';
 import { DATA_DIR, resolveFolder, type Config } from './config.js';
 
 /**
@@ -23,12 +27,14 @@ export const DEFAULT_THREAD_WORKTREE_MAX_AGE_DAYS = 14;
 
 const WORKTREES_BASE = () => resolve(DATA_DIR, 'worktrees');
 const MARKER_FILE = '.claudeway-last-used';
+const READONLY_SUBMODULES_FILE = '.claudeway-readonly-submodules';
+const INTERNAL_WORKTREE_FILES = new Set([MARKER_FILE, READONLY_SUBMODULES_FILE]);
 
 /** Minimum gap between `git fetch origin` calls per repo (worktree creation). */
 const FETCH_MIN_INTERVAL_MS = 5 * 60_000;
 const lastFetchAt = new Map<string, number>();
 
-function git(args: string[], cwd: string): string {
+function git(args: string[], cwd: string, timeout = 60_000): string {
   // Strip inherited git-context env vars (GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE
   // are exported by git to hook processes) so they can't redirect our worktree
   // operations at the target repo away from `cwd`.
@@ -41,7 +47,7 @@ function git(args: string[], cwd: string): string {
     cwd,
     env,
     stdio: ['pipe', 'pipe', 'pipe'],
-    timeout: 60_000,
+    timeout,
   })
     .toString()
     .trim();
@@ -142,6 +148,148 @@ function resolveWorktreeBase(repoFolder: string, baseBranch?: string): string | 
   }
 }
 
+function isInside(base: string, candidate: string): boolean {
+  const resolvedBase = resolve(base);
+  const resolvedCandidate = resolve(candidate);
+  return resolvedCandidate === resolvedBase || resolvedCandidate.startsWith(resolvedBase + sep);
+}
+
+/**
+ * Clear the way for a submodule symlink. Only reached when `git submodule
+ * status` reports the path unpopulated — a symlink here is therefore broken
+ * (dangling, or an absolute link from the other side of the host/Docker
+ * mount) and safe to unlink (never followed). Real content is left untouched.
+ */
+function removeEmptySubmodulePlaceholder(path: string): boolean {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    return true; // nothing there
+  }
+  if (stat.isSymbolicLink()) {
+    rmSync(path);
+    return true;
+  }
+  if (!stat.isDirectory()) return false;
+  if (readdirSync(path).length > 0) return false;
+  rmSync(path, { recursive: true });
+  return true;
+}
+
+function isSymlinkTo(path: string, target: string): boolean {
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isSymbolicLink()) return false;
+    return resolve(dirname(path), readlinkSync(path)) === resolve(target);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Gitlink (mode 160000) paths from the index. Enumerated via ls-files rather
+ * than `git submodule status`: status inspects the working tree and hard-errors
+ * on ANY symlink at a submodule path — including the valid links this module
+ * creates — while ls-files never looks past the index.
+ */
+function gitlinkPaths(dir: string): string[] {
+  return git(['ls-files', '-z', '--stage'], dir)
+    .split('\0')
+    .filter((entry) => entry.startsWith('160000 '))
+    .map((entry) => entry.split('\t')[1])
+    .filter((path): path is string => !!path);
+}
+
+/**
+ * Thread worktrees treat submodules as read-only shared reference material.
+ * `git worktree add` leaves submodule paths unpopulated; instead of cloning a
+ * private copy for every Slack thread, link missing paths to the main checkout's
+ * already-synced submodule. Populated submodules (a real checkout with .git)
+ * are never touched, so old thread worktrees with local edits are not modified;
+ * broken symlinks (e.g. absolute links from the other side of the Docker
+ * mount) are replaced.
+ */
+function linkMissingSubmodules(repoFolder: string, dir: string): void {
+  if (!existsSync(join(dir, '.gitmodules'))) return;
+  const linked: string[] = [];
+  const newlyLinked: string[] = [];
+  try {
+    for (const submodulePath of gitlinkPaths(dir)) {
+      const linkPath = join(dir, submodulePath);
+      const targetPath = join(repoFolder, submodulePath);
+      if (!isInside(dir, linkPath) || !isInside(repoFolder, targetPath)) {
+        console.warn(`[worktrees] Refusing unsafe submodule path in ${dir}: ${submodulePath}`);
+        continue;
+      }
+      if (isSymlinkTo(linkPath, targetPath)) {
+        linked.push(submodulePath);
+        continue;
+      }
+      // Populated checkout (or a foreign symlink to one) — leave it alone
+      if (existsSync(join(linkPath, '.git'))) continue;
+      if (!existsSync(targetPath)) {
+        console.warn(
+          `[worktrees] Shared submodule target is missing for ${submodulePath}; run repo sync in ${repoFolder}`,
+        );
+        continue;
+      }
+      if (!removeEmptySubmodulePlaceholder(linkPath)) {
+        console.warn(
+          `[worktrees] Submodule path is not empty in ${dir}, leaving it untouched: ${submodulePath}`,
+        );
+        continue;
+      }
+      mkdirSync(dirname(linkPath), { recursive: true });
+      // Relative target: worktrees and repos share DATA_DIR, which is bind-
+      // mounted at a different absolute path in Docker (/app/.docker) than on
+      // the host — an absolute link created in one environment dangles in the
+      // other, while the relative path holds in both.
+      symlinkSync(relative(dirname(linkPath), targetPath), linkPath, 'dir');
+      try {
+        git(['update-index', '--skip-worktree', '--', submodulePath], dir);
+      } catch {
+        // Best effort: the symlink still works, but `git status` may show it.
+      }
+      linked.push(submodulePath);
+      newlyLinked.push(submodulePath);
+    }
+    // Marker file lists ALL currently linked paths (feeds the prompt block),
+    // but only rewrite/log when something changed — this runs every message.
+    const markerPath = join(dir, READONLY_SUBMODULES_FILE);
+    if (linked.length > 0 && (newlyLinked.length > 0 || !existsSync(markerPath))) {
+      writeFileSync(markerPath, linked.join('\n') + '\n', 'utf-8');
+    }
+    if (newlyLinked.length > 0) {
+      console.log(
+        `[worktrees] Linked read-only shared submodules in ${dir}: ${newlyLinked.join(', ')}`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[worktrees] Shared submodule link failed in ${dir} — submodule dirs stay empty:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+export function buildReadonlySubmodulePrompt(worktreeDir: string): string {
+  const marker = join(worktreeDir, READONLY_SUBMODULES_FILE);
+  if (!existsSync(marker)) return '';
+  const paths = readFileSync(marker, 'utf-8');
+  const listed = paths
+    .split('\n')
+    .map((line: string) => line.trim())
+    .filter(Boolean);
+  if (listed.length === 0) return '';
+  return (
+    '\n\n## Read-only shared submodules\n\n' +
+    'The following submodule paths are symlinks to the main checkout and are shared read-only reference material:\n' +
+    listed.map((path: string) => `- ${path}`).join('\n') +
+    '\n\nDo not edit files under these paths or run mutating git commands there. Read/search/history commands are OK.'
+  );
+}
+
 /**
  * Lazily create (or reuse) the worktree for a thread. Returns the worktree
  * path, or null when creation failed — callers fall back to the main checkout.
@@ -158,6 +306,7 @@ export function ensureThreadWorktree(
 
   if (existsSync(join(dir, '.git'))) {
     touchMarker(dir);
+    linkMissingSubmodules(repoFolder, dir); // heal old worktrees with empty submodule dirs
     return dir;
   }
 
@@ -185,6 +334,7 @@ export function ensureThreadWorktree(
       git(['worktree', 'add', dir, '-b', branch, ...(baseRef ? [baseRef] : [])], repoFolder);
       console.log(`[worktrees] Created ${dir} (${branch} from ${baseRef ?? 'local HEAD'})`);
     }
+    linkMissingSubmodules(repoFolder, dir);
     touchMarker(dir);
     return dir;
   } catch (err) {
@@ -206,7 +356,7 @@ function hasUnsavedWork(dir: string, branch: string, repoFolder: string): boolea
   try {
     const dirty = git(['status', '--porcelain'], dir)
       .split('\n')
-      .some((line) => line.trim() !== '' && line.slice(3) !== MARKER_FILE);
+      .some((line) => line.trim() !== '' && !INTERNAL_WORKTREE_FILES.has(line.slice(3)));
     if (dirty) return true;
   } catch {
     // Not a functioning worktree — nothing git could preserve here
