@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.32.0] - 2026-07-03
+
+### Added
+- **Per-user credentials (BYO)**: collaborators can run the bot with **their own** Claude subscription and provider tokens instead of a shared account. People are defined once in a top-level `users:` registry (canonical id → name, Slack id, voice id) and referenced by channels via `members:`; the canonical id keys the secret store, audit log, and persistent-process identity across a person's Slack and voice identities. Downstream git/Jira actions run under and are attributed to their own accounts
+  - **`!creds` enrollment**: a DM-only magic command issues a single-use, short-TTL magic link to a rate-limited web form (`src/adapters/creds/`) where users submit their own tokens; `!creds list`/`!creds revoke` (and per-credential delete checkboxes on the form) manage them
+  - **Encrypted secret store**: AES-256-GCM per-user store in `.secrets/user-credentials.json` behind a `SecretStore` interface; requires a master key (`CLAUDEWAY_SECRETS_KEY` or `.secrets/key`)
+  - **Config-driven resolution**: `userCredentials` defines fields, form labels/guidance, explicit shared defaults (`defaultFromEnv`), and delivery via `exposeAs` (`env` or `git-credential-helper`). Precedence is **personal secret > explicit shared default > unset** — no ambient fallback from matching env-var names
+  - **BYO Claude always on**: the `claude` credential is injected automatically and personal enrollment is mandatory for everyone (bot owner included); unenrolled turns are refused with a `!creds` hint and audited as `spawn.denied`. Hard startup requirements: a secrets master key and `baseUrl`
+  - **Git credential adapter**: `exposeAs: git-credential-helper` uses a per-spawn gitconfig (SSH→HTTPS rewrite + credential helper) so tokens stay out of the subprocess env; commits attributed to the registry name / Slack profile
+  - **Append-only audit log**: every credentialed spawn and enrollment event lands in `.claudeway-audit.jsonl` (credential names, never values); decrypted values are scrubbed from stderr logs and error replies
+- **Shared-credential guardrails**: a "Credential status" system-prompt block tells the agent which credentials are shared or absent (via `userCredentials.<name>.sharedAccessNote`) so it refuses doomed writes and points at `!creds` preemptively instead of failing mid-task. Where tokens can't be scoped (Atlassian), `userCredentials.<name>.mcpReadOnlyServers` forces the listed MCP servers read-only (`READ_ONLY_MODE=true` in a generated per-set config) whenever the credential isn't a personal secret; personal enrollment lifts it, and in persistent mode the read-only server set is part of the process identity key so enrolling mid-thread respawns the process
+- **Per-thread git worktrees**: repo-backed channels run each Slack thread in its own worktree (`wt/<channel>/<threadTs>`) — thread participants share files, concurrent threads stay isolated, session IDs keep deriving from the logical repo folder. New worktrees are based on `origin/<branch>` after a throttled fetch (max once per 5 min/repo; falls back to local HEAD when offline). Startup GC keeps worktrees holding uncommitted or unmerged work regardless of age
+- **Slack "Work log" via native Thinking Steps** (`stream-native`): tool calls, sub-agent progress, and reasoning bursts render as live task cards grouped in one collapsible "Work log" box — followable while generating, collapsed when done. Assistant text emitted *between* tool calls is classified into the work log as step cards (one line per narrated step) instead of polluting the answer
+- **Slack inline "Details" fold** (`stream-native`): the `---DETAILS---` section streams live under an inline "Details" divider, then folds into a collapsed native `container` block inside the answer at finish (`batch`/`stream-update` fold the same way)
+
+### Changed
+- **`--strict-mcp-config` on spawned subprocesses**: gateway-spawned Claude sessions no longer load the operator's `~/.claude.json` MCP servers (and embedded personal credentials) — only the gateway-provided `--mcp-config` is honored, so per-user credential resolution isn't bypassed
+- **Slack streaming responder rewritten** around Thinking Steps: one streamed message per turn, an ordered chunk queue with a shared rate-limit bucket, idempotent keepalive, and pure `TaskTracker`/`DetailsGate` state machines; delivery consolidated into a single `deliverText()` (upload/split/update/post + bounded retries). Removed the old two-stream + legacy-attachment collapse hack
+- **`users:` registry migration**: the legacy `allowedUsers` config shape is now rejected at load with a migration hint
+- **README rewritten** to a focused quick start; deep reference split into `docs/configuration.md`, `docs/deployment.md`, `docs/troubleshooting.md`, and `docs/per-user-credentials.md`. Added a Slack app manifest (`slack-app-manifest.example.yaml`) and a Cloudflare tunnel + `caffeinate` local-run recipe
+- **`bun test` scoped to `src/`** (package.json, Makefile, pre-commit) so test files from synced `.docker/repos` clones can't leak into runs
+- **Dependency updates**: `@deepgram/sdk` 5.4→5.5, `uuid` 14.0.0→14.0.1, TypeScript 5.9→6.0, plus ESLint/Prettier/typescript-eslint/lint-staged dev bumps
+- **Config cleanup**: dropped dead `systemChannel` from `config.example.yaml`; renamed `GLASSES_AUTH_TOKEN` → `VOICE_AUTH_TOKEN` in `.env.example` to match config interpolation
+
+### Fixed
+- **Work log stuck expanded after errors/timeouts**: `IStreamingResponder.finish(outcome)` is now called on every path — a failed/killed turn flips open task cards to error state and still finalizes the stream
+- **Live "ReadingReadingReading" duplication**: `task_update` details/output are append-only on the Slack wire, so the responder emits field deltas only (keeping a capped accumulated copy for block rebuilds)
+- **Empty submodule dirs in thread worktrees**: `git worktree add` doesn't recurse into submodules, so new worktrees exposed empty gitlink paths. Unpopulated submodules are now replaced with relative read-only symlinks to the main synced checkout (marked read-only in a system-prompt note); populated or locally-edited submodules are never touched, and broken/dangling links self-heal on reuse. `syncRepos` keeps the main checkout's submodules on full history so shared blame/log/diff work
+- **Overlapping persistent-mode turns**: the single-turn slot now rejects loudly instead of silently orphaning the previous turn's promise
+- **Worktree git isolation**: worktree `git()` calls strip inherited `GIT_DIR`/`GIT_INDEX_FILE`/`GIT_WORK_TREE` so ambient git context (e.g. a git hook) can't redirect worktree operations
+
 ## [0.31.0] - 2026-06-28
 
 ### Added
