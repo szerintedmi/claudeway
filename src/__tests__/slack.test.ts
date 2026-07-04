@@ -997,11 +997,13 @@ describe('SlackChannelResponder native streaming (Thinking Steps)', () => {
     });
   });
 
-  it('does not re-deliver when the stream completes cleanly', async () => {
+  it('strips the redundant work-log box when only the bare Thinking card showed', async () => {
     const { client, calls } = createMockClient();
     const responder = makeResponder(client);
     const sr = responder.createStreamingResponder();
 
+    // A direct answer: no tools, no surfaced reasoning, no narration — the work
+    // log never grew past the seed "Thinking" card.
     sr.onTextDelta('Hello ');
     await microtasks();
     sr.onTextDelta('world');
@@ -1009,16 +1011,15 @@ describe('SlackChannelResponder native streaming (Thinking Steps)', () => {
     await sr.finish();
     await responder.onStreamComplete('Hello world', sr);
 
-    // Clean finish → the stream already showed everything; no repair or upload.
-    expect(calls.updates).toHaveLength(0);
+    // The live message (which carried the redundant "Thinking" box) is rewritten
+    // in place as plain answer text — no work-log blocks, no upload, no dupe post.
+    expect(calls.updates).toHaveLength(1);
+    expect(calls.updates[0].ts).toBe('stream-ts');
+    expect(calls.updates[0].blocks).toBeUndefined();
+    expect(calls.updates[0].text).toContain('Hello world');
     expect(calls.uploads).toHaveLength(0);
     expect(calls.posts).toHaveLength(0);
     expect(stopsOf(calls)).toHaveLength(1);
-    // The short answer (held by the narration buffer) rode along on stopStream;
-    // the Thinking seed card was completed at close.
-    expect(wireMarkdown(calls)).toBe('Hello world');
-    const thinking = wireTasks(calls).filter((c) => c.title === 'Thinking');
-    expect(thinking[thinking.length - 1]?.status).toBe('complete');
   });
 
   it('rebuilds the message with work-log blocks when the stream finalizes early', async () => {
@@ -1029,6 +1030,9 @@ describe('SlackChannelResponder native streaming (Thinking Steps)', () => {
       const sr = responder.createStreamingResponder();
       await microtasks(); // first flush (startStream) succeeded, captured ts
 
+      // A real tool call keeps the work log non-trivial, so the rebuild keeps
+      // its plan block (a bare-Thinking log would be stripped to plain text).
+      sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'x.ts' });
       // Long enough to cross the narration holdback → released to the body.
       const answer = `Hello world. ${'Lots more detail follows here. '.repeat(20)}`;
       sr.onTextDelta(answer);
@@ -1246,12 +1250,14 @@ describe('SlackChannelResponder native streaming (Thinking Steps)', () => {
     expect(wireMarkdown(calls)).toBe(`TL;DR answer\n${DETAILS_INLINE_HEADER}the long version`);
     expect(wireMarkdown(calls)).not.toContain('---DETAILS---');
     expect(stopsOf(calls)[0].blocks).toBeUndefined();
-    // Finished: the message is rewritten in place — work-log cards on top, the
-    // body as sections, the details folded into a collapsed container.
+    // Finished: the message is rewritten in place — the body as sections, the
+    // details folded into a collapsed container. The work log was trivial (bare
+    // Thinking card), so its redundant box is stripped: no plan block on top.
     expect(calls.updates).toHaveLength(1);
     expect(calls.updates[0].ts).toBe('stream-ts');
     const blocks = calls.updates[0].blocks as Record<string, unknown>[];
-    expect(blocks[0].type).toBe('plan');
+    expect(blocks.some((b) => b.type === 'plan')).toBe(false);
+    expect(blocks[0].type).toBe('section');
     expect(JSON.stringify(blocks)).toContain('TL;DR answer');
     const container = blocks.find((b) => b.type === 'container') as Record<string, unknown>;
     expect(container).toMatchObject({ is_collapsible: true, default_collapsed: true });
@@ -1316,6 +1322,9 @@ describe('SlackChannelResponder native streaming (Thinking Steps)', () => {
     try {
       const sr = responder.createStreamingResponder();
 
+      // A tool call keeps the work log non-trivial, so the box-strip rebuild
+      // doesn't fire and this test's "no fallback delivery" invariant holds.
+      sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'x.ts' });
       // Crosses the narration holdback → released, streams live from here on.
       const opening = `Hello. ${'More context here. '.repeat(30)}`;
       sr.onTextDelta(opening); // startStream ok (carries seed; text pending)
@@ -1353,6 +1362,10 @@ describe('SlackChannelResponder native streaming (Thinking Steps)', () => {
     const responder = makeResponder(client);
     const sr = responder.createStreamingResponder();
 
+    // A tool call keeps the work log non-trivial, so the box-strip rebuild
+    // doesn't fire — this test isolates the stopStream retry path.
+    sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'x.ts' });
+    await microtasks();
     sr.onTextDelta('Hello');
     await microtasks();
     await sr.finish();
@@ -1369,6 +1382,9 @@ describe('SlackChannelResponder native streaming (Thinking Steps)', () => {
     const sr = responder.createStreamingResponder();
     const huge = 'x'.repeat(FILE_THRESHOLD + 1);
 
+    // A tool call keeps the work log non-trivial, so the card-bearing message is
+    // kept (pointed at the file) rather than stripped/deleted.
+    sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'x.ts' });
     sr.onTextDelta('partial ');
     await microtasks();
     await sr.finish(); // stopStream fails terminally → broken

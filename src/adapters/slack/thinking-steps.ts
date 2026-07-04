@@ -355,11 +355,24 @@ export class TaskTracker {
   }
 
   /**
+   * True when the work log never grew past the seed Thinking card and no
+   * reasoning was captured into it — i.e. a direct answer with no tools,
+   * narration, or surfaced reasoning. Such a log is just a redundant "Thinking"
+   * line, so the responder drops the whole work-log box at finish.
+   */
+  isTrivial(): boolean {
+    return (
+      this.tasks.length === 1 && this.tasks[0].toolName === '__thinking__' && !this.tasks[0].details
+    );
+  }
+
+  /**
    * Rebuild the whole work log as blocks (for the broken-stream `chat.update`
-   * path): one plan block holding every card in creation order.
+   * path): one plan block holding every card in creation order. A trivial log
+   * (bare Thinking card) rebuilds to nothing so the redundant box is dropped.
    */
   toBlocks(): Block[] {
-    if (this.tasks.length === 0) return [];
+    if (this.tasks.length === 0 || this.isTrivial()) return [];
     const rich = (text: string): RichTextBlock => ({
       type: 'rich_text',
       elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text }] }],

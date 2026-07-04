@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.34.1] - 2026-07-04
+
+### Fixed
+- **Redundant "Work log" box on plain answers (Slack `stream-native`)**: a turn with no tool calls, narration, or surfaced reasoning left just a bare "Thinking" card in the work-log box above the answer. The box is now stripped at finish when the log never grew past that seed card — the answer stands alone. `TaskTracker.isTrivial()` drives both the in-place rebuild and the block rebuild (`toBlocks()` returns nothing for a trivial log), so a bare-Thinking box is dropped on clean, broken-stream, and details-fold paths alike
+
 ## [0.34.0] - 2026-07-04
 
 ### Changed
