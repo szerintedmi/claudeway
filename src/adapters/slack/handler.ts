@@ -20,13 +20,14 @@ import {
   unauthorizedChannelMessage,
   unconfiguredChannelMessage,
 } from './onboarding.js';
-import { shouldRespond, buildPrompt, extractMentionedUserIds } from '../../prompt.js';
-import { fetchThreadContext, resolveUserName } from './thread.js';
+import { shouldRespond } from '../../prompt.js';
+import { resolveUserName } from './thread.js';
 import { extractTextFromAttachments, type SlackAttachment } from './attachments.js';
 import { downloadSlackFiles, type SlackFile } from './files.js';
 import { SlackChannelResponder } from './responder.js';
+import { makeSlackPromptCoordinator } from './coordinator.js';
 import { drainChannel, channelBusy, isMessageProcessing } from '../../core/engine.js';
-import type { QueuedMessage } from '../../queue.js';
+import type { QueuedMessage, SlackFileMeta } from '../../queue.js';
 
 function makeResponder(client: WebClient, queued: QueuedMessage): SlackChannelResponder {
   const cfg = loadConfig();
@@ -56,23 +57,6 @@ interface SlackMessage {
   // message_changed events carry thread_ts on the inner message, not the envelope
   message?: { ts?: string; text?: string; thread_ts?: string };
   attachments?: SlackAttachment[];
-}
-
-/**
- * Resolve user IDs to display names for the user directory.
- * Always includes `alwaysInclude` IDs (e.g. bot, sender) plus any
- * `<@U...>` mentions found in the given texts.
- */
-export async function resolveUserDirectory(
-  client: WebClient,
-  alwaysInclude: string[],
-  ...texts: string[]
-): Promise<Array<{ id: string; name: string }>> {
-  const mentioned = extractMentionedUserIds(...texts);
-  const allIds = [...new Set([...alwaysInclude, ...mentioned])];
-  if (allIds.length === 0) return [];
-  const names = await Promise.all(allIds.map((id) => resolveUserName(client, id)));
-  return allIds.map((id, i) => ({ id, name: names[i] }));
 }
 
 // Per-turn model override: "!model:<name> <message>". First char must be alphanumeric
@@ -381,10 +365,12 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
 
     // Download file attachments before enqueueing (includes files from shared messages)
     let filePaths: string[] = [];
+    let pathsById = new Map<string, string>();
     if (hasFiles) {
       const token = context.botToken ?? process.env.SLACK_BOT_TOKEN ?? '';
       const result = await downloadSlackFiles(allFiles, token, msg.channel);
       filePaths = result.paths;
+      pathsById = result.pathsById;
       if (result.failedCount > 0) {
         const threadTs = msg.thread_ts ?? msg.ts;
         await warnInThread(
@@ -399,48 +385,53 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
     // If files were expected but all exceeded the size limit, and there's no text — abort
     if (!hasText && hasFiles && filePaths.length === 0) return;
 
-    // Fetch thread context if this is a thread reply
     const threadTs = msg.thread_ts ?? msg.ts;
-    const isThreadReply = !!(msg.thread_ts && msg.thread_ts !== msg.ts);
-    const threadMessages = isThreadReply
-      ? await fetchThreadContext(
-          client,
-          msg.channel,
-          msg.thread_ts!,
-          msg.ts,
-          botUserId,
-          canResolveUsers,
-        )
-      : [];
 
     const rawText =
       [msg.text, attachmentText].filter(Boolean).join('\n\n') ||
       (filePaths.length > 0 ? 'Please review the attached file(s).' : '');
 
-    // Build a user directory so the bot knows who <@UXXXXXX> mentions refer to
-    // Always include the bot and the message sender, plus any mentioned users
-    const allTexts = [...threadMessages.map((m) => m.text), rawText];
-    const userDirectory = canResolveUsers
-      ? await resolveUserDirectory(client, [botUserId, userId], ...allTexts)
-      : [];
-    const text = buildPrompt(rawText, threadMessages, userDirectory, botUserId);
-    const teamId = context.teamId;
-    const senderEntry = userDirectory.find((e) => e.id === userId);
+    // Current-message attachment metadata — oversized/undownloadable files are
+    // represented too, just without a local path
+    const fileMetas: SlackFileMeta[] = allFiles.map((f) => {
+      const localPath = pathsById.get(f.id);
+      return {
+        id: f.id,
+        name: f.name,
+        ...(f.mimetype ? { mimetype: f.mimetype } : {}),
+        ...(f.size !== undefined ? { size: f.size } : {}),
+        ...(localPath ? { localPath } : {}),
+      };
+    });
 
-    // Persist to queue
+    // Sender + bot identity for the message prefix / new-session header. History
+    // is NOT fetched here — the coordinator renders it at processing time.
+    const senderName = canResolveUsers ? await resolveUserName(client, userId) : undefined;
+    const botName = canResolveUsers ? await resolveUserName(client, botUserId) : undefined;
+    const teamId = context.teamId;
+
+    // Persist to queue (structured: prompt rendered at processing time)
     enqueue({
       channelId: msg.channel,
       userId: msg.user ?? 'unknown',
       ...(teamId ? { teamId } : {}),
-      text,
+      text: rawText,
       ts: msg.ts,
       threadTs,
       botUserId,
       queuedAt: new Date().toISOString(),
       ...(filePaths.length > 0 ? { filePaths } : {}),
-      ...(senderEntry ? { userName: senderEntry.name } : {}),
+      ...(senderName ? { userName: senderName } : {}),
       ...(modelOverride ? { modelOverride } : {}),
       ...(effortOverride ? { effortOverride } : {}),
+      slack: {
+        rawText,
+        senderId: userId,
+        ...(senderName ? { senderName } : {}),
+        botUserId,
+        ...(botName ? { botName } : {}),
+        ...(fileMetas.length > 0 ? { files: fileMetas } : {}),
+      },
     });
 
     // Acknowledge receipt immediately
@@ -451,7 +442,11 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
       return;
     }
 
-    drainChannel(msg.channel, (queued) => makeResponder(client, queued)).catch((err) => {
+    drainChannel(
+      msg.channel,
+      (queued) => makeResponder(client, queued),
+      makeSlackPromptCoordinator(client, canResolveUsers),
+    ).catch((err) => {
       console.error(`[${msg.channel}] Queue drain error:`, err);
     });
   });
@@ -461,7 +456,7 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
  * Process any messages left in the queue from before a restart.
  * Call after Bolt app.start() with the Slack App.
  */
-export function drainAllPending(app: App): void {
+export function drainAllPending(app: App, canResolveUsers = true): void {
   // Drain pending messages for all channels after a short delay
   setTimeout(async () => {
     const pending = getPending();
@@ -491,7 +486,11 @@ export function drainAllPending(app: App): void {
     for (const channelId of channels) {
       if (channelBusy.has(channelId)) continue;
       const client = app.client;
-      drainChannel(channelId, (queued) => makeResponder(client, queued)).catch((err) => {
+      drainChannel(
+        channelId,
+        (queued) => makeResponder(client, queued),
+        makeSlackPromptCoordinator(client, canResolveUsers),
+      ).catch((err) => {
         console.error(`[${channelId}] Startup drain error:`, err);
       });
     }

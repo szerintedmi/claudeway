@@ -9,13 +9,18 @@ import {
   type ResolvedChannelConfig,
   type UserPermissions,
 } from '../config.js';
-import { runClaude, runClaudeStreaming, runClaudePersistentStreaming } from '../claude.js';
+import {
+  runClaude,
+  runClaudeStreaming,
+  runClaudePersistentStreaming,
+  resolveSessionState,
+} from '../claude.js';
 import { resolveUserCredentials, type ResolvedCredentials } from '../credentials.js';
 import { credsDmInstruction } from '../creds-hint.js';
 import { buildCredentialStatus } from '../prompt.js';
 import { scrubSecrets } from '../secrets.js';
 import { audit } from '../audit.js';
-import { buildReadonlySubmodulePrompt, ensureThreadWorktree } from '../worktrees.js';
+import { ensureThreadWorktree } from '../worktrees.js';
 import { dequeue, getPendingForChannel, type QueuedMessage } from '../queue.js';
 import {
   createRequestTempDir,
@@ -23,10 +28,11 @@ import {
   ensureScratchDir,
   readAttachmentManifest,
 } from '../tempdir.js';
-import type { ChannelResponder, IStreamingResponder } from './interfaces.js';
+import type { ChannelResponder, IStreamingResponder, PromptCoordinator } from './interfaces.js';
 
 // Re-export QueuedMessage for consumers
 export type { QueuedMessage } from '../queue.js';
+export type { PromptCoordinator } from './interfaces.js';
 
 // Per-channel processing lock — one message at a time per channel
 export const channelBusy = new Set<string>();
@@ -74,6 +80,7 @@ interface PermissionContext {
 export async function processQueuedMessage(
   queued: QueuedMessage,
   responder: ChannelResponder,
+  coordinator?: PromptCoordinator,
 ): Promise<void> {
   let config;
   try {
@@ -171,10 +178,13 @@ export async function processQueuedMessage(
     slotAcquired = true;
 
     const processMode = effectiveConfig.processMode;
-    // Strip user directory and thread context headers to show just the user's message
-    const logText = queued.text
-      .replace(/^\[[^\]]+ reference\][\s\S]*?\n\n/, '')
-      .replace(/^\[Thread context[\s\S]*?\[Current message\]\n/, '');
+    // Structured entries carry the raw text directly; legacy pre-rendered
+    // prompts still need the old header stripping for a readable log line
+    const logText =
+      queued.slack?.rawText ??
+      queued.text
+        .replace(/^\[[^\]]+ reference\][\s\S]*?\n\n/, '')
+        .replace(/^\[Thread context[\s\S]*?\[Current message\]\n/, '');
     const modelSuffix = queued.modelOverride ? ` [model: ${queued.modelOverride}]` : '';
     const effortSuffix = queued.effortOverride ? ` [effort: ${queued.effortOverride}]` : '';
     console.log(
@@ -216,7 +226,7 @@ export async function processQueuedMessage(
     // share files. Session IDs keep deriving from the logical repo folder.
     let cwd = channelConfig.folder;
     let sessionFolder: string | undefined;
-    let systemPrompt = effectiveConfig.systemPrompt;
+    const systemPrompt = effectiveConfig.systemPrompt;
     const repoName = (channelConfig as { repo?: string }).repo;
     const worktreesEnabled =
       (channelConfig as { threadWorktrees?: boolean }).threadWorktrees ?? true;
@@ -227,9 +237,42 @@ export async function processQueuedMessage(
       if (worktree) {
         cwd = worktree;
         sessionFolder = channelConfig.folder;
-        systemPrompt += buildReadonlySubmodulePrompt(worktree);
       }
     }
+
+    // Resolve session state ONCE for prompt rendering and the runners' --resume
+    // decision — the artifact path encodes the resolved cwd (worktree), so this
+    // must happen after worktree resolution.
+    const session = resolveSessionState({
+      channelId: queued.channelId,
+      cwd,
+      sessionFolder,
+      threadTs: queued.threadTs,
+    });
+
+    // Render-at-processing-time (structured Slack entries): history selection
+    // happens here, not at enqueue, so queued turns see what Claude has
+    // actually received. Legacy entries pass their pre-rendered text through.
+    const rendered =
+      coordinator && queued.slack ? await coordinator.prepare(queued, session) : null;
+    const message = rendered ? rendered.text : queued.text;
+
+    // Rendered prompts carry attachment info inline (ref= and path=), so the
+    // generic "[Attached files ...]" footer would duplicate it. Unrendered
+    // messages keep the footer — it is their only pointer to the local files.
+    // filePaths stays on the queue entry for restart/bookkeeping either way.
+    const runnerFilePaths = rendered ? undefined : queued.filePaths;
+
+    // Advance the Slack history watermark only after Claude actually completed
+    // the turn — a failed turn must re-inject (duplication over loss).
+    const commitTurn = async () => {
+      if (!coordinator || !queued.slack) return;
+      try {
+        await coordinator.onTurnCommitted(queued, session);
+      } catch (err) {
+        console.warn(`[${channelConfig.name}] Failed to advance Slack history watermark:`, err);
+      }
+    };
 
     // Audit which credential names (never values) back this spawn
     if (credentials.personalCredNames.length > 0 || credentials.sharedCredNames.length > 0) {
@@ -248,16 +291,17 @@ export async function processQueuedMessage(
     if (mode === 'batch') {
       // Batch mode — run Claude, get full response, send at once
       const claudeOpts = {
-        message: queued.text,
+        message,
         cwd,
         sessionFolder,
+        session,
         model,
         effort,
         systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
         threadTs: queued.threadTs,
-        filePaths: queued.filePaths,
+        filePaths: runnerFilePaths,
         tempDir,
         ...(processMode === 'persistent' ? { tempBaseDir: baseDir } : {}),
         ...permCtx,
@@ -268,6 +312,7 @@ export async function processQueuedMessage(
           ? await runClaudePersistentStreaming({ ...claudeOpts, onTextDelta: () => {} })
           : await runClaude(claudeOpts);
 
+      await commitTurn();
       await responder.sendResponse(result.response);
       await responder.onComplete();
 
@@ -280,16 +325,17 @@ export async function processQueuedMessage(
       sr = streamer;
 
       const claudeStreamOpts = {
-        message: queued.text,
+        message,
         cwd,
         sessionFolder,
+        session,
         model,
         effort,
         systemPrompt,
         timeoutMs: channelConfig.timeoutMs,
         channelId: queued.channelId,
         threadTs: queued.threadTs,
-        filePaths: queued.filePaths,
+        filePaths: runnerFilePaths,
         tempDir,
         ...(processMode === 'persistent' ? { tempBaseDir: baseDir } : {}),
         onTextDelta: (text: string) => streamer.onTextDelta(text),
@@ -309,6 +355,7 @@ export async function processQueuedMessage(
           ? await runClaudePersistentStreaming(claudeStreamOpts)
           : await runClaudeStreaming(claudeStreamOpts);
 
+      await commitTurn();
       await streamer.finish();
       streamFinished = true;
 
@@ -384,6 +431,7 @@ export async function processQueuedMessage(
 export async function drainChannel(
   channelId: string,
   responderFactory: (queued: QueuedMessage) => ChannelResponder,
+  coordinator?: PromptCoordinator,
 ): Promise<void> {
   channelBusy.add(channelId);
 
@@ -392,7 +440,7 @@ export async function drainChannel(
     while (pending.length > 0) {
       const queued = pending[0];
       const responder = responderFactory(queued);
-      await processQueuedMessage(queued, responder);
+      await processQueuedMessage(queued, responder, coordinator);
       pending = getPendingForChannel(channelId);
     }
   } finally {

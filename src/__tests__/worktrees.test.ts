@@ -14,7 +14,6 @@ import { isAbsolute, join } from 'path';
 import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
 import {
-  buildReadonlySubmodulePrompt,
   ensureThreadWorktree,
   cleanupStaleWorktrees,
   threadWorktreePath,
@@ -179,15 +178,6 @@ describe('ensureThreadWorktree', () => {
     expect(again).toBe(dir);
     expect(existsSync(join(again!, 'refs', 'sub', 'sub.txt'))).toBe(true);
     expect(lstatSync(join(again!, 'refs', 'sub')).isSymbolicLink()).toBe(true);
-  });
-
-  it('builds an agent prompt note for linked read-only submodules', () => {
-    addSubmodule();
-    const dir = ensureThreadWorktree('myrepo', 'C001', '111.1', opts());
-    const prompt = buildReadonlySubmodulePrompt(dir!);
-    expect(prompt).toContain('Read-only shared submodules');
-    expect(prompt).toContain('- refs/sub');
-    expect(prompt).toContain('Do not edit files under these paths');
   });
 
   it('recreates a worktree whose branch survived a previous prune', () => {

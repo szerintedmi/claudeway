@@ -2,12 +2,6 @@ import type { TriggerMode } from './config.js';
 import type { CredentialStatus } from './credentials.js';
 import { credsDmInstruction } from './creds-hint.js';
 
-export interface ThreadMessage {
-  authorName: string;
-  isBot: boolean;
-  text: string;
-}
-
 export function shouldRespond(
   text: string | undefined,
   botUserId: string,
@@ -15,58 +9,6 @@ export function shouldRespond(
 ): boolean {
   if (triggerMode === 'all') return true;
   return !!text && text.includes(`<@${botUserId}>`);
-}
-
-export function formatThreadContext(messages: ThreadMessage[]): string {
-  if (messages.length === 0) return '';
-  const lines = messages.map((m) => `[${m.authorName}]: ${m.text}`);
-  return (
-    `[Thread context — ${messages.length} prior message${messages.length !== 1 ? 's' : ''}]\n\n` +
-    lines.join('\n') +
-    '\n\n[Current message]\n'
-  );
-}
-
-/**
- * Extract all unique Slack user IDs (`<@UXXXXXX>`) from one or more text strings.
- */
-export function extractMentionedUserIds(...texts: string[]): string[] {
-  const mentionPattern = /<@(U[A-Z0-9]+)>/g;
-  const ids = new Set<string>();
-  for (const text of texts) {
-    for (const match of text.matchAll(mentionPattern)) {
-      ids.add(match[1]);
-    }
-  }
-  return [...ids];
-}
-
-/**
- * Build a user directory block mapping Slack user IDs to display names.
- * Injected at the top of the prompt so the bot understands who `<@UXXXXXX>` refers to
- * and can use the same syntax in its own replies.
- */
-export function formatUserDirectory(
-  entries: Array<{ id: string; name: string }>,
-  botUserId?: string,
-  headerLabel = 'Slack user reference',
-): string {
-  if (entries.length === 0) return '';
-  const lines = entries.map((e) =>
-    e.id === botUserId ? `<@${e.id}> = ${e.name} (you)` : `<@${e.id}> = ${e.name}`,
-  );
-  return `[${headerLabel}]\n` + lines.join('\n') + '\n\n';
-}
-
-export function buildPrompt(
-  text: string,
-  threadMessages: ThreadMessage[],
-  userDirectory: Array<{ id: string; name: string }> = [],
-  botUserId?: string,
-): string {
-  const directory = formatUserDirectory(userDirectory, botUserId);
-  const context = formatThreadContext(threadMessages);
-  return directory + context + text;
 }
 
 /**

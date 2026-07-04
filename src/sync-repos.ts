@@ -70,7 +70,10 @@ export function syncRepos(): void {
           );
         }
 
-        run(['submodule', 'update', '--init', '--recursive'], repoPath);
+        // --remote checks out the tip of each submodule's tracked branch (latest
+        // main) rather than the SHA pinned by the parent — keep shared submodules
+        // fresh for reading, not stuck at the parent's recorded commit.
+        run(['submodule', 'update', '--remote', '--init', '--recursive'], repoPath);
         try {
           run(
             [

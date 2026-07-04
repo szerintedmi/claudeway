@@ -1,4 +1,10 @@
-import { deriveSessionId, sessionArtifactPaths } from '../claude.js';
+import {
+  deriveSessionId,
+  sessionArtifactPaths,
+  buildClaudeArgs,
+  type ClaudeOptions,
+} from '../claude.js';
+import type { Config, UserPermissions } from '../config.js';
 
 describe('deriveSessionId', () => {
   it('returns a UUID-format string', () => {
@@ -52,6 +58,31 @@ describe('deriveSessionId', () => {
     const a = deriveSessionId('C001', '/projects/foo', '1700000000.000100');
     const b = deriveSessionId('C001', '/projects/foo', '1700000000.000100');
     expect(a).toBe(b);
+  });
+});
+
+describe('buildClaudeArgs — leading-dash prompt safety', () => {
+  const options: ClaudeOptions = {
+    message: '--- Slack context ---\n[122.456 <@U2> Ann]: earlier\n\n[123.456 <@U1> Peter]: hi',
+    cwd: '/tmp',
+    model: 'test-model',
+    systemPrompt: 'sp',
+    timeoutMs: 1000,
+    channelId: 'C0TEST',
+    config: {} as Config,
+    userPermissions: {} as UserPermissions,
+    userId: 'U1',
+  };
+
+  it('terminates option parsing with -- before the positional message', () => {
+    const { args } = buildClaudeArgs(options, 'json');
+    expect(args[args.length - 1]).toBe(options.message);
+    expect(args[args.length - 2]).toBe('--');
+  });
+
+  it('keeps the message as the single arg after the separator', () => {
+    const { args } = buildClaudeArgs(options, 'stream-json');
+    expect(args.indexOf('--')).toBe(args.length - 2);
   });
 });
 
