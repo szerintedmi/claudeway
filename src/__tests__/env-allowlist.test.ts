@@ -1,5 +1,8 @@
 import { homedir } from 'os';
+import { join } from 'path';
 import { buildAllowedEnv, processIdentityKey } from '../claude.js';
+import { buildInjectedEnv } from '../claude-spawn-env.js';
+import type { ClaudeOptions } from '../claude.js';
 import type { Config } from '../config.js';
 import { READ_ONLY_PERMISSIONS } from '../config.js';
 
@@ -191,6 +194,53 @@ describe('buildAllowedEnv', () => {
       userCredEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'personal' },
     });
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('personal');
+  });
+});
+
+describe('buildInjectedEnv', () => {
+  const baseOpts = (tempDir?: string): ClaudeOptions =>
+    ({
+      channelId: 'C001',
+      config: makeConfig(),
+      userPermissions: READ_ONLY_PERMISSIONS,
+      ...(tempDir ? { tempDir } : {}),
+    }) as unknown as ClaudeOptions;
+
+  it('sets CLAUDEWAY_TEMP_DIR to the session dir and TMPDIR to its tmp/ subfolder (D8)', () => {
+    const sessionDir = '/base/C001/6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const env = buildInjectedEnv(baseOpts(sessionDir));
+
+    expect(env.CLAUDEWAY_TEMP_DIR).toBe(sessionDir);
+    // TMPDIR is a CHILD of the session dir, not equal to it
+    expect(env.TMPDIR).toBe(join(sessionDir, 'tmp'));
+    expect(env.TMPDIR).not.toBe(env.CLAUDEWAY_TEMP_DIR);
+    expect(env.CLAUDEWAY_CHANNEL_ID).toBe('C001');
+  });
+
+  it('no longer emits the retired CLAUDEWAY_SCRATCH_DIR / CLAUDEWAY_TEMP_BASE vars', () => {
+    const env = buildInjectedEnv(baseOpts('/base/C001/sess'));
+    expect(env.CLAUDEWAY_SCRATCH_DIR).toBeUndefined();
+    expect(env.CLAUDEWAY_TEMP_BASE).toBeUndefined();
+  });
+
+  it('injects nothing temp-related when no tempDir is set', () => {
+    const env = buildInjectedEnv(baseOpts());
+    expect(env.CLAUDEWAY_TEMP_DIR).toBeUndefined();
+    expect(env.TMPDIR).toBeUndefined();
+  });
+
+  it('prepends the repo scripts/ dir to PATH so claudeway-attach resolves', () => {
+    process.env.PATH = '/usr/bin';
+    const env = buildInjectedEnv(baseOpts('/base/C001/sess'));
+    const [first, ...rest] = env.PATH.split(':');
+    expect(first.endsWith('/scripts')).toBe(true);
+    expect(rest.join(':')).toBe('/usr/bin');
+  });
+
+  it('puts scripts/ on PATH even without a tempDir', () => {
+    process.env.PATH = '/usr/bin';
+    const env = buildInjectedEnv(baseOpts());
+    expect(env.PATH.split(':')[0].endsWith('/scripts')).toBe(true);
   });
 });
 

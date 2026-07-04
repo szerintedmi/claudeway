@@ -37,6 +37,8 @@
 
 Defaults-only fields: `tempDir` (`.claudeway-tmp`), `tempMaxAgeDays` (`90`, `0` disables), `threadWorktreeMaxAgeDays` (`14`, `0` disables).
 
+`tempDir` is the base for one working directory **per Claude session** (`<tempDir>/<channelId>/<sessionId>/`), holding inbound downloads (`incoming/`), files Claude generates, generic tool temp (`tmp/`, also exposed as `$TMPDIR`), and the outbound attachment manifest. Everything persists across turns within a session; `tempMaxAgeDays` reclaims a whole session dir once it has been idle that long.
+
 ## Trigger Modes
 
 | Mode | Description |

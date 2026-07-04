@@ -11,8 +11,9 @@ import {
   utimesSync,
   writeFileSync,
 } from 'fs';
-import { dirname, join, relative, resolve, sep } from 'path';
+import { dirname, join, relative, resolve } from 'path';
 import { DATA_DIR, resolveFolder, type Config } from './config.js';
+import { sanitize, isInside } from './path-safety.js';
 
 /**
  * Per-thread git worktrees (merged-plan decision #9): every turn of a Slack
@@ -53,11 +54,6 @@ function git(args: string[], cwd: string, timeout = 60_000): string {
   })
     .toString()
     .trim();
-}
-
-function sanitize(part: string): string {
-  // Collapse `..` (path traversal) before the character filter
-  return part.replace(/\.\.+/g, '.').replace(/[^A-Za-z0-9._-]/g, '-');
 }
 
 export function threadWorktreeBranch(channelId: string, threadTs: string): string {
@@ -160,12 +156,6 @@ function resolveWorktreeBase(repoFolder: string, baseBranch?: string): string | 
   } catch {
     return undefined;
   }
-}
-
-function isInside(base: string, candidate: string): boolean {
-  const resolvedBase = resolve(base);
-  const resolvedCandidate = resolve(candidate);
-  return resolvedCandidate === resolvedBase || resolvedCandidate.startsWith(resolvedBase + sep);
 }
 
 /**

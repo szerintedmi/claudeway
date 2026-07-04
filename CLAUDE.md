@@ -29,7 +29,7 @@ User-facing docs: `README.md` (quick start, commands) + `docs/configuration.md`,
 - `src/slack-history.ts` — Per-Claude-session Slack history watermarks (resumed sessions inject only unseen thread messages)
 - `src/mcp.ts` — MCP config management (read-only config generation for permission enforcement)
 - `src/prompt.ts` — System prompt construction including credential-status injection
-- `src/tempdir.ts` — Temp and scratch directory management
+- `src/tempdir.ts` — Per-session temp directory management (one dir per Claude session: inbound downloads, generated files, tool temp, attachment manifest)
 - `src/sync-repos.ts` — Git clone/pull for configured repos on startup
 - `src/secrets.ts` — Encrypted per-user credential store (AES-256-GCM behind a `SecretStore` interface) + secret scrubbing
 - `src/credentials.ts` — Config-driven per-user credential resolution (personal > explicit shared default > unset)
