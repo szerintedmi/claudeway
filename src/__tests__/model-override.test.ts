@@ -244,6 +244,18 @@ describe('queue modelOverride persistence', () => {
     expect(found && 'modelOverride' in found).toBe(false);
   });
 
+  it('updateQueuedMessage keeps slack.rawText in sync on structured entries', () => {
+    enqueue({
+      ...baseMsg,
+      slack: { rawText: 'do x', senderId: 'U001', botUserId: 'UBOT' },
+    });
+    expect(updateQueuedMessage(channelId, ts, { text: 'edited text' })).toBe(true);
+    const found = getPending().find((m) => m.channelId === channelId && m.ts === ts);
+    expect(found?.text).toBe('edited text');
+    expect(found?.slack?.rawText).toBe('edited text');
+    expect(found?.slack?.senderId).toBe('U001');
+  });
+
   it('round-trips and clears effortOverride', () => {
     enqueue({ ...baseMsg, effortOverride: 'high' });
     let found = getPending().find((m) => m.channelId === channelId && m.ts === ts);

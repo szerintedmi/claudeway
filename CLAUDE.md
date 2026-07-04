@@ -25,7 +25,8 @@ User-facing docs: `README.md` (quick start, commands) + `docs/configuration.md`,
 - `src/adapters/creds/` — Credential enrollment web form (magic-link gated, rate-limited)
 - `src/claude.ts` — Claude CLI orchestration (batch and streaming process runners)
 - `src/config.ts` — Config loading/saving, channel resolution with defaults, `users:` registry + permission resolution
-- `src/queue.ts` — Persistent file-based message queue
+- `src/queue.ts` — Persistent file-based message queue (Slack entries carry a structured `slack` payload; prompts render at processing time)
+- `src/slack-history.ts` — Per-Claude-session Slack history watermarks (resumed sessions inject only unseen thread messages)
 - `src/mcp.ts` — MCP config management (read-only config generation for permission enforcement)
 - `src/prompt.ts` — System prompt construction including credential-status injection
 - `src/tempdir.ts` — Temp and scratch directory management

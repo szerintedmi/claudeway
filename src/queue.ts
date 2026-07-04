@@ -1,6 +1,34 @@
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 
+/** Metadata for a Slack file attachment carried through the queue / rendered into prompts. */
+export interface SlackFileMeta {
+  id: string;
+  name: string;
+  mimetype?: string;
+  size?: number;
+  /** Local path when the file was downloaded eagerly (current-message files only). */
+  localPath?: string;
+}
+
+/**
+ * Raw Slack turn data for render-at-processing-time prompts. Presence of this
+ * payload marks a structured entry: `text` holds only the raw message text and
+ * the final prompt (history injection, headers) is rendered by the Slack
+ * PromptCoordinator just before the Claude spawn. Entries without it are
+ * legacy: their `text` is a fully pre-rendered prompt and passes through as-is.
+ */
+export interface SlackQueuedTurn {
+  /** Raw message text after command/model/effort stripping (attachment text merged in). */
+  rawText: string;
+  senderId: string;
+  senderName?: string;
+  botUserId: string;
+  botName?: string;
+  /** Current-message attachments (localPath set for the eagerly downloaded ones). */
+  files?: SlackFileMeta[];
+}
+
 export interface QueuedMessage {
   channelId: string;
   userId: string;
@@ -19,6 +47,8 @@ export interface QueuedMessage {
   modelOverride?: string;
   /** Per-turn effort override parsed from a `!effort:<level>` message prefix */
   effortOverride?: EffortLevel;
+  /** Structured Slack turn data — prompt rendered at processing time when present. */
+  slack?: SlackQueuedTurn;
 }
 
 import { DATA_DIR, type EffortLevel } from './config.js';
@@ -78,6 +108,8 @@ export function updateQueuedMessage(
   try {
     const existing = JSON.parse(readFileSync(file, 'utf-8')) as QueuedMessage;
     existing.text = updates.text;
+    // Structured entries keep slack.rawText (the render source) in sync with text
+    if (existing.slack) existing.slack.rawText = updates.text;
     // Per-turn overrides: undefined means the edit removed the token — delete the field
     const syncOverride = <K extends 'modelOverride' | 'effortOverride'>(
       key: K,

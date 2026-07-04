@@ -1,6 +1,26 @@
-import type { ToolEventPayload } from '../claude.js';
+import type { ToolEventPayload, SessionState } from '../claude.js';
+import type { QueuedMessage } from '../queue.js';
 // Re-export for convenience — adapters import from core/interfaces instead of claude directly
 export type { ToolEventPayload } from '../claude.js';
+export type { SessionState } from '../claude.js';
+
+/**
+ * Adapter hook for render-at-processing-time prompts. The engine invokes it
+ * from processQueuedMessage() AFTER resolving cwd/worktree/session — the
+ * adapter never derives session ids or artifact paths itself (artifact paths
+ * encode the resolved worktree cwd). Only consulted for structured entries
+ * (queued.slack present); legacy pre-rendered `text` passes through untouched.
+ */
+export interface PromptCoordinator {
+  /** Render the final prompt for this turn. `session.resuming` mirrors the --resume decision. */
+  prepare(queued: QueuedMessage, session: SessionState): Promise<{ text: string }>;
+  /**
+   * Called only after the runner resolves successfully — advances the Slack
+   * history watermark. Failed turns must NOT advance it: re-injecting is
+   * benign duplication, advancing would risk silent loss.
+   */
+  onTurnCommitted(queued: QueuedMessage, session: SessionState): Promise<void>;
+}
 
 /** How a streamed turn ended — passed to {@link IStreamingResponder.finish}. */
 export interface StreamOutcome {

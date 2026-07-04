@@ -11,6 +11,7 @@ import {
   type UserPermissions,
 } from './config.js';
 import { getMcpConfigPath } from './mcp.js';
+import { deleteSlackHistoryState } from './slack-history.js';
 import { type ResolvedCredentials } from './credentials.js';
 import {
   parseStreamLine,
@@ -63,6 +64,12 @@ export interface ClaudeOptions {
    * worktree — keeps existing session IDs stable (merged-plan decision #9).
    */
   sessionFolder?: string;
+  /**
+   * Precomputed session resolution from the engine. When present the runners
+   * use it verbatim, so prompt rendering (which branched on `resuming`) and
+   * `--resume` selection cannot disagree within a turn.
+   */
+  session?: SessionState;
 }
 
 export interface ClaudeStreamingOptions extends ClaudeOptions {
@@ -239,6 +246,36 @@ export function killAllProcesses(): string[] {
  */
 export function deriveSessionId(channelId: string, folder: string, threadTs?: string): string {
   return uuidv5(`${channelId}:${folder}${threadTs ? `:${threadTs}` : ''}`, CLAUDEWAY_NAMESPACE);
+}
+
+/** Session resolution shared by the engine (prompt rendering) and the runners (--resume). */
+export interface SessionState {
+  sessionId: string;
+  /** Resolved cwd — the artifact path encodes this, so both sides must agree on it. */
+  cwd: string;
+  /** True when the local session transcript exists and the CLI will get --resume. */
+  resuming: boolean;
+}
+
+/**
+ * Resolve the session id and whether the CLI will resume it. Session ids derive
+ * from the LOGICAL repo folder (sessionFolder) when cwd is a per-thread
+ * worktree, but the artifact lives under the encoded cwd path.
+ */
+export function resolveSessionState(opts: {
+  channelId: string;
+  cwd: string;
+  sessionFolder?: string;
+  threadTs?: string;
+}): SessionState {
+  const cwd = resolve(opts.cwd);
+  const sessionId = deriveSessionId(
+    opts.channelId,
+    opts.sessionFolder ? resolve(opts.sessionFolder) : cwd,
+    opts.threadTs,
+  );
+  const { jsonl } = sessionArtifactPaths(sessionId, cwd);
+  return { sessionId, cwd, resuming: existsSync(jsonl) };
 }
 
 function spawnClaudeProcess(args: string[], cwd: string, env: Record<string, string>) {
@@ -531,6 +568,10 @@ export function sessionArtifactPaths(sessionId: string, cwd: string) {
  * Called on "already in use" errors before retrying.
  */
 function clearSessionArtifacts(sessionId: string, cwd: string): void {
+  // The Slack history watermark describes this transcript — it must not
+  // outlive it, or the next turn would inject "unseen only" against a session
+  // that lost everything before the watermark.
+  deleteSlackHistoryState(sessionId);
   const paths = sessionArtifactPaths(sessionId, cwd);
   for (const [name, p] of Object.entries(paths)) {
     try {
@@ -547,25 +588,20 @@ function clearSessionArtifacts(sessionId: string, cwd: string): void {
   }
 }
 
-function buildClaudeArgs(
+// Exported for tests (leading-dash prompt regression guard)
+export function buildClaudeArgs(
   options: ClaudeOptions,
   outputFormat: 'json' | 'stream-json',
 ): { args: string[]; sessionId: string; cwd: string; resuming: boolean } {
   const { message, cwd: rawCwd, model, systemPrompt, channelId, threadTs } = options;
-  const cwd = resolve(rawCwd);
 
   const configPath = getConfigPath();
   const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
   // Session IDs derive from the LOGICAL repo folder, not the worktree path —
   // otherwise every pre-worktree session ID would change (decision #9 caveat).
-  const sessionId = deriveSessionId(
-    channelId,
-    options.sessionFolder ? resolve(options.sessionFolder) : cwd,
-    threadTs,
-  );
-
-  const { jsonl: sessionFile } = sessionArtifactPaths(sessionId, cwd);
-  const resuming = existsSync(sessionFile);
+  const { sessionId, cwd, resuming } =
+    options.session ??
+    resolveSessionState({ channelId, cwd: rawCwd, sessionFolder: options.sessionFolder, threadTs });
 
   const args = [
     '-p',
@@ -596,6 +632,10 @@ function buildClaudeArgs(
   args.push('--strict-mcp-config');
   args.push('--dangerously-skip-permissions');
 
+  // End-of-options marker: the rendered prompt may START with '-' (e.g. the
+  // "--- Slack context ---" header, or a user message beginning with "-p"),
+  // which commander would otherwise parse as an unknown option.
+  args.push('--');
   args.push(buildMessageWithFiles(message, options.filePaths));
 
   return { args, sessionId, cwd, resuming };
@@ -697,19 +737,13 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
   resuming: boolean;
 } {
   const { cwd: rawCwd, model, systemPrompt, channelId, threadTs } = options;
-  const cwd = resolve(rawCwd);
 
   const configPath = getConfigPath();
   const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
   // See buildClaudeArgs: session IDs stay keyed to the logical repo folder
-  const sessionId = deriveSessionId(
-    channelId,
-    options.sessionFolder ? resolve(options.sessionFolder) : cwd,
-    threadTs,
-  );
-
-  const { jsonl: sessionFile } = sessionArtifactPaths(sessionId, cwd);
-  const resuming = existsSync(sessionFile);
+  const { sessionId, cwd, resuming } =
+    options.session ??
+    resolveSessionState({ channelId, cwd: rawCwd, sessionFolder: options.sessionFolder, threadTs });
 
   const args = [
     '-p',

@@ -8,6 +8,7 @@ import { FILE_TEMP_BASE } from './adapters/slack/files.js';
 import { cleanupStaleTempFiles } from './tempdir.js';
 import { cleanupGitCredentialFiles } from './git-credentials.js';
 import { cleanupStaleWorktrees } from './worktrees.js';
+import { cleanupStaleSlackHistory } from './slack-history.js';
 import { getSecretStore } from './secrets.js';
 
 // --- Shared startup utilities ---
@@ -131,6 +132,14 @@ try {
   cleanupStaleWorktrees(config);
 } catch (err) {
   console.warn('[startup] Worktree cleanup failed:', err instanceof Error ? err.message : err);
+}
+
+// Prune stale Slack history watermarks (safe: worst case is one redundant
+// full-thread context injection)
+try {
+  cleanupStaleSlackHistory();
+} catch (err) {
+  console.warn('[startup] Slack history cleanup failed:', err instanceof Error ? err.message : err);
 }
 
 // --- Conditional adapter boot ---

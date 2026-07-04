@@ -107,7 +107,7 @@ export async function startSlackAdapter(): Promise<App> {
   );
 
   // Drain any messages left in queue from before restart
-  drainAllPending(app);
+  drainAllPending(app, canResolveUsers);
 
   return app;
 }

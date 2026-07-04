@@ -3,7 +3,6 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  readFileSync,
   readlinkSync,
   readdirSync,
   rmSync,
@@ -27,8 +26,11 @@ export const DEFAULT_THREAD_WORKTREE_MAX_AGE_DAYS = 14;
 
 const WORKTREES_BASE = () => resolve(DATA_DIR, 'worktrees');
 const MARKER_FILE = '.claudeway-last-used';
-const READONLY_SUBMODULES_FILE = '.claudeway-readonly-submodules';
-const INTERNAL_WORKTREE_FILES = new Set([MARKER_FILE, READONLY_SUBMODULES_FILE]);
+// Legacy marker no longer written (shared-submodule guidance now lives in the
+// configured systemPrompt); still excluded from the dirty-check so worktrees
+// created before its removal don't read as having uncommitted work.
+const LEGACY_READONLY_SUBMODULES_FILE = '.claudeway-readonly-submodules';
+const INTERNAL_WORKTREE_FILES = new Set([MARKER_FILE, LEGACY_READONLY_SUBMODULES_FILE]);
 
 /** Minimum gap between `git fetch origin` calls per repo (worktree creation). */
 const FETCH_MIN_INTERVAL_MS = 5 * 60_000;
@@ -104,12 +106,14 @@ function touchMarker(worktreeDir: string): void {
 }
 
 /**
- * Throttled `git fetch origin` so new threads start from the latest remote
- * state without hammering the remote on a burst of new threads. Failure
- * (offline, no origin) is non-fatal; the attempt time is recorded either way
- * so a dead remote can't block every new thread on a fetch timeout.
+ * Throttled refresh of the main checkout so new threads start from the latest
+ * remote state without hammering the remote on a burst of new threads: fetches
+ * origin, then updates submodules to the tip of their tracked branch (--remote)
+ * so the shared, symlinked submodule working trees stay at latest main. Failures
+ * (offline, no origin) are non-fatal; the attempt time is recorded either way so
+ * a dead remote can't block every new thread on a fetch timeout.
  */
-function fetchOriginThrottled(repoFolder: string): void {
+function refreshMainCheckoutThrottled(repoFolder: string): void {
   const now = Date.now();
   const last = lastFetchAt.get(repoFolder);
   if (last !== undefined && now - last < FETCH_MIN_INTERVAL_MS) return;
@@ -127,6 +131,16 @@ function fetchOriginThrottled(repoFolder: string): void {
       err instanceof Error ? err.message : err,
     );
   }
+  // Bump shared submodules to latest main. --remote tracks each submodule's
+  // configured branch (or the remote default); no-op when the repo has none.
+  try {
+    git(['submodule', 'update', '--remote', '--recursive'], repoFolder);
+  } catch (err) {
+    console.warn(
+      `[worktrees] submodule --remote update failed in ${repoFolder} — submodules stay at their current SHA:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
 }
 
 /**
@@ -138,7 +152,7 @@ function fetchOriginThrottled(repoFolder: string): void {
  */
 function resolveWorktreeBase(repoFolder: string, baseBranch?: string): string | undefined {
   try {
-    fetchOriginThrottled(repoFolder);
+    refreshMainCheckoutThrottled(repoFolder);
     const branch = baseBranch ?? git(['rev-parse', '--abbrev-ref', 'HEAD'], repoFolder);
     if (!branch || branch === 'HEAD') return undefined;
     git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`], repoFolder);
@@ -212,7 +226,6 @@ function gitlinkPaths(dir: string): string[] {
  */
 function linkMissingSubmodules(repoFolder: string, dir: string): void {
   if (!existsSync(join(dir, '.gitmodules'))) return;
-  const linked: string[] = [];
   const newlyLinked: string[] = [];
   try {
     for (const submodulePath of gitlinkPaths(dir)) {
@@ -223,7 +236,6 @@ function linkMissingSubmodules(repoFolder: string, dir: string): void {
         continue;
       }
       if (isSymlinkTo(linkPath, targetPath)) {
-        linked.push(submodulePath);
         continue;
       }
       // Populated checkout (or a foreign symlink to one) — leave it alone
@@ -251,14 +263,7 @@ function linkMissingSubmodules(repoFolder: string, dir: string): void {
       } catch {
         // Best effort: the symlink still works, but `git status` may show it.
       }
-      linked.push(submodulePath);
       newlyLinked.push(submodulePath);
-    }
-    // Marker file lists ALL currently linked paths (feeds the prompt block),
-    // but only rewrite/log when something changed — this runs every message.
-    const markerPath = join(dir, READONLY_SUBMODULES_FILE);
-    if (linked.length > 0 && (newlyLinked.length > 0 || !existsSync(markerPath))) {
-      writeFileSync(markerPath, linked.join('\n') + '\n', 'utf-8');
     }
     if (newlyLinked.length > 0) {
       console.log(
@@ -271,23 +276,6 @@ function linkMissingSubmodules(repoFolder: string, dir: string): void {
       err instanceof Error ? err.message : err,
     );
   }
-}
-
-export function buildReadonlySubmodulePrompt(worktreeDir: string): string {
-  const marker = join(worktreeDir, READONLY_SUBMODULES_FILE);
-  if (!existsSync(marker)) return '';
-  const paths = readFileSync(marker, 'utf-8');
-  const listed = paths
-    .split('\n')
-    .map((line: string) => line.trim())
-    .filter(Boolean);
-  if (listed.length === 0) return '';
-  return (
-    '\n\n## Read-only shared submodules\n\n' +
-    'The following submodule paths are symlinks to the main checkout and are shared read-only reference material:\n' +
-    listed.map((path: string) => `- ${path}`).join('\n') +
-    '\n\nDo not edit files under these paths or run mutating git commands there. Read/search/history commands are OK.'
-  );
 }
 
 /**
