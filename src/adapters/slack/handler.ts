@@ -23,7 +23,7 @@ import {
 import { shouldRespond } from '../../prompt.js';
 import { resolveUserName } from './thread.js';
 import { extractTextFromAttachments, type SlackAttachment } from './attachments.js';
-import { downloadSlackFiles, type SlackFile } from './files.js';
+import { type SlackFile } from './files.js';
 import { SlackChannelResponder } from './responder.js';
 import { makeSlackPromptCoordinator } from './coordinator.js';
 import { drainChannel, channelBusy, isMessageProcessing } from '../../core/engine.js';
@@ -363,46 +363,27 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
       return;
     }
 
-    // Download file attachments before enqueueing (includes files from shared messages)
-    let filePaths: string[] = [];
-    let pathsById = new Map<string, string>();
-    if (hasFiles) {
-      const token = context.botToken ?? process.env.SLACK_BOT_TOKEN ?? '';
-      const result = await downloadSlackFiles(allFiles, token, msg.channel);
-      filePaths = result.paths;
-      pathsById = result.pathsById;
-      if (result.failedCount > 0) {
-        const threadTs = msg.thread_ts ?? msg.ts;
-        await warnInThread(
-          client,
-          msg.channel,
-          threadTs,
-          `Failed to download ${result.failedCount} of ${result.totalCount} file(s). Check server logs.`,
-        );
-      }
-    }
-
-    // If files were expected but all exceeded the size limit, and there's no text — abort
-    if (!hasText && hasFiles && filePaths.length === 0) return;
-
+    // Downloads are DEFERRED to processing time (D10): the resolved session
+    // isn't known here (config is hot-reloaded again in the engine, so a
+    // folder/repo change while the message is queued would move the session),
+    // and files for messages edited/deleted/killed before processing shouldn't
+    // be downloaded at all. The coordinator downloads from `downloadRef` into
+    // the resolved session's incoming/.
     const threadTs = msg.thread_ts ?? msg.ts;
 
     const rawText =
       [msg.text, attachmentText].filter(Boolean).join('\n\n') ||
-      (filePaths.length > 0 ? 'Please review the attached file(s).' : '');
+      (hasFiles ? 'Please review the attached file(s).' : '');
 
-    // Current-message attachment metadata — oversized/undownloadable files are
-    // represented too, just without a local path
-    const fileMetas: SlackFileMeta[] = allFiles.map((f) => {
-      const localPath = pathsById.get(f.id);
-      return {
-        id: f.id,
-        name: f.name,
-        ...(f.mimetype ? { mimetype: f.mimetype } : {}),
-        ...(f.size !== undefined ? { size: f.size } : {}),
-        ...(localPath ? { localPath } : {}),
-      };
-    });
+    // Current-message attachment metadata. downloadRef (url_private_download) is
+    // kept SERVER-SIDE on the queue entry only — never in the prompt or env.
+    const fileMetas: SlackFileMeta[] = allFiles.map((f) => ({
+      id: f.id,
+      name: f.name,
+      ...(f.mimetype ? { mimetype: f.mimetype } : {}),
+      ...(f.size !== undefined ? { size: f.size } : {}),
+      ...(f.url_private_download ? { downloadRef: f.url_private_download } : {}),
+    }));
 
     // Sender + bot identity for the message prefix / new-session header. History
     // is NOT fetched here — the coordinator renders it at processing time.
@@ -420,7 +401,6 @@ export function registerMessageHandler(app: App, botUserId: string, canResolveUs
       threadTs,
       botUserId,
       queuedAt: new Date().toISOString(),
-      ...(filePaths.length > 0 ? { filePaths } : {}),
       ...(senderName ? { userName: senderName } : {}),
       ...(modelOverride ? { modelOverride } : {}),
       ...(effortOverride ? { effortOverride } : {}),

@@ -12,8 +12,20 @@ export type { SessionState } from '../claude.js';
  * (queued.slack present); legacy pre-rendered `text` passes through untouched.
  */
 export interface PromptCoordinator {
-  /** Render the final prompt for this turn. `session.resuming` mirrors the --resume decision. */
-  prepare(queued: QueuedMessage, session: SessionState): Promise<{ text: string }>;
+  /**
+   * Render the final prompt for this turn. `session.resuming` mirrors the
+   * --resume decision. `ctx.sessionTempDir` is the resolved per-session temp
+   * dir (already created by the engine) — the coordinator downloads inbound
+   * files into its `incoming/` at processing time (D10). Any non-fatal
+   * download issues are returned as `warnings`, which the engine forwards to
+   * `responder.warn` so a failed/oversized download degrades gracefully
+   * instead of throwing or silently dropping the file.
+   */
+  prepare(
+    queued: QueuedMessage,
+    session: SessionState,
+    ctx: { sessionTempDir: string },
+  ): Promise<{ text: string; warnings?: string[] }>;
   /**
    * Called only after the runner resolves successfully — advances the Slack
    * history watermark. Failed turns must NOT advance it: re-injecting is

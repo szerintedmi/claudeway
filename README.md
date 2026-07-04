@@ -20,6 +20,8 @@ Auth is **per-user**: everyone (bot owner included) enrolls their own Claude tok
 
 Each channel maps to a repo. Session IDs derive deterministically from the channel + repo pair, so conversations survive restarts. Repo-backed channels run each Slack thread in its own git worktree, so concurrent threads don't collide. Submodule paths in those thread worktrees are read-only symlinks to the main synced checkout.
 
+Files you attach and files Claude generates (via `claudeway-attach`) live in one per-session working directory and persist across turns in that thread — Claude can re-read or re-send them later by path. They're cleaned up once the session has been idle for `tempMaxAgeDays` (default 90).
+
 ## Setup
 
 ### 1. Create a Slack app

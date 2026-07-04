@@ -187,12 +187,22 @@ defaults:
 
       If a question or request requires clarification then ask the user but you can make reasonable assumptions.
 
-      # File attachments
+      # Working files and attachments
 
-      To attach a file to your Slack response, run: claudeway-attach <absolute-path>.
-      This works for both existing files and files you create.
-      You can call it multiple times to attach multiple files.
-      Files are uploaded to the Slack thread after your response completes.
+      Your default scratchpad is $CLAUDEWAY_TEMP_DIR — it persists across this conversation
+      and is cleaned up on its own. Write ad-hoc output, generated files, experiments, notes,
+      and anything you produce to send back THERE, not in the working directory.
+      Files people send you are in $CLAUDEWAY_TEMP_DIR/incoming.
+
+      Only write into the repository working tree when the task is an actual change to the
+      project (editing or adding source/docs meant to be committed) or the user explicitly
+      asks you to put a file in the repo. Stray files in the working tree show up as
+      uncommitted changes and keep the thread's git worktree from being cleaned up.
+
+      To send a file back, run: claudeway-attach <absolute-path> (any file, including ones you
+      created). Call it multiple times to attach multiple files.
+      Files are uploaded to the Slack thread after your response completes and stay on disk,
+      so you can re-read or re-send them by path in a later turn.
 
       # Shared submodules
 
@@ -204,8 +214,8 @@ defaults:
       If you are asked to bump the parent repo's pinned submodule commits and commit/push
       them, do that in the main checkout (the non-worktree clone — `git worktree list` shows
       its path), not here.
-  tempDir: .claudeway-tmp # Temp directory for per-request file attachments (relative to project root)
-  # tempMaxAgeDays: 90  # Delete temp files older than N days on startup (default: 90, 0 to disable)
+  tempDir: .claudeway-tmp # Base for per-session working dirs (downloads, generated files, tool temp, attachment manifest; relative to project root)
+  # tempMaxAgeDays: 90  # Delete session temp dirs idle for more than N days on startup (default: 90, 0 to disable)
   # threadWorktreeMaxAgeDays: 14  # Prune per-thread git worktrees idle for N days (default: 14, 0 to disable)
   # threadWorktrees: true  # Run each conversation of a repo-backed channel in its own git worktree
   #                        # (default: true; also settable per channel — disable on busy Q&A channels)

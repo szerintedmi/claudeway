@@ -8,6 +8,8 @@ import {
 } from '../../slack-history.js';
 import { fetchThreadEntries, type SlackThreadEntry } from './thread.js';
 import { renderSlackPrompt } from './prompt.js';
+import { downloadSlackFiles, type SlackFile } from './files.js';
+import type { SlackFileMeta } from '../../queue.js';
 
 /**
  * History selection (docs/plans/2026-07-04-slack-history-injection-rework.md):
@@ -32,12 +34,66 @@ export function selectContextEntries(
   });
 }
 
+/**
+ * Download the current message's files into the session's incoming/ and return
+ * the render metas with `localPath` filled in (so the prompt's `path=` points at
+ * the freshly downloaded file), plus any non-fatal warnings. Files without a
+ * download reference (e.g. oversized ones represented for metadata only) pass
+ * through without a local path.
+ */
+async function resolveCurrentFiles(
+  files: SlackFileMeta[] | undefined,
+  token: string,
+  sessionTempDir: string,
+): Promise<{ files?: SlackFileMeta[]; warnings: string[] }> {
+  if (!files || files.length === 0) return { files, warnings: [] };
+
+  const downloadable: SlackFile[] = files
+    .filter((f) => f.downloadRef)
+    .map((f) => ({
+      id: f.id,
+      name: f.name,
+      mimetype: f.mimetype ?? '',
+      size: f.size ?? 0,
+      url_private_download: f.downloadRef,
+    }));
+
+  const warnings: string[] = [];
+  let pathsById = new Map<string, string>();
+  if (downloadable.length > 0) {
+    const result = await downloadSlackFiles(downloadable, token, sessionTempDir);
+    pathsById = result.pathsById;
+    if (result.failedCount > 0) {
+      warnings.push(
+        `Failed to download ${result.failedCount} of ${result.totalCount} file(s). Check server logs.`,
+      );
+    }
+    if (result.oversizedCount > 0) {
+      warnings.push(`Skipped ${result.oversizedCount} file(s) over the 25MB attachment limit.`);
+    }
+  }
+
+  // Rebuild metas with the resolved local path; drop the server-side downloadRef
+  // so it can never leak into the rendered prompt.
+  const rendered = files.map((f) => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { downloadRef, ...rest } = f;
+    const localPath = pathsById.get(f.id);
+    return localPath ? { ...rest, localPath } : { ...rest };
+  });
+  return { files: rendered, warnings };
+}
+
 export function makeSlackPromptCoordinator(
   client: WebClient,
   canResolveUsers = true,
 ): PromptCoordinator {
   return {
-    async prepare(queued: QueuedMessage, session: SessionState): Promise<{ text: string }> {
+    async prepare(
+      queued: QueuedMessage,
+      session: SessionState,
+      ctx: { sessionTempDir: string },
+    ): Promise<{ text: string; warnings?: string[] }> {
       const slack = queued.slack;
       // Engine gates on queued.slack, but keep the legacy passthrough as a guard
       if (!slack) return { text: queued.text };
@@ -67,6 +123,17 @@ export function makeSlackPromptCoordinator(
         currentTs: queued.ts,
       });
 
+      // Download current-message files at processing time (D10), keyed by the
+      // resolved session — so a folder/repo change while the message was queued
+      // lands the files under the correct session's incoming/, not an orphaned
+      // enqueue-time bucket. Failures/oversized files become warnings, not throws.
+      const token = client.token ?? process.env.SLACK_BOT_TOKEN ?? '';
+      const { files: currentFiles, warnings } = await resolveCurrentFiles(
+        slack.files,
+        token,
+        ctx.sessionTempDir,
+      );
+
       const text = renderSlackPrompt({
         channelId: queued.channelId,
         threadTs: queued.threadTs,
@@ -79,10 +146,10 @@ export function makeSlackPromptCoordinator(
           userId: slack.senderId,
           authorName: slack.senderName,
           text: slack.rawText,
-          files: slack.files,
+          files: currentFiles,
         },
       });
-      return { text };
+      return warnings.length > 0 ? { text, warnings } : { text };
     },
 
     async onTurnCommitted(queued: QueuedMessage, session: SessionState): Promise<void> {

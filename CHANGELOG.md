@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.35.0] - 2026-07-04
+
+### Changed
+- **Temp directories consolidated into one per-session working dir** (`docs/plans/2026-07-04-temp-dir-consolidation.md`). Inbound downloads, files Claude generates, generic tool temp, and the outbound attachment manifest now all live under `<tempDir>/<channelId>/<sessionId>/`, keyed by the resolved Claude session id (1:1 with the transcript). Everything persists across turns within a session — Claude can re-read files people sent it and files it generated, by path, in any later turn — and a single age-based GC (`cleanupStaleTempDirs`, `tempMaxAgeDays`) reclaims the whole tree using a `.last-used` marker so active text-only sessions aren't reaped
+  - **One env var**: `CLAUDEWAY_TEMP_DIR` is the session dir and `TMPDIR` points at its `tmp/` subfolder, so generic tool temp (`mktemp`, Python `tempfile`, …) lands inside the managed tree instead of leaking to `/tmp`. Retired `CLAUDEWAY_SCRATCH_DIR`, `CLAUDEWAY_TEMP_BASE`, and the `<channelId>.current` pointer file (persistent mode now sets the fixed session dir once at spawn)
+  - **Slack downloads deferred to processing time**, keyed by the resolved session, so a channel `folder`/`repo` change while a message is queued no longer orphans downloads under a stale session id; failed/oversized downloads surface as thread warnings instead of throwing or being silently dropped. The download reference stays server-side on the queue entry, never in the prompt or subprocess env
+  - **Persistent process respawns on a session-id change** (not just an identity change), so a mid-thread folder change tracks the new cwd/env/temp dir and drains attachments from the correct session dir
+  - **Docker**: the temp base (`.claudeway-tmp`) is now bind-mounted so per-session files survive container recreation (matching the old `.docker/files` behaviour). Trade-off: `$TMPDIR` leaves the 100 MB `/tmp` tmpfs and lands on disk under the mount
+  - **Migration**: old stores (`.docker/files/`, `.claudeway-tmp/req-*`, `.claudeway-tmp/*.current`, `.claudeway-tmp/scratch/`) are no longer written but linger; delete them by hand once (see `docs/troubleshooting.md`). No automatic sweep. In-flight persistent processes keep their old dirs until their next natural respawn
+
 ## [0.34.1] - 2026-07-04
 
 ### Fixed

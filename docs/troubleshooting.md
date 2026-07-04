@@ -17,3 +17,10 @@
 **Only one instance runs at a time:** Claudeway uses a pidfile lock (`claudeway.pid`). Stale pidfiles after a crash are detected and cleaned up automatically.
 
 **Images not being analyzed:** The Slack app needs the `files:read` scope. Supported: PNG, JPEG, GIF, WebP (max 5MB each). Non-image files are silently ignored.
+
+**Old temp/scratch dirs after upgrading to per-session temp dirs:** The temp-dir consolidation stopped writing the old stores, but pre-existing dirs linger (they don't conflict with the new `<tempDir>/<channelId>/<sessionId>/` layout, so this is non-urgent). Delete them by hand once — paths are relative to the server working dir (`/app` in Docker):
+
+- `.docker/files/` — entire tree (old per-channel Slack downloads)
+- `.claudeway-tmp/req-*` — old per-request outbox dirs
+- `.claudeway-tmp/*.current` — old persistent-mode pointer files
+- `.claudeway-tmp/scratch/` — old per-channel scratch

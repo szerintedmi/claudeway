@@ -1,55 +1,95 @@
 import {
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   existsSync,
   writeFileSync,
   readdirSync,
   statSync,
-  unlinkSync,
+  utimesSync,
 } from 'fs';
 import { join } from 'path';
+import { sanitize } from './path-safety.js';
 
 /**
- * Ensure a persistent per-channel scratch directory exists.
- * Returns the path to `.claudeway-tmp/scratch/<channelId>/`.
- * Unlike per-request temp dirs, scratch dirs persist across messages.
+ * Per-session temp directory management.
+ *
+ * One directory per resolved Claude session holds everything for a
+ * conversation: inbound downloads (`incoming/`), generic tool temp (`tmp/`,
+ * the `$TMPDIR` target), Claude's generated working files (at the root), and
+ * the outbound upload manifest (`.attachments`). Everything persists across
+ * turns within the session; a single age-based GC reclaims the whole tree.
+ *
+ * Layout (see docs/plans/2026-07-04-temp-dir-consolidation.md):
+ *
+ *   <baseDir>/<sanitize(channelId)>/<sessionId>/   ← $CLAUDEWAY_TEMP_DIR
+ *     incoming/                                     ← inbound downloads
+ *     tmp/                                          ← $TMPDIR (generic tool temp)
+ *     .attachments                                  ← outbound upload manifest
+ *     .last-used                                    ← touched every turn; GC keys off this
+ *     <root>                                        ← Claude's workspace
  */
-export function ensureScratchDir(baseDir: string, channelId: string): string {
-  const dir = join(baseDir, 'scratch', channelId);
-  mkdirSync(dir, { recursive: true });
+
+export const INCOMING_SUBDIR = 'incoming';
+export const TOOL_TMP_SUBDIR = 'tmp';
+export const ATTACHMENTS_FILE = '.attachments';
+export const LAST_USED_MARKER = '.last-used';
+
+/** `<sessionTempDir>/incoming` — inbound (sender-named) downloads. */
+export function resolveIncomingDir(sessionTempDir: string): string {
+  return join(sessionTempDir, INCOMING_SUBDIR);
+}
+
+/** `<sessionTempDir>/tmp` — the `$TMPDIR` target for generic tool temp (D8). */
+export function toolTmpDir(sessionTempDir: string): string {
+  return join(sessionTempDir, TOOL_TMP_SUBDIR);
+}
+
+/** Touch the `.last-used` marker so age-based GC sees recent activity (D7). */
+function touchLastUsed(sessionTempDir: string): void {
+  const marker = join(sessionTempDir, LAST_USED_MARKER);
+  try {
+    if (existsSync(marker)) {
+      const now = new Date();
+      utimesSync(marker, now, now);
+    } else {
+      writeFileSync(marker, '', 'utf-8');
+    }
+  } catch {
+    // best effort
+  }
+}
+
+/**
+ * Create (or reuse) the temp directory for a resolved Claude session and return
+ * its path. Ensures `incoming/` and `tmp/` exist and touches `.last-used` on
+ * every call so an active session survives GC even on turns that write nothing
+ * under the dir (D7). Keyed by the resolved `sessionId` so the temp bucket is
+ * 1:1 with the Claude transcript (D1); `channelId` is a sanitized parent for
+ * human-readable grouping (`sessionId` is a UUID and needs no sanitizing).
+ */
+export function resolveSessionTempDir(
+  baseDir: string,
+  channelId: string,
+  sessionId: string,
+): string {
+  const dir = join(baseDir, sanitize(channelId), sessionId);
+  mkdirSync(resolveIncomingDir(dir), { recursive: true });
+  mkdirSync(toolTmpDir(dir), { recursive: true });
+  touchLastUsed(dir);
   return dir;
 }
 
 /**
- * Create a per-request temporary directory within the configured base temp dir.
- * Also writes a pointer file (<channelId>.current) so the claudeway-attach script
- * can find the current request's temp dir in persistent process mode.
+ * Read the outbound attachment manifest (`<sessionTempDir>/.attachments`).
+ * Returns absolute paths that should be uploaded, skipping ones that no longer
+ * exist (best effort).
  */
-export function createRequestTempDir(baseDir: string, channelId: string): string {
-  mkdirSync(baseDir, { recursive: true });
-  const requestDir = mkdtempSync(join(baseDir, 'req-'));
-
-  // Write pointer file for persistent mode (claudeway-attach reads this)
-  const pointerPath = join(baseDir, `${channelId}.current`);
-  writeFileSync(pointerPath, requestDir, 'utf-8');
-
-  return requestDir;
-}
-
-/**
- * Read the attachment manifest from a request temp directory.
- * Returns absolute paths to files that should be uploaded.
- * Skips paths that no longer exist (best effort).
- */
-export function readAttachmentManifest(requestDir: string): string[] {
-  const manifestPath = join(requestDir, 'attachments.txt');
+export function readAttachmentManifest(sessionTempDir: string): string[] {
+  const manifestPath = join(sessionTempDir, ATTACHMENTS_FILE);
   if (!existsSync(manifestPath)) return [];
-
   try {
-    const content = readFileSync(manifestPath, 'utf-8');
-    return content
+    return readFileSync(manifestPath, 'utf-8')
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line.length > 0 && existsSync(line));
@@ -59,156 +99,77 @@ export function readAttachmentManifest(requestDir: string): string[] {
 }
 
 /**
- * Remove the request temp directory and its pointer file.
- * Safe to call even if they don't exist.
+ * Return the manifest's paths, then clear the manifest ONLY (files are left on
+ * disk). Clearing prevents re-uploading every previously-staged file on the
+ * next turn; keeping the files lets Claude re-read/re-send them later by path.
  */
-export function cleanupRequestTempDir(
-  requestDir: string,
-  baseDir: string,
-  channelId: string,
-): void {
+export function drainAttachmentManifest(sessionTempDir: string): string[] {
+  const paths = readAttachmentManifest(sessionTempDir);
+  const manifestPath = join(sessionTempDir, ATTACHMENTS_FILE);
   try {
-    rmSync(requestDir, { recursive: true, force: true });
+    rmSync(manifestPath, { force: true });
   } catch {
-    // Best effort
+    // best effort — files still uploaded; a lingering manifest re-uploads next turn
   }
-  // Remove pointer file if it still points to this request dir
-  try {
-    const pointerPath = join(baseDir, `${channelId}.current`);
-    if (existsSync(pointerPath) && readFileSync(pointerPath, 'utf-8').trim() === requestDir) {
-      rmSync(pointerPath, { force: true });
-    }
-  } catch {
-    // Best effort
-  }
+  return paths;
 }
 
-/**
- * Return the newest mtime (ms) of any file in a directory tree.
- * Returns 0 if the directory is empty or unreadable.
- */
-function newestMtimeMs(dir: string): number {
-  let max = 0;
+function safeReaddirDirs(dir: string): string[] {
   try {
-    for (const entry of readdirSync(dir)) {
-      const full = join(dir, entry);
+    return readdirSync(dir).filter((e) => {
       try {
-        const stat = statSync(full);
-        if (stat.isDirectory()) {
-          max = Math.max(max, newestMtimeMs(full));
-        } else {
-          max = Math.max(max, stat.mtimeMs);
-        }
+        return statSync(join(dir, e)).isDirectory();
       } catch {
-        // skip unreadable entries
+        return false;
       }
-    }
+    });
   } catch {
-    // dir unreadable
+    return [];
   }
-  return max;
 }
 
+/** UUID shape of a resolved session id (the only dirs this GC reaps). */
+const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
- * Delete stale temp artifacts at startup. Covers three systems:
- * 1. Slack download files in fileTempBase (.docker/files/)
- * 2. Orphaned req-* dirs and *.current pointer files in tempBaseDir
- * 3. Scratch dirs in tempBaseDir/scratch/ (uses newest file mtime in subtree)
+ * Delete stale session temp dirs at startup. Walks
+ * `<baseDir>/<channelId>/<sessionId>` and keys each session off its
+ * `.last-used` marker mtime (falling back to the dir's own mtime), so a session
+ * kept active by text-only turns — which touch the marker but write no files —
+ * is preserved. One retention (`tempMaxAgeDays`). Does nothing when
+ * `tempMaxAgeDays <= 0`.
  *
- * Does nothing if tempMaxAgeDays <= 0.
+ * Only reaps leaf dirs whose name is a UUID session id; anything else under the
+ * base (e.g. non-session dirs) is left untouched.
  */
-export function cleanupStaleTempFiles(
-  tempMaxAgeDays: number,
-  tempBaseDir: string,
-  fileTempBase: string,
-): void {
+export function cleanupStaleTempDirs(tempMaxAgeDays: number, baseDir: string): void {
   if (tempMaxAgeDays <= 0) return;
+  if (!existsSync(baseDir)) return;
 
   const cutoff = Date.now() - tempMaxAgeDays * 24 * 60 * 60 * 1000;
 
-  // 1. Slack download files
-  if (existsSync(fileTempBase)) {
-    try {
-      for (const channelDir of readdirSync(fileTempBase)) {
-        const channelPath = join(fileTempBase, channelDir);
-        try {
-          for (const name of readdirSync(channelPath)) {
-            const filepath = join(channelPath, name);
-            try {
-              if (statSync(filepath).mtimeMs < cutoff) {
-                unlinkSync(filepath);
-                console.log(`[cleanup] Removed old temp file: ${channelDir}/${name}`);
-              }
-            } catch {
-              // ignore per-file errors
-            }
-          }
-          // Remove empty channel dirs
-          try {
-            if (readdirSync(channelPath).length === 0) {
-              rmSync(channelPath, { recursive: true, force: true });
-            }
-          } catch {
-            // ignore
-          }
-        } catch {
-          // not a directory or read failed
-        }
-      }
-    } catch {
-      // base dir read failed
-    }
-  }
-
-  if (!existsSync(tempBaseDir)) return;
-
-  // 2. Orphaned req-* dirs and stale *.current pointer files
-  try {
-    for (const entry of readdirSync(tempBaseDir)) {
-      const fullPath = join(tempBaseDir, entry);
+  for (const channelDir of safeReaddirDirs(baseDir)) {
+    const channelPath = join(baseDir, channelDir);
+    for (const sessionDir of safeReaddirDirs(channelPath)) {
+      if (!SESSION_ID_RE.test(sessionDir)) continue;
+      const dir = join(channelPath, sessionDir);
       try {
-        const stat = statSync(fullPath);
-        if (entry.startsWith('req-') && stat.isDirectory()) {
-          const newest = newestMtimeMs(fullPath);
-          // Fall back to dir mtime when empty (don't delete fresh empty dirs)
-          const effectiveMtime = newest > 0 ? newest : stat.mtimeMs;
-          if (effectiveMtime < cutoff) {
-            rmSync(fullPath, { recursive: true, force: true });
-            console.log(`[cleanup] Removed orphaned request dir: ${entry}`);
-          }
-        } else if (entry.endsWith('.current') && stat.isFile() && stat.mtimeMs < cutoff) {
-          unlinkSync(fullPath);
-          console.log(`[cleanup] Removed stale pointer file: ${entry}`);
-        }
+        const marker = join(dir, LAST_USED_MARKER);
+        const mtime = existsSync(marker) ? statSync(marker).mtimeMs : statSync(dir).mtimeMs;
+        if (mtime >= cutoff) continue;
+        rmSync(dir, { recursive: true, force: true });
+        console.log(`[cleanup] Removed stale session temp dir: ${channelDir}/${sessionDir}`);
       } catch {
         // skip unreadable entries
       }
     }
-  } catch {
-    // tempBaseDir read failed
-  }
-
-  // 3. Scratch dirs — use newest file mtime in subtree
-  const scratchBase = join(tempBaseDir, 'scratch');
-  if (!existsSync(scratchBase)) return;
-  try {
-    for (const channelDir of readdirSync(scratchBase)) {
-      const channelPath = join(scratchBase, channelDir);
-      try {
-        const dirStat = statSync(channelPath);
-        if (!dirStat.isDirectory()) continue;
-        const newest = newestMtimeMs(channelPath);
-        // Fall back to dir mtime when empty (don't delete fresh empty dirs)
-        const effectiveMtime = newest > 0 ? newest : dirStat.mtimeMs;
-        if (effectiveMtime < cutoff) {
-          rmSync(channelPath, { recursive: true, force: true });
-          console.log(`[cleanup] Removed stale scratch dir: ${channelDir}`);
-        }
-      } catch {
-        // skip
+    // Remove now-empty channel dirs
+    try {
+      if (readdirSync(channelPath).length === 0) {
+        rmSync(channelPath, { recursive: true, force: true });
       }
+    } catch {
+      // ignore
     }
-  } catch {
-    // scratch dir read failed
   }
 }

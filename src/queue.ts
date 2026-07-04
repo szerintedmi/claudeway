@@ -7,7 +7,14 @@ export interface SlackFileMeta {
   name: string;
   mimetype?: string;
   size?: number;
-  /** Local path when the file was downloaded eagerly (current-message files only). */
+  /**
+   * Download reference (`url_private_download`) for current-message files.
+   * Downloads are deferred to processing time (D10), so this is kept
+   * SERVER-SIDE in the queue file only — never rendered into the prompt or the
+   * subprocess env. The local path is filled in at download time.
+   */
+  downloadRef?: string;
+  /** Local path once the file has been downloaded (set by the coordinator at render time). */
   localPath?: string;
 }
 
@@ -25,7 +32,7 @@ export interface SlackQueuedTurn {
   senderName?: string;
   botUserId: string;
   botName?: string;
-  /** Current-message attachments (localPath set for the eagerly downloaded ones). */
+  /** Current-message attachments (downloadRef carries the deferred download reference). */
   files?: SlackFileMeta[];
 }
 

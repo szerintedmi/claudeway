@@ -22,12 +22,7 @@ import { scrubSecrets } from '../secrets.js';
 import { audit } from '../audit.js';
 import { ensureThreadWorktree } from '../worktrees.js';
 import { dequeue, getPendingForChannel, type QueuedMessage } from '../queue.js';
-import {
-  createRequestTempDir,
-  cleanupRequestTempDir,
-  ensureScratchDir,
-  readAttachmentManifest,
-} from '../tempdir.js';
+import { resolveSessionTempDir, drainAttachmentManifest } from '../tempdir.js';
 import type { ChannelResponder, IStreamingResponder, PromptCoordinator } from './interfaces.js';
 
 // Re-export QueuedMessage for consumers
@@ -72,7 +67,6 @@ interface PermissionContext {
   userId: string;
   userName?: string;
   channelName: string;
-  scratchDir: string;
   credentials: ResolvedCredentials;
   isBotOwner: boolean;
 }
@@ -132,7 +126,6 @@ export async function processQueuedMessage(
   }
 
   const baseDir = resolvedTempDir(config);
-  const scratchDir = ensureScratchDir(baseDir, queued.channelId);
 
   // Tell the agent which credentials this user is running on shared/absent
   // tokens for, so it warns preemptively instead of attempting doomed writes.
@@ -206,8 +199,6 @@ export async function processQueuedMessage(
       }
     }
 
-    tempDir = createRequestTempDir(baseDir, queued.channelId);
-
     // Permission context passed through to Claude spawn — keyed on the CANONICAL
     // user id so the secret store, audit log, and process identity all agree
     const permCtx: PermissionContext = {
@@ -216,7 +207,6 @@ export async function processQueuedMessage(
       userId: user.userId,
       userName: user.name ?? queued.userName,
       channelName: channelConfig.name,
-      scratchDir,
       credentials,
       isBotOwner: user.isBotOwner,
     };
@@ -250,12 +240,26 @@ export async function processQueuedMessage(
       threadTs: queued.threadTs,
     });
 
+    // One temp dir per resolved session, holding inbound downloads, generated
+    // files, generic tool temp, and the outbound manifest. Created AFTER session
+    // resolution so it keys on the resolved sessionId (D1), and before the
+    // runners so the spawn env can point CLAUDEWAY_TEMP_DIR/TMPDIR at it.
+    tempDir = resolveSessionTempDir(baseDir, queued.channelId, session.sessionId);
+
     // Render-at-processing-time (structured Slack entries): history selection
-    // happens here, not at enqueue, so queued turns see what Claude has
-    // actually received. Legacy entries pass their pre-rendered text through.
+    // and inbound-file download happen here, not at enqueue, so queued turns see
+    // what Claude has actually received and downloads land in the resolved
+    // session's incoming/. Legacy entries pass their pre-rendered text through.
     const rendered =
-      coordinator && queued.slack ? await coordinator.prepare(queued, session) : null;
+      coordinator && queued.slack
+        ? await coordinator.prepare(queued, session, { sessionTempDir: tempDir })
+        : null;
     const message = rendered ? rendered.text : queued.text;
+    // Forward non-fatal download warnings — a failed/oversized download warns
+    // and the turn proceeds without that file (never a throw, never silent).
+    for (const w of rendered?.warnings ?? []) {
+      await responder.warn(w).catch(() => {});
+    }
 
     // Rendered prompts carry attachment info inline (ref= and path=), so the
     // generic "[Attached files ...]" footer would duplicate it. Unrendered
@@ -303,7 +307,6 @@ export async function processQueuedMessage(
         threadTs: queued.threadTs,
         filePaths: runnerFilePaths,
         tempDir,
-        ...(processMode === 'persistent' ? { tempBaseDir: baseDir } : {}),
         ...permCtx,
       };
 
@@ -337,7 +340,6 @@ export async function processQueuedMessage(
         threadTs: queued.threadTs,
         filePaths: runnerFilePaths,
         tempDir,
-        ...(processMode === 'persistent' ? { tempBaseDir: baseDir } : {}),
         onTextDelta: (text: string) => streamer.onTextDelta(text),
         onReasoningDelta: streamer.onReasoningDelta
           ? (text: string) => streamer.onReasoningDelta!(text)
@@ -395,10 +397,13 @@ export async function processQueuedMessage(
       }
     }
 
-    // Upload any files Claude attached, then clean up — only if the temp dir was
-    // actually created (setup may have thrown before this point).
+    // Upload any files Claude staged this turn, then clear the manifest ONLY —
+    // the files persist in the session temp dir so Claude can re-read/re-send
+    // them in a later turn, and clearing prevents re-uploading them every
+    // subsequent turn (D3). Only if the temp dir was created (setup may have
+    // thrown before this point).
     if (tempDir) {
-      const attachedFiles = readAttachmentManifest(tempDir);
+      const attachedFiles = drainAttachmentManifest(tempDir);
       const failedUploads: string[] = [];
       for (const filePath of attachedFiles) {
         try {
@@ -418,7 +423,6 @@ export async function processQueuedMessage(
           // Best effort — don't let warning failure block cleanup
         }
       }
-      cleanupRequestTempDir(tempDir, baseDir, queued.channelId);
     }
 
     // Remove from persistent queue after processing (success or error)

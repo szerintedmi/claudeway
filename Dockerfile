@@ -42,8 +42,9 @@ RUN git config --system credential.helper 'store --file=/home/claudeway/.git-cre
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Create runtime directories
-RUN mkdir -p .docker/queue .docker/files .docker/repos .claudeway-tmp && \
+# Create runtime directories. The per-session temp base (.claudeway-tmp) is
+# bind-mounted in docker-compose.yml so it persists across container recreation.
+RUN mkdir -p .docker/queue .docker/repos .docker/claudeway-tmp .claudeway-tmp && \
     chown -R claudeway:claudeway /app
 
 # Create Claude CLI debug directory — the CLI writes error logs here and crashes

@@ -4,8 +4,7 @@ import { reapOrphanedChildren, terminateOwnedChildren } from './child-processes.
 import { loadConfig, resolvedTempDir, DEFAULT_TEMP_MAX_AGE_DAYS } from './config.js';
 import { ensureQueueDir } from './queue.js';
 import { syncRepos } from './sync-repos.js';
-import { FILE_TEMP_BASE } from './adapters/slack/files.js';
-import { cleanupStaleTempFiles } from './tempdir.js';
+import { cleanupStaleTempDirs } from './tempdir.js';
 import { cleanupGitCredentialFiles } from './git-credentials.js';
 import { cleanupStaleWorktrees } from './worktrees.js';
 import { cleanupStaleSlackHistory } from './slack-history.js';
@@ -110,7 +109,7 @@ reapOrphanedChildren();
 
 const config = loadConfig();
 const tempMaxAgeDays = config.defaults.tempMaxAgeDays ?? DEFAULT_TEMP_MAX_AGE_DAYS;
-cleanupStaleTempFiles(tempMaxAgeDays, resolvedTempDir(config), FILE_TEMP_BASE);
+cleanupStaleTempDirs(tempMaxAgeDays, resolvedTempDir(config));
 
 // Per-user credentials are always on (BYO Claude): a master key and a
 // reachable enrollment form are hard startup requirements — fail fast instead

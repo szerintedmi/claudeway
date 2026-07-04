@@ -4,11 +4,24 @@
 // runtime cycle with claude.ts.
 
 import { homedir } from 'os';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 import { permissionKey as permissionKeyStr, type Config, type UserPermissions } from './config.js';
 import { gitCredConfigured } from './credentials.js';
 import { ensureGitCredentialFiles } from './git-credentials.js';
 import { scrubSecrets } from './secrets.js';
+import { toolTmpDir } from './tempdir.js';
 import type { ClaudeOptions } from './claude.js';
+
+/**
+ * Repo `scripts/` directory, resolved relative to this module. Prepended to the
+ * subprocess PATH so the bare `claudeway-attach` command resolves in every run
+ * mode — `bun src/index.ts` locally as well as Docker (where it's also
+ * symlinked into /usr/local/bin). Without this, a local run fails the first
+ * attach attempt with exit 127 ("command not found"). Module lives at
+ * <root>/src/claude-spawn-env.ts, so scripts/ is one level up.
+ */
+const SCRIPTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts');
 
 /** Env vars that disable all git authentication — hard enforcement for read-only users. */
 function buildGitReadOnlyEnv(): Record<string, string> {
@@ -75,11 +88,6 @@ function buildPermissionsEnv(options: ClaudeOptions): Record<string, string> {
 
   Object.assign(env, buildGitEnv(options));
 
-  // Scratch directory
-  if (options.scratchDir) {
-    env.CLAUDEWAY_SCRATCH_DIR = options.scratchDir;
-  }
-
   return env;
 }
 
@@ -106,7 +114,7 @@ const BASELINE_ENV_VARS = new Set([
 interface AllowedEnvContext {
   config: Config;
   userPermissions: UserPermissions;
-  /** Explicitly injected vars (git author, git read-only, scratch/temp dirs) */
+  /** Explicitly injected vars (git author, git read-only, session temp dir + TMPDIR) */
   extraEnv?: Record<string, string>;
   /** Per-user credential env (personal or explicit shared default) — highest precedence. */
   userCredEnv?: Record<string, string>;
@@ -196,8 +204,19 @@ export function processIdentityKey(
 export function buildInjectedEnv(options: ClaudeOptions): Record<string, string> {
   const env: Record<string, string> = {};
 
+  // Put the repo scripts/ dir on PATH so `claudeway-attach` resolves regardless
+  // of run mode. extraEnv is applied after the baseline PATH passthrough in
+  // buildAllowedEnv, so read process.env.PATH here and prepend (don't clobber).
+  const basePath = process.env.PATH;
+  env.PATH = basePath ? `${SCRIPTS_DIR}:${basePath}` : SCRIPTS_DIR;
+
   if (options.tempDir) {
+    // One env var for the session temp dir; TMPDIR points at its tmp/ subfolder
+    // (D8) so generic tool temp (mktemp, python tempfile, …) lands inside the
+    // managed tree instead of leaking to /tmp. TMPDIR is in BASELINE_ENV_VARS,
+    // but step 4 of buildAllowedEnv (Object.assign of extraEnv) overrides it.
     env.CLAUDEWAY_TEMP_DIR = options.tempDir;
+    env.TMPDIR = toolTmpDir(options.tempDir);
     env.CLAUDEWAY_CHANNEL_ID = options.channelId;
   }
 

@@ -46,15 +46,14 @@ export interface ClaudeOptions {
   channelId: string;
   threadTs?: string;
   filePaths?: string[];
+  /** Per-session temp dir ($CLAUDEWAY_TEMP_DIR); TMPDIR points at its tmp/ subfolder. */
   tempDir?: string;
-  tempBaseDir?: string;
   config: Config;
   userPermissions: UserPermissions;
   /** Canonical user id (users: registry key, or external id when unregistered). */
   userId: string;
   userName?: string;
   channelName?: string;
-  scratchDir?: string;
   /** Resolved per-user credentials (env injection, git token, scrub values). */
   credentials?: ResolvedCredentials;
   /** True when the sender is the botOwner — the git adapter is skipped (own creds). */
@@ -790,12 +789,11 @@ function createPersistentProcess(
     `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} persistent session ${sessionId} [${permissionKeyStr(options.userPermissions) || 'read-only'}]`,
   );
 
-  // Build injected vars specific to persistent mode
+  // Persistent processes are per-thread (registryKey = channelId:threadTs) and
+  // their cwd/session are fixed for the process lifetime, so the session temp
+  // dir is set once here — no dynamic pointer file (D4). buildInjectedEnv sets
+  // CLAUDEWAY_TEMP_DIR + TMPDIR + CLAUDEWAY_CHANNEL_ID.
   const injected = buildInjectedEnv(options);
-  injected.CLAUDEWAY_CHANNEL_ID = options.channelId;
-  if (options.tempBaseDir) {
-    injected.CLAUDEWAY_TEMP_BASE = options.tempBaseDir;
-  }
 
   // Build complete env via allowlist
   const env = buildAllowedEnv({
@@ -1048,8 +1046,30 @@ export async function runClaudePersistentStreaming(
     options.credentials?.secretsHash ?? '',
     options.credentials?.readOnlyMcpServers ?? [],
   );
-  if (entry && !entry.proc.killed && entry.identityKey !== incomingIdentityKey) {
-    console.log(`[${channelId}] Process identity changed — respawning persistent process`);
+  // D9: the registry/identity keys include neither the logical folder, cwd, nor
+  // sessionId, so a channel folder/repo change mid-thread keeps the same regKey
+  // and identity key — the live process would keep its old cwd, --resume
+  // session, and CLAUDEWAY_TEMP_DIR/TMPDIR while the engine now resolves a NEW
+  // sessionId and drains the new (empty) session's manifest. Respawn on a
+  // session-id mismatch too, so cwd/env/temp dir track the resolved session and
+  // staged attachments drain from the correct dir.
+  const incomingSessionId = (
+    options.session ??
+    resolveSessionState({
+      channelId,
+      cwd: options.cwd,
+      sessionFolder: options.sessionFolder,
+      threadTs: options.threadTs,
+    })
+  ).sessionId;
+  if (
+    entry &&
+    !entry.proc.killed &&
+    (entry.identityKey !== incomingIdentityKey || entry.sessionId !== incomingSessionId)
+  ) {
+    console.log(
+      `[${channelId}] Process identity or session changed — respawning persistent process`,
+    );
     // Clear currentTurn before killing to prevent the close handler from
     // rejecting a stale turn's promise with a spurious error
     if (entry.currentTurn) {
