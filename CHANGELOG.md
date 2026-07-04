@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.34.0] - 2026-07-04
+
+### Changed
+- **Slack history injection reworked** to stop re-sending context Claude already has. Resumed sessions inject only unseen thread messages via per-Claude-session history watermarks (`src/slack-history.ts`); prior tagged turns already live in Claude's transcript through the deterministic session id, so the old whole-thread re-injection every turn was redundant. Each message prefix now carries Slack metadata (channel id, thread ts, message ts, author id + display name) so Claude can cite exact messages, and prior-thread attachments contribute file metadata without eagerly downloading every file
+- **Removed the per-turn `[Slack user reference]` block**: the bot identity now rides the one-time new-session thread header instead of repeating every sender mapping each turn
+- **Slack prompt/coordinator extracted** from the handler into `src/adapters/slack/prompt.ts` and `src/adapters/slack/coordinator.ts`. Slack tokens and private download URLs stay out of prompts and the Claude subprocess env; queue/edit/restart behavior preserved
+  - Plan: `docs/plans/2026-07-04-slack-history-injection-rework.md` (Phase 2 on-demand file-fetch tool not started)
+
 ## [0.33.0] - 2026-07-04
 
 ### Fixed
