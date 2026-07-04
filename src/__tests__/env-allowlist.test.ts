@@ -1,3 +1,4 @@
+import { homedir } from 'os';
 import { buildAllowedEnv, processIdentityKey } from '../claude.js';
 import type { Config } from '../config.js';
 import { READ_ONLY_PERMISSIONS } from '../config.js';
@@ -35,7 +36,6 @@ describe('buildAllowedEnv', () => {
 
     const env = buildAllowedEnv({
       config: makeConfig(),
-      channelId: 'C001',
       userPermissions: READ_ONLY_PERMISSIONS,
     });
 
@@ -55,7 +55,6 @@ describe('buildAllowedEnv', () => {
 
     const env = buildAllowedEnv({
       config,
-      channelId: 'C001',
       userPermissions: READ_ONLY_PERMISSIONS,
     });
 
@@ -76,7 +75,6 @@ describe('buildAllowedEnv', () => {
     // User WITH jiraWrite
     const envWithPerm = buildAllowedEnv({
       config,
-      channelId: 'C001',
       userPermissions: new Set(['jiraWrite']),
     });
     expect(envWithPerm.JIRA_API_TOKEN).toBe('jira-tok');
@@ -85,7 +83,6 @@ describe('buildAllowedEnv', () => {
     // User WITHOUT jiraWrite
     const envWithoutPerm = buildAllowedEnv({
       config,
-      channelId: 'C001',
       userPermissions: READ_ONLY_PERMISSIONS,
     });
     expect(envWithoutPerm.JIRA_API_TOKEN).toBeUndefined();
@@ -103,14 +100,12 @@ describe('buildAllowedEnv', () => {
 
     const envWith = buildAllowedEnv({
       config,
-      channelId: 'C001',
       userPermissions: new Set(['langfuse']),
     });
     expect(envWith.LANGFUSE_SECRET_KEY).toBe('lf-secret');
 
     const envWithout = buildAllowedEnv({
       config,
-      channelId: 'C001',
       userPermissions: new Set(),
     });
     expect(envWithout.LANGFUSE_SECRET_KEY).toBeUndefined();
@@ -119,7 +114,6 @@ describe('buildAllowedEnv', () => {
   it('includes extraEnv injected vars', () => {
     const env = buildAllowedEnv({
       config: makeConfig(),
-      channelId: 'C001',
       userPermissions: READ_ONLY_PERMISSIONS,
       extraEnv: {
         CLAUDEWAY_TEMP_DIR: '/tmp/test',
@@ -136,24 +130,23 @@ describe('buildAllowedEnv', () => {
 
     const env = buildAllowedEnv({
       config: makeConfig(),
-      channelId: 'C001',
       userPermissions: READ_ONLY_PERMISSIONS,
     });
 
     expect(env.CLAUDEWAY_TEMP_DIR).toBeUndefined();
   });
 
-  it('provides HOME fallback from USER when HOME is missing', () => {
+  it("provides a HOME fallback from the server's own home dir when HOME is missing", () => {
     delete process.env.HOME;
     process.env.USER = 'testuser';
 
     const env = buildAllowedEnv({
       config: makeConfig(),
-      channelId: 'C001',
       userPermissions: READ_ONLY_PERMISSIONS,
     });
 
-    expect(env.HOME).toBe('/Users/testuser');
+    // Falls back to os.homedir() — NOT a hardcoded /Users/<user> (wrong on Linux/Docker).
+    expect(env.HOME).toBe(homedir());
   });
 
   it('skips env vars not present in process.env', () => {
@@ -165,7 +158,6 @@ describe('buildAllowedEnv', () => {
 
     const env = buildAllowedEnv({
       config,
-      channelId: 'C001',
       userPermissions: READ_ONLY_PERMISSIONS,
     });
 
@@ -181,7 +173,6 @@ describe('buildAllowedEnv', () => {
 
     const env = buildAllowedEnv({
       config,
-      channelId: 'C001',
       userPermissions: READ_ONLY_PERMISSIONS,
       extraEnv: { GIT_AUTHOR_NAME: 'Alice' },
       userCredEnv: { JIRA_API_TOKEN: 'personal-token' },
@@ -195,7 +186,6 @@ describe('buildAllowedEnv', () => {
   it('user credential env overrides extraEnv-injected vars', () => {
     const env = buildAllowedEnv({
       config: makeConfig(),
-      channelId: 'C001',
       userPermissions: READ_ONLY_PERMISSIONS,
       extraEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'injected' },
       userCredEnv: { CLAUDE_CODE_OAUTH_TOKEN: 'personal' },
@@ -208,8 +198,8 @@ describe('processIdentityKey', () => {
   it('produces different keys for different users', () => {
     const config = makeConfig();
     const perms = new Set(['git']);
-    const key1 = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high');
-    const key2 = processIdentityKey('U002', perms, config, 'C001', 'opus', 'high');
+    const key1 = processIdentityKey('U001', perms, config, 'opus', 'high');
+    const key2 = processIdentityKey('U002', perms, config, 'opus', 'high');
     expect(key1).not.toBe(key2);
     expect(key1).toContain('U001');
     expect(key2).toContain('U002');
@@ -217,15 +207,8 @@ describe('processIdentityKey', () => {
 
   it('produces different keys for different permissions', () => {
     const config = makeConfig();
-    const key1 = processIdentityKey(
-      'U001',
-      new Set(['git', 'jiraWrite']),
-      config,
-      'C001',
-      'opus',
-      'high',
-    );
-    const key2 = processIdentityKey('U001', new Set(), config, 'C001', 'opus', 'high');
+    const key1 = processIdentityKey('U001', new Set(['git', 'jiraWrite']), config, 'opus', 'high');
+    const key2 = processIdentityKey('U001', new Set(), config, 'opus', 'high');
     expect(key1).not.toBe(key2);
   });
 
@@ -238,17 +221,17 @@ describe('processIdentityKey', () => {
     });
 
     const perms = new Set(['git']);
-    const key1 = processIdentityKey('U001', perms, config1, 'C001', 'opus', 'high');
-    const key2 = processIdentityKey('U001', perms, config2, 'C001', 'opus', 'high');
+    const key1 = processIdentityKey('U001', perms, config1, 'opus', 'high');
+    const key2 = processIdentityKey('U001', perms, config2, 'opus', 'high');
     expect(key1).not.toBe(key2);
   });
 
   it('produces different keys for different models, equal keys for the same model', () => {
     const config = makeConfig();
     const perms = new Set(['git']);
-    const key1 = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high');
-    const key2 = processIdentityKey('U001', perms, config, 'C001', 'sonnet', 'high');
-    const key3 = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high');
+    const key1 = processIdentityKey('U001', perms, config, 'opus', 'high');
+    const key2 = processIdentityKey('U001', perms, config, 'sonnet', 'high');
+    const key3 = processIdentityKey('U001', perms, config, 'opus', 'high');
     expect(key1).not.toBe(key2);
     expect(key1).toBe(key3);
   });
@@ -256,9 +239,9 @@ describe('processIdentityKey', () => {
   it('produces different keys for different efforts, equal keys for the same effort', () => {
     const config = makeConfig();
     const perms = new Set(['git']);
-    const key1 = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high');
-    const key2 = processIdentityKey('U001', perms, config, 'C001', 'opus', 'low');
-    const key3 = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high');
+    const key1 = processIdentityKey('U001', perms, config, 'opus', 'high');
+    const key2 = processIdentityKey('U001', perms, config, 'opus', 'low');
+    const key3 = processIdentityKey('U001', perms, config, 'opus', 'high');
     expect(key1).not.toBe(key2);
     expect(key1).toBe(key3);
   });
@@ -270,7 +253,7 @@ describe('processIdentityKey', () => {
       },
     });
 
-    const key = processIdentityKey('U001', new Set(['jiraWrite']), config, 'C001', 'opus', 'high');
+    const key = processIdentityKey('U001', new Set(['jiraWrite']), config, 'opus', 'high');
     // Env var names should be sorted
     expect(key).toContain('JIRA_API_TOKEN,JIRA_URL');
   });
@@ -278,26 +261,26 @@ describe('processIdentityKey', () => {
   it('changes when the secrets hash changes (token rotation mid-thread)', () => {
     const config = makeConfig();
     const perms = new Set(['git']);
-    const key1 = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', 'hash-a');
-    const key2 = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', 'hash-b');
-    const key3 = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', 'hash-a');
+    const key1 = processIdentityKey('U001', perms, config, 'opus', 'high', 'hash-a');
+    const key2 = processIdentityKey('U001', perms, config, 'opus', 'high', 'hash-b');
+    const key3 = processIdentityKey('U001', perms, config, 'opus', 'high', 'hash-a');
     expect(key1).not.toBe(key2);
     expect(key1).toBe(key3);
     // No hash (legacy callers) still works
-    expect(processIdentityKey('U001', perms, config, 'C001', 'opus', 'high')).toBe(
-      processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', ''),
+    expect(processIdentityKey('U001', perms, config, 'opus', 'high')).toBe(
+      processIdentityKey('U001', perms, config, 'opus', 'high', ''),
     );
   });
 
   it('changes when the read-only MCP server set changes (personal Jira enrolled mid-thread)', () => {
     const config = makeConfig();
     const perms = new Set(['git']);
-    const shared = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', 'h', [
+    const shared = processIdentityKey('U001', perms, config, 'opus', 'high', 'h', [
       'mcp-atlassian',
     ]);
-    const personal = processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', 'h', []);
+    const personal = processIdentityKey('U001', perms, config, 'opus', 'high', 'h', []);
     expect(shared).not.toBe(personal);
     // Omitted (legacy callers) equals empty set
-    expect(processIdentityKey('U001', perms, config, 'C001', 'opus', 'high', 'h')).toBe(personal);
+    expect(processIdentityKey('U001', perms, config, 'opus', 'high', 'h')).toBe(personal);
   });
 });

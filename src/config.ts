@@ -83,6 +83,12 @@ export interface CredentialDef {
 export interface CredsFormConfig {
   /** HTTP port for the enrollment form server (default 8791). */
   port?: number;
+  /**
+   * Interface to bind the enrollment form to (default "0.0.0.0" — all
+   * interfaces). Set to e.g. "127.0.0.1" or a LAN/VPN address to narrow
+   * exposure when the host also faces untrusted networks.
+   */
+  host?: string;
 }
 
 /** A user's granted permissions — set of permission names from config.permissions keys. */
@@ -116,11 +122,22 @@ export function botOwnerIds(config: Config): string[] {
   return config.botOwners ?? [];
 }
 
-/** Bot owners resolved to Slack user ids — for mentions and DM notifications. */
+/** Slack user id shape (U… members, W… enterprise-grid users) — uppercase id,
+ *  not a lowercase registry key. */
+const SLACK_ID_RE = /^[UW][A-Z0-9]+$/;
+
+/**
+ * Bot owners resolved to Slack user ids — for mentions and DM notifications.
+ *
+ * An owner registered without a `slack:` field has no Slack identity; the raw
+ * registry key must NOT be used as a fallback, or `<@key>` renders as literal
+ * text and `conversations.open({users: key})` fails silently (owner DMs never
+ * arrive). Keep only values that actually look like Slack ids.
+ */
 export function botOwnerSlackIds(config: Config): string[] {
   return botOwnerIds(config)
     .map((entry) => config.users?.[entry]?.slack ?? entry)
-    .filter((id) => !!id);
+    .filter((id) => SLACK_ID_RE.test(id));
 }
 
 /**
@@ -618,6 +635,17 @@ export function loadConfig(): Config {
     }
   }
 
+  // Warn about bot owners with no resolvable Slack id — they can't be @-mentioned
+  // or DMed, so owner notifications will silently skip them.
+  for (const entry of config.botOwners ?? []) {
+    const slackId = config.users?.[entry]?.slack ?? entry;
+    if (!SLACK_ID_RE.test(slackId)) {
+      console.warn(
+        `[config] botOwner "${entry}" has no Slack id (users.${entry}.slack unset) — owner mentions/DMs will skip them`,
+      );
+    }
+  }
+
   // Validate voice config if present
   if (config.voice) {
     if (config.voice.provider !== 'deepgram') {
@@ -679,7 +707,10 @@ export function resolvedDmConfig(config: Config) {
     timeoutMs: config.defaults.timeoutMs,
     responseMode: config.defaults.responseMode,
     processMode: config.defaults.processMode ?? ('oneshot' as ProcessMode),
-    triggerMode: config.defaults.triggerMode ?? ('all' as TriggerMode),
+    // A DM is inherently directed at the bot, so it always triggers — the DM
+    // handler never consults triggerMode. Hardcode 'all' rather than reading
+    // defaults.triggerMode, which would falsely imply it applies to DMs.
+    triggerMode: 'all' as TriggerMode,
     collapseWorkingNotes: config.defaults.collapseWorkingNotes ?? true,
     threadWorktrees: false, // DMs run in the gateway's own directory — no repo
   };

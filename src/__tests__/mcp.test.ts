@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { generateReadOnlyMcpConfig, readOnlyMcpConfigPath, getMcpConfigPath } from '../mcp.js';
@@ -120,6 +120,41 @@ describe('generateReadOnlyMcpConfig', () => {
     expect(config.mcpServers.test.type).toBe('stdio');
     expect(config.mcpServers.test.command).toBe('npx');
     expect(config.mcpServers.test.args).toEqual(['@test/plugin']);
+  });
+});
+
+describe('generateReadOnlyMcpConfig — concurrent generation (write race)', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'mcp-race-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('concurrent generations with the same server set do not throw or leave a partial config', async () => {
+    const mcpPath = join(tmpDir, 'mcp.json');
+    writeFileSync(
+      mcpPath,
+      JSON.stringify({ mcpServers: { 'mcp-atlassian': { type: 'stdio', command: 'uvx' } } }),
+    );
+
+    // Many parallel spawns sharing the same read-only server set previously
+    // raced on `${destPath}.tmp` → the loser's rename threw ENOENT.
+    const results = await Promise.all(
+      Array.from({ length: 25 }, () =>
+        Promise.resolve().then(() => generateReadOnlyMcpConfig(mcpPath, ['mcp-atlassian'])),
+      ),
+    );
+
+    const destPath = readOnlyMcpConfigPath(mcpPath, ['mcp-atlassian']);
+    for (const p of results) expect(p).toBe(destPath);
+    const config = JSON.parse(readFileSync(destPath, 'utf-8'));
+    expect(config.mcpServers['mcp-atlassian'].env.READ_ONLY_MODE).toBe('true');
+    // No leftover temp files.
+    expect(readdirSync(tmpDir).filter((f) => f.endsWith('.tmp'))).toHaveLength(0);
   });
 });
 

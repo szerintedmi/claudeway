@@ -4,6 +4,7 @@ import {
   splitMessage,
   splitDetails,
   inlineDetailsMarker,
+  chunkText,
   DETAILS_INLINE_HEADER,
   FILE_THRESHOLD,
   NARRATION_HOLDBACK_MAX_CHARS,
@@ -13,9 +14,77 @@ import {
 } from '../adapters/slack/formatting.js';
 import { formatDuration, formatTimeout, formatChannelConfig } from '../adapters/slack/commands.js';
 import { getSnippetType, SlackChannelResponder } from '../adapters/slack/responder.js';
-import { __resetAppendRateLimiterForTest } from '../adapters/slack/stream.js';
+import {
+  __resetAppendRateLimiterForTest,
+  isPermanentStreamError,
+  isStreamClosedError,
+} from '../adapters/slack/stream.js';
 import { TaskTracker } from '../adapters/slack/thinking-steps.js';
 import type { WebClient } from '@slack/web-api';
+
+describe('chunkText (fence-aware, surrogate-safe)', () => {
+  it('keeps a code fence closed across a chunk boundary', () => {
+    // A fence opened before the boundary must be closed at the end of the chunk
+    // and reopened (with language) at the top of the next.
+    const code = 'x'.repeat(20);
+    const text = '```ts\n' + Array.from({ length: 10 }, () => code).join('\n');
+    const chunks = chunkText(text, 60);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) {
+      // Balanced fences: every chunk has an even number of ``` markers.
+      expect((c.match(/```/g) ?? []).length % 2).toBe(0);
+    }
+    expect(chunks[1].startsWith('```ts')).toBe(true);
+  });
+
+  it('never splits a surrogate pair (2-unit emoji)', () => {
+    const emoji = '😀'; // 2 UTF-16 code units
+    const text = emoji.repeat(100);
+    const chunks = chunkText(text, 21); // odd cap would bisect a pair if naive
+    // Reassembling loses no codepoints and no lone surrogate survives.
+    for (const c of chunks) {
+      expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(c)).toBe(false); // no lone high
+      expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(c)).toBe(false); // no lone low
+    }
+    expect(chunks.join('')).toBe(text);
+  });
+
+  it('packs whole lines and preserves blank lines within a chunk', () => {
+    expect(chunkText('a\n\nb', 100)).toEqual(['a\n\nb']);
+  });
+
+  it('never exceeds maxLen even when a fence-reopen prefix is added after the fit check', () => {
+    // Regression: a fence line whose body fit pre-emit could overflow once the
+    // continuation chunk was seeded with the '```lang\n' reopen prefix.
+    const text = '```ts\n' + 'x'.repeat(3891) + '\n```';
+    const chunks = chunkText(text, 3900);
+    for (const c of chunks) {
+      expect(c.length).toBeLessThanOrEqual(3900);
+      expect((c.match(/```/g) ?? []).length % 2).toBe(0); // fences stay balanced
+    }
+    // No content lost: stripping the fence scaffolding leaves all 3891 x's.
+    const xs = chunks.join('\n').replace(/```\S*\n?|\n/g, '');
+    expect(xs).toBe('x'.repeat(3891));
+  });
+});
+
+describe('slack stream error classification', () => {
+  const err = (code: string) => ({ data: { error: code } });
+  it('flags permanent errors (bad channel / scope / auth)', () => {
+    expect(isPermanentStreamError(err('channel_not_found'))).toBe(true);
+    expect(isPermanentStreamError(err('missing_scope'))).toBe(true);
+    expect(isPermanentStreamError(err('invalid_auth'))).toBe(true);
+  });
+  it('does not flag transient errors as permanent', () => {
+    expect(isPermanentStreamError(err('ratelimited'))).toBe(false);
+    expect(isPermanentStreamError(err('internal_error'))).toBe(false);
+    expect(isPermanentStreamError(undefined)).toBe(false);
+  });
+  it('keeps stream-closed classification separate', () => {
+    expect(isStreamClosedError(err('message_not_in_streaming_state'))).toBe(true);
+    expect(isPermanentStreamError(err('message_not_in_streaming_state'))).toBe(false);
+  });
+});
 
 describe('markdownToSlackMrkdwn', () => {
   describe('links', () => {
@@ -399,6 +468,28 @@ describe('TaskTracker step cards', () => {
     expect(done[0]).toMatchObject({ id: chunks[0].id, title: 'Running ls', status: 'complete' });
   });
 
+  it('matches out-of-order same-name completions by content-block index', () => {
+    // Two parallel Read calls; the second completes first. Matching by toolName
+    // alone (LIFO) would label the wrong card — index keys it to the right one.
+    const tracker = new TaskTracker();
+    const a = tracker.onToolEvent({ phase: 'start', toolName: 'Read', index: 0 });
+    const b = tracker.onToolEvent({ phase: 'start', toolName: 'Read', index: 1 });
+    const doneB = tracker.onToolEvent({
+      phase: 'complete',
+      toolName: 'Read',
+      keyArg: 'b.ts',
+      index: 1,
+    });
+    const doneA = tracker.onToolEvent({
+      phase: 'complete',
+      toolName: 'Read',
+      keyArg: 'a.ts',
+      index: 0,
+    });
+    expect(doneB[0]).toMatchObject({ id: b[0].id, title: 'Reading b.ts', status: 'complete' });
+    expect(doneA[0]).toMatchObject({ id: a[0].id, title: 'Reading a.ts', status: 'complete' });
+  });
+
   it('attaches subagent progress and output to the enclosing step', () => {
     const tracker = new TaskTracker();
     const [step] = tracker.narration('Delegating the research.');
@@ -624,6 +715,93 @@ describe('SlackChannelResponder.uploadFile payload', () => {
     expect(uploadCalls).toHaveLength(1);
     expect(uploadCalls[0]).not.toHaveProperty('snippet_type');
     expect(uploadCalls[0].filename).toBe('image.png');
+  });
+});
+
+describe('StreamingResponder (stream-update) tool-status messages', () => {
+  async function microtasks(times = 30): Promise<void> {
+    for (let i = 0; i < times; i++) await Promise.resolve();
+  }
+
+  function createMockClient() {
+    const posts: { text: string; resolve: (ts: string) => void }[] = [];
+    const updates: { ts: string; text: string }[] = [];
+    const deletes: string[] = [];
+    const client = {
+      chat: {
+        postMessage: (a: Record<string, unknown>) =>
+          new Promise((res) => {
+            posts.push({
+              text: a.text as string,
+              resolve: (ts: string) => res({ ts }),
+            });
+          }),
+        update: async (a: Record<string, unknown>) => {
+          updates.push({ ts: a.ts as string, text: a.text as string });
+          return {};
+        },
+        delete: async (a: Record<string, unknown>) => {
+          deletes.push(a.ts as string);
+          return {};
+        },
+      },
+      reactions: {
+        add: async () => ({}),
+        remove: async () => ({}),
+      },
+    } as unknown as WebClient;
+    return { client, posts, updates, deletes };
+  }
+
+  function makeStreamingResponder(client: WebClient) {
+    return new SlackChannelResponder(
+      client,
+      'C123',
+      'thread-ts',
+      'msg-ts',
+      'stream-update',
+      'U1',
+    ).createStreamingResponder();
+  }
+
+  it('does not post a duplicate status when events arrive faster than postMessage resolves', async () => {
+    const { client, posts, updates, deletes } = createMockClient();
+    const sr = makeStreamingResponder(client);
+
+    sr.onToolEvent({ phase: 'start', toolName: 'Bash' });
+    sr.onToolEvent({ phase: 'complete', toolName: 'Bash', keyArg: 'ls' });
+    await microtasks();
+
+    // The second event queued behind the in-flight post instead of posting again.
+    expect(posts).toHaveLength(1);
+    expect(updates).toHaveLength(0);
+
+    posts[0].resolve('status-1');
+    await microtasks();
+    expect(posts).toHaveLength(1);
+    expect(updates).toEqual([{ ts: 'status-1', text: expect.stringContaining('ls') }]);
+
+    await sr.finish();
+    expect(deletes).toEqual(['status-1']); // the one bubble cleaned up, no orphan
+  });
+
+  it('finish() waits for an in-flight status post and deletes it (no orphan)', async () => {
+    const { client, posts, deletes } = createMockClient();
+    const sr = makeStreamingResponder(client);
+
+    sr.onToolEvent({ phase: 'start', toolName: 'Read' });
+    await microtasks();
+    expect(posts).toHaveLength(1);
+
+    const finishing = sr.finish(); // post still in flight
+    posts[0].resolve('status-2');
+    await finishing;
+    expect(deletes).toEqual(['status-2']);
+
+    // A late event after finish must not resurrect the status message.
+    sr.onToolEvent({ phase: 'start', toolName: 'Read' });
+    await microtasks();
+    expect(posts).toHaveLength(1);
   });
 });
 

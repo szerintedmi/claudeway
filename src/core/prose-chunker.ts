@@ -219,10 +219,9 @@ export class ProseChunker {
         if (ch === '.' && i >= 2 && this.buffer[i - 1] === '.' && this.buffer[i - 2] === '.') {
           continue;
         }
-        // Skip decimals (digit.digit)
-        if (ch === '.' && i > 0 && /\d/.test(this.buffer[i - 1]) && /\d/.test(next)) {
-          continue;
-        }
+        // (No decimal-skip needed: the `\s` test above already means `next` is
+        // whitespace, so a "3.14" dot — followed by a digit — is never a
+        // candidate boundary in the first place.)
         // Skip abbreviations
         if (ch === '.' && this.isAbbreviation(i)) {
           continue;

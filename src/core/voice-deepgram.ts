@@ -1,4 +1,3 @@
-import { DeepgramClient } from '@deepgram/sdk';
 import type {
   VoiceProvider,
   AudioFormat,
@@ -10,12 +9,11 @@ import type {
 const DEEPGRAM_TTS_WS_URL = 'wss://api.deepgram.com/v1/speak';
 
 export class DeepgramVoiceProvider implements VoiceProvider {
-  private client: DeepgramClient;
   private apiKey: string;
   private sttModel: string;
 
   constructor(apiKey: string, sttModel = 'nova-3') {
-    this.client = new DeepgramClient({ apiKey });
+    // Transcription and TTS both use raw fetch/WebSocket — no SDK client needed.
     this.apiKey = apiKey;
     this.sttModel = sttModel;
   }
@@ -196,7 +194,15 @@ class DeepgramTtsStream implements TtsStreamHandle {
 
     this.ws.onclose = () => {
       if (!this.closed) {
-        // Unexpected close — resolve any waiters
+        // Unexpected close: the socket dropped without us initiating it (doClose
+        // sets `closed` first on every intentional path). Surface it as an error
+        // — otherwise audio just stops and the client is told the turn succeeded
+        // (response_audio_end). Barge-in (`cleared`) is an intentional cancel, so
+        // it isn't an error.
+        if (!this.cleared && this.errorHandler) {
+          this.errorHandler(new Error('TTS WebSocket closed unexpectedly'));
+        }
+        // Resolve any waiters
         this.doClose();
       }
     };

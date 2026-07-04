@@ -13,6 +13,14 @@ import {
 import type { VoiceProvider, TtsOptions } from '../../core/voice.js';
 import type { WsData } from './index.js';
 
+/**
+ * Cap on concurrent open recordings per session. Each recording buffers up to
+ * ~3.84MB (120s @ 8kHz mono) until its `audio_end`; without a cap a client that
+ * keeps sending `audio_start` (never ending them) can buffer unbounded memory
+ * before it disconnects. A single client only ever needs one open at a time.
+ */
+const MAX_CONCURRENT_RECORDINGS = 4;
+
 export interface VoiceSession {
   sessionId: string;
   userId: string;
@@ -284,6 +292,14 @@ export function handleMessage(
           type: 'error',
           requestId,
           message: 'Duplicate requestId: already in-flight',
+        });
+        break;
+      }
+      if (session.activeRecordings.size >= MAX_CONCURRENT_RECORDINGS) {
+        sendMsg(ws, {
+          type: 'error',
+          requestId,
+          message: 'Too many concurrent recordings — finish or cancel one first',
         });
         break;
       }

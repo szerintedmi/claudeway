@@ -141,92 +141,15 @@ export async function processQueuedMessage(
   };
 
   processingMessages.add(processingKey(queued.channelId, queued.ts));
-  await responder.onProcessing();
 
-  const mode = effectiveConfig.responseMode;
-
-  // Wait for a process slot if at global concurrency limit
-  if (activeProcesses >= MAX_CONCURRENT_PROCESSES) {
-    console.log(
-      `[${effectiveConfig.name}] Waiting for process slot (${activeProcesses}/${MAX_CONCURRENT_PROCESSES} active)`,
-    );
-  }
-  await acquireProcessSlot();
-
-  const processMode = effectiveConfig.processMode;
-  // Strip user directory and thread context headers to show just the user's message
-  const logText = queued.text
-    .replace(/^\[[^\]]+ reference\][\s\S]*?\n\n/, '')
-    .replace(/^\[Thread context[\s\S]*?\[Current message\]\n/, '');
-  const modelSuffix = queued.modelOverride ? ` [model: ${queued.modelOverride}]` : '';
-  const effortSuffix = queued.effortOverride ? ` [effort: ${queued.effortOverride}]` : '';
-  console.log(
-    `[${effectiveConfig.name}] Processing (${processMode}/${mode})${modelSuffix}${effortSuffix}: ${logText.substring(0, 80)}...`,
-  );
-
-  // Resolve per-turn overrides once for both runner branches. The engine is the
-  // chokepoint every adapter funnels through, and queue files are plain JSON read
-  // back from disk — re-validate the effort instead of trusting the static type.
-  const model = queued.modelOverride ?? channelConfig.model;
-  let effort = effectiveConfig.effort;
-  if (queued.effortOverride) {
-    if (isEffortLevel(queued.effortOverride)) {
-      effort = queued.effortOverride;
-    } else {
-      console.warn(
-        `[${effectiveConfig.name}] Ignoring unknown effort override '${queued.effortOverride}' from queue`,
-      );
-    }
-  }
-
-  const tempDir = createRequestTempDir(baseDir, queued.channelId);
-
-  // Permission context passed through to Claude spawn — keyed on the CANONICAL
-  // user id so the secret store, audit log, and process identity all agree
-  const permCtx: PermissionContext = {
-    config,
-    userPermissions: permissions,
-    userId: user.userId,
-    userName: user.name ?? queued.userName,
-    channelName: channelConfig.name,
-    scratchDir,
-    credentials,
-    isBotOwner: user.isBotOwner,
-  };
-
-  // Per-thread worktree (decision #9): repo-backed channels run each thread in
-  // its own worktree so concurrent threads don't collide and thread participants
-  // share files. Session IDs keep deriving from the logical repo folder.
-  let cwd = channelConfig.folder;
-  let sessionFolder: string | undefined;
-  let systemPrompt = effectiveConfig.systemPrompt;
-  const repoName = (channelConfig as { repo?: string }).repo;
-  const worktreesEnabled = (channelConfig as { threadWorktrees?: boolean }).threadWorktrees ?? true;
-  if (config.repos && repoName && queued.threadTs && worktreesEnabled) {
-    const worktree = ensureThreadWorktree(repoName, queued.channelId, queued.threadTs, {
-      baseBranch: config.repos[repoName]?.branch,
-    });
-    if (worktree) {
-      cwd = worktree;
-      sessionFolder = channelConfig.folder;
-      systemPrompt += buildReadonlySubmodulePrompt(worktree);
-    }
-  }
-
-  // Audit which credential names (never values) back this spawn
-  if (credentials.personalCredNames.length > 0 || credentials.sharedCredNames.length > 0) {
-    audit({
-      event: 'spawn',
-      userId: user.userId,
-      userName: permCtx.userName,
-      channelId: queued.channelId,
-      credNames: [
-        ...credentials.personalCredNames,
-        ...credentials.sharedCredNames.map((n) => `${n}(shared)`),
-      ],
-    });
-  }
-
+  // Everything after the processing marker is added runs inside this try/finally
+  // so a throw during setup (temp dir, worktree, prompt) still releases the
+  // process slot, clears the processing marker, and dequeues the message.
+  // Otherwise each failed drain would leak one of the 8 global process slots
+  // until every channel deadlocks. Track what was actually acquired/created so
+  // the finally only tears down real resources.
+  let slotAcquired = false;
+  let tempDir: string | undefined;
   // Hoisted so the finally block can finalize the stream even if the runner
   // throws — otherwise the native keepalive timer would leak and keep calling Slack.
   let sr: IStreamingResponder | null = null;
@@ -234,6 +157,94 @@ export async function processQueuedMessage(
   let streamErrorMsg: string | undefined;
 
   try {
+    await responder.onProcessing();
+
+    const mode = effectiveConfig.responseMode;
+
+    // Wait for a process slot if at global concurrency limit
+    if (activeProcesses >= MAX_CONCURRENT_PROCESSES) {
+      console.log(
+        `[${effectiveConfig.name}] Waiting for process slot (${activeProcesses}/${MAX_CONCURRENT_PROCESSES} active)`,
+      );
+    }
+    await acquireProcessSlot();
+    slotAcquired = true;
+
+    const processMode = effectiveConfig.processMode;
+    // Strip user directory and thread context headers to show just the user's message
+    const logText = queued.text
+      .replace(/^\[[^\]]+ reference\][\s\S]*?\n\n/, '')
+      .replace(/^\[Thread context[\s\S]*?\[Current message\]\n/, '');
+    const modelSuffix = queued.modelOverride ? ` [model: ${queued.modelOverride}]` : '';
+    const effortSuffix = queued.effortOverride ? ` [effort: ${queued.effortOverride}]` : '';
+    console.log(
+      `[${effectiveConfig.name}] Processing (${processMode}/${mode})${modelSuffix}${effortSuffix}: ${logText.substring(0, 80)}...`,
+    );
+
+    // Resolve per-turn overrides once for both runner branches. The engine is the
+    // chokepoint every adapter funnels through, and queue files are plain JSON read
+    // back from disk — re-validate the effort instead of trusting the static type.
+    const model = queued.modelOverride ?? channelConfig.model;
+    let effort = effectiveConfig.effort;
+    if (queued.effortOverride) {
+      if (isEffortLevel(queued.effortOverride)) {
+        effort = queued.effortOverride;
+      } else {
+        console.warn(
+          `[${effectiveConfig.name}] Ignoring unknown effort override '${queued.effortOverride}' from queue`,
+        );
+      }
+    }
+
+    tempDir = createRequestTempDir(baseDir, queued.channelId);
+
+    // Permission context passed through to Claude spawn — keyed on the CANONICAL
+    // user id so the secret store, audit log, and process identity all agree
+    const permCtx: PermissionContext = {
+      config,
+      userPermissions: permissions,
+      userId: user.userId,
+      userName: user.name ?? queued.userName,
+      channelName: channelConfig.name,
+      scratchDir,
+      credentials,
+      isBotOwner: user.isBotOwner,
+    };
+
+    // Per-thread worktree (decision #9): repo-backed channels run each thread in
+    // its own worktree so concurrent threads don't collide and thread participants
+    // share files. Session IDs keep deriving from the logical repo folder.
+    let cwd = channelConfig.folder;
+    let sessionFolder: string | undefined;
+    let systemPrompt = effectiveConfig.systemPrompt;
+    const repoName = (channelConfig as { repo?: string }).repo;
+    const worktreesEnabled =
+      (channelConfig as { threadWorktrees?: boolean }).threadWorktrees ?? true;
+    if (config.repos && repoName && queued.threadTs && worktreesEnabled) {
+      const worktree = ensureThreadWorktree(repoName, queued.channelId, queued.threadTs, {
+        baseBranch: config.repos[repoName]?.branch,
+      });
+      if (worktree) {
+        cwd = worktree;
+        sessionFolder = channelConfig.folder;
+        systemPrompt += buildReadonlySubmodulePrompt(worktree);
+      }
+    }
+
+    // Audit which credential names (never values) back this spawn
+    if (credentials.personalCredNames.length > 0 || credentials.sharedCredNames.length > 0) {
+      audit({
+        event: 'spawn',
+        userId: user.userId,
+        userName: permCtx.userName,
+        channelId: queued.channelId,
+        credNames: [
+          ...credentials.personalCredNames,
+          ...credentials.sharedCredNames.map((n) => `${n}(shared)`),
+        ],
+      });
+    }
+
     if (mode === 'batch') {
       // Batch mode — run Claude, get full response, send at once
       const claudeOpts = {
@@ -337,33 +348,36 @@ export async function processQueuedMessage(
       }
     }
 
-    // Upload any files Claude attached, then clean up
-    const attachedFiles = readAttachmentManifest(tempDir);
-    const failedUploads: string[] = [];
-    for (const filePath of attachedFiles) {
-      try {
-        await responder.uploadFile(filePath);
-      } catch (err) {
-        const { basename } = await import('path');
-        console.error(`[engine] Failed to upload attachment:`, err);
-        failedUploads.push(basename(filePath));
+    // Upload any files Claude attached, then clean up — only if the temp dir was
+    // actually created (setup may have thrown before this point).
+    if (tempDir) {
+      const attachedFiles = readAttachmentManifest(tempDir);
+      const failedUploads: string[] = [];
+      for (const filePath of attachedFiles) {
+        try {
+          await responder.uploadFile(filePath);
+        } catch (err) {
+          const { basename } = await import('path');
+          console.error(`[engine] Failed to upload attachment:`, err);
+          failedUploads.push(basename(filePath));
+        }
       }
-    }
-    if (failedUploads.length > 0) {
-      try {
-        await responder.warn(
-          `Failed to upload ${failedUploads.length} attachment(s): ${failedUploads.join(', ')}`,
-        );
-      } catch {
-        // Best effort — don't let warning failure block cleanup
+      if (failedUploads.length > 0) {
+        try {
+          await responder.warn(
+            `Failed to upload ${failedUploads.length} attachment(s): ${failedUploads.join(', ')}`,
+          );
+        } catch {
+          // Best effort — don't let warning failure block cleanup
+        }
       }
+      cleanupRequestTempDir(tempDir, baseDir, queued.channelId);
     }
-    cleanupRequestTempDir(tempDir, baseDir, queued.channelId);
 
     // Remove from persistent queue after processing (success or error)
     dequeue(queued.channelId, queued.ts);
     processingMessages.delete(processingKey(queued.channelId, queued.ts));
-    releaseProcessSlot();
+    if (slotAcquired) releaseProcessSlot();
   }
 }
 
