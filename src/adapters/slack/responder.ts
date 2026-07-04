@@ -427,6 +427,11 @@ class NativeStreamingResponder implements IStreamingResponder {
   getTaskBlocks() {
     return this.tracker.toBlocks();
   }
+
+  /** True when the work log holds nothing but the empty seed Thinking card. */
+  workLogIsTrivial(): boolean {
+    return this.tracker.isTrivial();
+  }
 }
 
 export class SlackChannelResponder implements ChannelResponder {
@@ -536,16 +541,19 @@ export class SlackChannelResponder implements ChannelResponder {
       // answer) — rebuild the message from `result` with the work-log cards on
       // top. A details section streamed inline (visible while live) and is
       // folded into a collapsed container by the same rebuild once the turn
-      // ends. Oversized responses always take the file-upload path.
+      // ends. A trivial work log (bare "Thinking" card, no tools/reasoning)
+      // rebuilds too, so its redundant box is stripped and the answer stands
+      // alone. Oversized responses always take the file-upload path.
       const answerAlreadyLive =
         normalizeForCompare(stripDetailsForCompare(nsr.getLastTextRun())) ===
         normalizeForCompare(stripDetailsForCompare(finalText));
       const hasDetails = splitDetails(finalText).details !== null;
+      const workLogTrivial = nsr.workLogIsTrivial();
       const needsRebuild =
         clean.length > 0 &&
         (finalText.length > FILE_THRESHOLD ||
           !nsr.streamDeliveredOk() ||
-          (!isFallback && (!answerAlreadyLive || hasDetails)));
+          (!isFallback && (!answerAlreadyLive || hasDetails || workLogTrivial)));
 
       if (needsRebuild) {
         await deliverText(this.client, {
