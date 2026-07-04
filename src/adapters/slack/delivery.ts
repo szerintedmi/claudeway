@@ -5,6 +5,7 @@ import {
   splitMessage,
   splitDetails,
   inlineDetailsMarker,
+  chunkText,
   FILE_THRESHOLD,
 } from './formatting.js';
 
@@ -43,17 +44,17 @@ export function buildDetailsContainer(details: string): ContainerBlock {
     details.length > DETAILS_MAX_CHARS
       ? `${details.slice(0, DETAILS_MAX_CHARS)}\n\n_…(truncated)_`
       : details;
-  const children: Block[] = [];
-  for (
-    let i = 0;
-    i < capped.length && children.length < CONTAINER_MAX_CHILDREN;
-    i += SECTION_MAX_CHARS
-  ) {
-    children.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: capped.slice(i, i + SECTION_MAX_CHARS) },
-    } as Block);
-  }
+  // Fence-aware, surrogate-safe chunking (the old raw slice(i, i+2900) split code
+  // fences mid-block and could bisect a 2-unit emoji).
+  const children: Block[] = chunkText(capped, SECTION_MAX_CHARS)
+    .slice(0, CONTAINER_MAX_CHILDREN)
+    .map(
+      (text) =>
+        ({
+          type: 'section',
+          text: { type: 'mrkdwn', text },
+        }) as Block,
+    );
   return {
     type: 'container',
     title: { type: 'plain_text', text: DETAILS_CONTAINER_TITLE, emoji: true },
@@ -84,19 +85,13 @@ async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
 
 /** Chunk mrkdwn text into section blocks under the per-section char cap. */
 export function mrkdwnSections(mrkdwn: string): Block[] {
-  const sections: Block[] = [];
-  let rest = mrkdwn;
-  while (rest.length > 0) {
-    let take =
-      rest.length <= SECTION_MAX_CHARS ? rest.length : rest.lastIndexOf('\n', SECTION_MAX_CHARS);
-    if (take <= 0) take = SECTION_MAX_CHARS;
-    sections.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: rest.slice(0, take) },
-    } as Block);
-    rest = rest.slice(take).replace(/^\n+/, '');
-  }
-  return sections;
+  return chunkText(mrkdwn, SECTION_MAX_CHARS, { trimContinuation: 'newlines' }).map(
+    (text) =>
+      ({
+        type: 'section',
+        text: { type: 'mrkdwn', text },
+      }) as Block,
+  );
 }
 
 export interface DeliverTextOptions {

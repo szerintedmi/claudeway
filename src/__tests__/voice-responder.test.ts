@@ -111,6 +111,19 @@ describe('VoiceStreamingResponder', () => {
     expect(parse(sent[1])).toMatchObject({ type: 'response_text', text: '', final: true });
   });
 
+  it('finish({ok:false}) closes the text stream but never sends response_audio_end', async () => {
+    // Gate #4: on a mid-turn crash the engine sends {type:'error'} then
+    // finish({ok:false}); the responder must not speak partial audio or signal
+    // success via response_audio_end.
+    const sr = responder.createStreamingResponder();
+    sr.onTextDelta('partial answer that never finished');
+    await sr.finish({ ok: false, errorMessage: 'boom' });
+    const types = sent.map((s) => parse(s).type);
+    expect(types).not.toContain('response_audio_end');
+    // The text stream is still marked final so the client stops waiting.
+    expect(parse(sent[sent.length - 1])).toMatchObject({ type: 'response_text', final: true });
+  });
+
   it('getFullText returns accumulated text', () => {
     const sr = responder.createStreamingResponder();
     sr.onTextDelta('a');

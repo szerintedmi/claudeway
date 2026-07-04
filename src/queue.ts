@@ -30,8 +30,9 @@ export function ensureQueueDir(): void {
 }
 
 function messageFile(channelId: string, ts: string): string {
-  // Replace dots in ts for safe filenames
-  return join(QUEUE_DIR, `${channelId}_${ts.replace('.', '-')}.json`);
+  // Replace ALL dots in ts for safe filenames — replace() would only swap the
+  // first, so a multi-dot ts could collide with another on disk.
+  return join(QUEUE_DIR, `${channelId}_${ts.replaceAll('.', '-')}.json`);
 }
 
 export function enqueue(msg: QueuedMessage): void {

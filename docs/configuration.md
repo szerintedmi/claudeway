@@ -9,6 +9,7 @@
 | `botOwners` | Owner list — `users:` registry keys (preferred) or raw Slack ids. Owners get startup/shutdown DMs and all magic commands | none (global commands disabled) |
 | `baseUrl` | **Required.** Public base URL of the `!creds` enrollment form | — |
 | `credsForm.port` | Enrollment form port | `8791` |
+| `credsForm.host` | Interface the enrollment form binds to. Set to `127.0.0.1` or a LAN/VPN address to narrow exposure when the host also faces untrusted networks | `0.0.0.0` |
 | `users` | Canonical person registry: `id: { name, slack, voice, permissions }`. The key is the canonical user id — stable across Slack/voice identities; keys the secret store, audit log, and persistent-process identity | none |
 | `repos` | Repo definitions (`url`, optional `branch`) — cloned/pulled into `.docker/repos/` on every startup | none |
 | `channels` | Channel-to-repo mappings (below) | required |

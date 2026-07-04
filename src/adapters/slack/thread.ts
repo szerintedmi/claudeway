@@ -74,7 +74,10 @@ export async function fetchThreadContext(
 
     const resolved: ThreadMessage[] = [];
     for (const m of prior) {
-      const isBot = !!m.bot_id || m.user === botUserId;
+      // Only OUR bot's messages are Claude's own — keying on any `bot_id`
+      // would mislabel third-party bots (GitHub/Jira/CI) as things "Claude
+      // said", feeding the model false self-attributed context.
+      const isBot = m.user === botUserId;
       const authorName = isBot
         ? canResolveUsers
           ? await resolveUserName(client, botUserId)

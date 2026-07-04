@@ -64,7 +64,11 @@ export function buildGitConfig(credPath: string): string {
     '[url "https://github.com/"]',
     '\tinsteadOf = git@github.com:',
     '\tinsteadOf = ssh://git@github.com/',
-    '[credential]',
+    // Scope the helper to github.com HTTPS only. An unscoped [credential] helper
+    // answers `get` for ANY host, leaking the GitHub PAT to any other HTTPS
+    // remote the agent contacts. The URL rewrite above already maps all github
+    // remotes to https://github.com/, so this section covers every real case.
+    '[credential "https://github.com"]',
     // Empty helper resets any inherited helper list before ours
     '\thelper = ',
     `\thelper = "!f() { test \\"$1\\" = get && cat '${credPath}'; :; }; f"`,

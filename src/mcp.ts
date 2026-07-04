@@ -12,6 +12,12 @@ interface McpConfig {
   mcpServers: Record<string, McpServerEntry>;
 }
 
+// Monotonic counter so concurrent spawns writing the same read-only config get
+// distinct temp files (the destination path is shared — it embeds only the
+// server-set hash — so a shared `.tmp` would let one rename race ahead and make
+// the other's rename fail with ENOENT).
+let tmpCounter = 0;
+
 /**
  * Generate an MCP config from an existing mcp.json with READ_ONLY_MODE: "true"
  * injected into the named servers' env. Used when a credential guarding MCP
@@ -44,7 +50,7 @@ export function generateReadOnlyMcpConfig(sourcePath: string, serverNames: strin
   }
 
   const destPath = readOnlyMcpConfigPath(sourcePath, serverNames);
-  const tmpPath = destPath + '.tmp';
+  const tmpPath = `${destPath}.${process.pid}.${tmpCounter++}.tmp`;
   writeFileSync(tmpPath, JSON.stringify(config, null, 2), 'utf-8');
   renameSync(tmpPath, destPath);
   return destPath;

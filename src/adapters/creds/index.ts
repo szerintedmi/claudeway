@@ -13,35 +13,56 @@ import { audit } from '../../audit.js';
 export const DEFAULT_CREDS_PORT = 8791;
 
 /**
- * Progressive-backoff rate limiter for invalid form/link attempts
- * (same pattern as the voice adapter's auth limiter).
+ * Progressive-backoff rate limiter for invalid form/link attempts, keyed by
+ * client IP. A process-wide global (the old design) let 3 anonymous requests
+ * with any invalid/expired token lock EVERY enrollee out for 5 minutes — a
+ * trivial unauthenticated DoS. Per-IP keying confines the backoff to the
+ * offending client.
  */
 const FREE_ATTEMPTS = 3;
 const BASE_DELAY_MS = 5_000;
 const MAX_DELAY_MS = 5 * 60 * 1000;
-let failureCount = 0;
-let lastFailureTime = 0;
+const RATE_LIMITER_MAX_ENTRIES = 10_000;
 
-function recordFailure(): void {
-  failureCount++;
-  lastFailureTime = Date.now();
+interface RateEntry {
+  failureCount: number;
+  lastFailureTime: number;
+}
+const rateLimiter = new Map<string, RateEntry>();
+
+function pruneRateLimiter(now: number): void {
+  if (rateLimiter.size <= RATE_LIMITER_MAX_ENTRIES) return;
+  // Drop entries whose backoff window has fully elapsed — they're back to a
+  // clean slate anyway, so forgetting them changes nothing.
+  for (const [ip, e] of rateLimiter) {
+    if (now - e.lastFailureTime >= MAX_DELAY_MS) rateLimiter.delete(ip);
+  }
 }
 
-function isRateLimited(): boolean {
-  if (failureCount < FREE_ATTEMPTS) return false;
-  const backoffExponent = failureCount - FREE_ATTEMPTS;
+function recordFailure(ip: string): void {
+  const now = Date.now();
+  const e = rateLimiter.get(ip) ?? { failureCount: 0, lastFailureTime: 0 };
+  e.failureCount++;
+  e.lastFailureTime = now;
+  rateLimiter.set(ip, e);
+  pruneRateLimiter(now);
+}
+
+function isRateLimited(ip: string): boolean {
+  const e = rateLimiter.get(ip);
+  if (!e || e.failureCount < FREE_ATTEMPTS) return false;
+  const backoffExponent = e.failureCount - FREE_ATTEMPTS;
   const cooldownMs = Math.min(BASE_DELAY_MS * (1 << backoffExponent), MAX_DELAY_MS);
-  return Date.now() - lastFailureTime < cooldownMs;
+  return Date.now() - e.lastFailureTime < cooldownMs;
 }
 
-function clearFailures(): void {
-  failureCount = 0;
-  lastFailureTime = 0;
+function clearFailures(ip: string): void {
+  rateLimiter.delete(ip);
 }
 
 /** Test hook. */
 export function resetCredsRateLimiterForTests(): void {
-  clearFailures();
+  rateLimiter.clear();
 }
 
 function escapeHtml(s: string): string {
@@ -120,24 +141,24 @@ ${sections}
   );
 }
 
-async function handlePost(req: Request): Promise<Response> {
+async function handlePost(req: Request, clientIp: string): Promise<Response> {
   const form = await req.formData().catch(() => null);
   const token = form?.get('t');
   if (!form || typeof token !== 'string' || !token) {
-    recordFailure();
+    recordFailure(clientIp);
     return page('Invalid request', '<h1>Invalid request</h1><p class="warn">Missing token.</p>');
   }
 
   // Single-use: the token is consumed regardless of what follows
   const userId = redeemLink(token);
   if (!userId) {
-    recordFailure();
+    recordFailure(clientIp);
     return page(
       'Link expired',
       '<h1>Link expired</h1><p class="warn">This link is invalid, expired, or already used. DM the bot <code>!creds</code> for a fresh one.</p>',
     );
   }
-  clearFailures();
+  clearFailures(clientIp);
 
   const config = loadConfig();
   const store = getSecretStore();
@@ -185,12 +206,19 @@ async function handlePost(req: Request): Promise<Response> {
   );
 }
 
-/** Handle a request for the /creds routes. Returns null when the path doesn't match. */
-export async function handleCredsRequest(req: Request): Promise<Response | null> {
+/**
+ * Handle a request for the /creds routes. Returns null when the path doesn't
+ * match. `clientIp` keys the rate limiter (defaults to a shared bucket when the
+ * caller can't resolve one, e.g. tests).
+ */
+export async function handleCredsRequest(
+  req: Request,
+  clientIp = 'unknown',
+): Promise<Response | null> {
   const url = new URL(req.url);
   if (url.pathname !== '/creds') return null;
 
-  if (isRateLimited()) {
+  if (isRateLimited(clientIp)) {
     return new Response('Too many attempts — try again later', { status: 429 });
   }
 
@@ -198,7 +226,7 @@ export async function handleCredsRequest(req: Request): Promise<Response | null>
     const token = url.searchParams.get('t') ?? '';
     const userId = token ? peekLink(token) : null;
     if (!userId) {
-      recordFailure();
+      recordFailure(clientIp);
       return page(
         'Link expired',
         '<h1>Link expired</h1><p class="warn">This link is invalid, expired, or already used. DM the bot <code>!creds</code> for a fresh one.</p>',
@@ -208,7 +236,7 @@ export async function handleCredsRequest(req: Request): Promise<Response | null>
   }
 
   if (req.method === 'POST') {
-    return handlePost(req);
+    return handlePost(req, clientIp);
   }
 
   return new Response('Method Not Allowed', { status: 405 });
@@ -217,15 +245,17 @@ export async function handleCredsRequest(req: Request): Promise<Response | null>
 /** Start the credential form HTTP server (always on — enrollment is mandatory). */
 export function startCredsServer(config: Config): void {
   const port = config.credsForm?.port ?? DEFAULT_CREDS_PORT;
+  const hostname = config.credsForm?.host ?? '0.0.0.0';
 
-  Bun.serve({
+  const server = Bun.serve({
     port,
-    hostname: '0.0.0.0',
+    hostname,
     async fetch(req) {
-      const res = await handleCredsRequest(req);
+      const clientIp = server.requestIP(req)?.address ?? 'unknown';
+      const res = await handleCredsRequest(req, clientIp);
       return res ?? new Response('Not Found', { status: 404 });
     },
   });
 
-  console.log(`[creds] Credential form listening on port ${port}`);
+  console.log(`[creds] Credential form listening on ${hostname}:${port}`);
 }

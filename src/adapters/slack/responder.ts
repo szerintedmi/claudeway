@@ -60,7 +60,14 @@ class StreamingResponder implements IStreamingResponder {
   private lastUpdateLen = 0;
   private updateTimer: ReturnType<typeof setInterval> | null = null;
   private finished = false;
+  /** Guards against overlapping flushes — a postMessage slower than the flush
+   *  interval would otherwise let two ticks both post the initial message
+   *  (one orphaned). Mirrors SlackTurnStream's single-flight discipline. */
+  private flushing = false;
+  private currentFlush: Promise<void> = Promise.resolve();
   private statusTs: string | null = null;
+  /** Serializes status-message posts/updates; never rejects (errors swallowed inside). */
+  private statusOp: Promise<void> = Promise.resolve();
   /** ts the streaming reaction was placed on (the response message), if any. */
   private reactionTs: string | null = null;
   /** The in-flight reaction `add`, awaited before the `remove` so they can't race. */
@@ -82,11 +89,22 @@ class StreamingResponder implements IStreamingResponder {
     }
   }
 
-  private async flush(): Promise<void> {
-    if (this.fullText.length === 0) return;
+  private flush(): Promise<void> {
+    // Single-flight: if a flush is already in flight, return it so callers (the
+    // interval tick and finish()) await the same promise instead of racing a
+    // second postMessage.
+    if (this.flushing) return this.currentFlush;
+    if (this.fullText.length === 0) return Promise.resolve();
     // Skip if no new text — unless finished, where we must update to remove the indicator
-    if (!this.finished && this.fullText.length === this.lastUpdateLen) return;
+    if (!this.finished && this.fullText.length === this.lastUpdateLen) return Promise.resolve();
+    this.flushing = true;
+    this.currentFlush = this.doFlush().finally(() => {
+      this.flushing = false;
+    });
+    return this.currentFlush;
+  }
 
+  private async doFlush(): Promise<void> {
     const displayText = markdownToSlackMrkdwn(this.fullText);
     // Truncate for Slack's single-message limit, append indicator if still streaming
     const truncated =
@@ -128,27 +146,34 @@ class StreamingResponder implements IStreamingResponder {
   }
 
   onToolEvent(event: ToolEventPayload): void {
+    // A late tool event after finish() would otherwise re-create the status
+    // message that finish() just deleted, leaving an orphan.
+    if (this.finished) return;
     const text = formatToolStatus(event.toolName, event.phase === 'complete' ? event.keyArg : null);
-    if (!this.statusTs) {
-      this.client.chat
-        .postMessage({
-          channel: this.channel,
-          thread_ts: this.threadTs,
-          text,
-        })
-        .then((res) => {
+    // Serialize post/update through one chain: two quick events would otherwise
+    // both see statusTs === null and both post (one bubble orphaned). finish()
+    // awaits the chain, so an in-flight post always lands before the delete.
+    this.statusOp = this.statusOp.then(async () => {
+      if (this.finished) return;
+      try {
+        if (!this.statusTs) {
+          const res = await this.client.chat.postMessage({
+            channel: this.channel,
+            thread_ts: this.threadTs,
+            text,
+          });
           this.statusTs = res.ts ?? null;
-        })
-        .catch(() => {});
-    } else {
-      this.client.chat
-        .update({
-          channel: this.channel,
-          ts: this.statusTs,
-          text,
-        })
-        .catch(() => {});
-    }
+        } else {
+          await this.client.chat.update({
+            channel: this.channel,
+            ts: this.statusTs,
+            text,
+          });
+        }
+      } catch {
+        // Best effort
+      }
+    });
   }
 
   async finish(): Promise<void> {
@@ -157,7 +182,9 @@ class StreamingResponder implements IStreamingResponder {
       clearInterval(this.updateTimer);
       this.updateTimer = null;
     }
-    // Final update to remove the streaming indicator
+    // Let any in-flight flush settle, then do one final update (finished=true, so
+    // the no-new-text guard is bypassed) to remove the streaming indicator.
+    await this.currentFlush.catch(() => {});
     if (this.fullText.length > 0) {
       await this.flush();
     }
@@ -173,7 +200,9 @@ class StreamingResponder implements IStreamingResponder {
         'remove',
       );
     }
-    // Delete the status message
+    // Let any in-flight status post/update land (queued-but-unstarted ops see
+    // finished=true and skip), then delete the status message.
+    await this.statusOp;
     if (this.statusTs) {
       try {
         await this.client.chat.delete({ channel: this.channel, ts: this.statusTs });
@@ -537,10 +566,15 @@ export class SlackChannelResponder implements ChannelResponder {
     // stream-update mode: the streamed plain message is already correct unless
     // the response is oversized or holds a details marker (folded by rewriting
     // the bubble through the block layout).
+    //
+    // The live flush() truncates on the POST-conversion length
+    // (markdownToSlackMrkdwn inflates via link conversion), so the rebuild
+    // decision must use that same converted length — comparing raw finalText
+    // here would leave a converted-over/raw-under answer stuck at `_[streaming...]_`.
     const sr = responder as StreamingResponder;
     if (
       finalText.length > FILE_THRESHOLD ||
-      finalText.length > MAX_MESSAGE_LENGTH ||
+      markdownToSlackMrkdwn(finalText).length > MAX_MESSAGE_LENGTH ||
       splitDetails(finalText).details !== null
     ) {
       await deliverText(this.client, {

@@ -2,6 +2,7 @@ import type { ServerWebSocket } from 'bun';
 import type {
   ChannelResponder,
   IStreamingResponder,
+  StreamOutcome,
   ToolEventPayload,
 } from '../../core/interfaces.js';
 import { ProseChunker, type Chunk } from '../../core/prose-chunker.js';
@@ -98,7 +99,16 @@ class VoiceStreamingResponder implements IStreamingResponder {
     this.killProcess = kill;
   }
 
-  async finish(): Promise<void> {
+  async finish(outcome?: StreamOutcome): Promise<void> {
+    // A failed turn (engine cleanup after a mid-turn crash) already sent an
+    // `{type:'error'}` — do not speak the partial buffered text or send a
+    // `response_audio_end` that the client would read as success. Just mark the
+    // text stream final and stop.
+    if (outcome?.ok === false) {
+      send(this.ws, { type: 'response_text', requestId: this.requestId, text: '', final: true });
+      return;
+    }
+
     send(this.ws, { type: 'response_text', requestId: this.requestId, text: '', final: true });
 
     if (this.aborted || this.ttsFailed) return;
@@ -141,14 +151,6 @@ class VoiceStreamingResponder implements IStreamingResponder {
     if (this.killProcess) {
       this.killProcess();
     }
-  }
-
-  getKillProcess(): (() => void) | null {
-    return this.killProcess;
-  }
-
-  isAborted(): boolean {
-    return this.aborted;
   }
 
   /** Check if we're under the flush rate limit (sliding window) */
@@ -328,9 +330,5 @@ export class VoiceChannelResponder implements ChannelResponder {
     if (this.streamingResponder) {
       this.streamingResponder.cancel();
     }
-  }
-
-  getStreamingResponder(): VoiceStreamingResponder | null {
-    return this.streamingResponder;
   }
 }

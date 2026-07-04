@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.33.0] - 2026-07-04
+
+### Fixed
+- **Codebase review hardening sweep** (all High/Medium findings in `docs/plans/2026-07-04-codebase-review-findings.md` + follow-up review): engine process-slot/queue cleanup leak that could deadlock all channels; one bad repo no longer crashes startup; graceful instance-scoped child termination instead of host-wide `pkill -9`; voice `finish()` honors failure outcome; truncated streamed Slack answers now rebuilt; one shared fence-aware, surrogate-safe, length-safe Slack chunker (no broken code fences, split emoji, or over-limit chunks); MCP read-only config write race; git credential helper scoped to github.com; creds-form rate limiting per-IP (+ `credsForm.host` option); atomic pidfile lock; third-party bot messages no longer attributed to Claude; tool cards matched by content-block index and overlapping tool blocks accumulated per-index; 12h absolute timeout for persistent processes; permanent Slack errors stop retrying; duplicate/orphaned streaming status messages serialized
+
+### Changed
+- **`claude.ts` split** (1517 → ~1100 lines): NDJSON parsing → `claude-stream-parser.ts`, spawn env assembly → `claude-spawn-env.ts`, owned-child tracking → `child-processes.ts`; assorted dead-code removal
+
 ## [0.32.0] - 2026-07-03
 
 ### Added

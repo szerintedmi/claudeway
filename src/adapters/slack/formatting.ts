@@ -277,20 +277,110 @@ export function formatToolTaskTitle(toolName: string, keyArg: string | null): st
   return title.length > TASK_TITLE_MAX ? `${title.slice(0, TASK_TITLE_MAX - 1)}…` : title;
 }
 
-export function splitMessage(text: string): string[] {
-  const chunks: string[] = [];
-  let remaining = text;
-  while (remaining.length > 0) {
-    if (remaining.length <= MAX_MESSAGE_LENGTH) {
-      chunks.push(remaining);
-      break;
-    }
-    let splitAt = remaining.lastIndexOf('\n', MAX_MESSAGE_LENGTH);
-    if (splitAt === -1 || splitAt < MAX_MESSAGE_LENGTH * 0.5) {
-      splitAt = MAX_MESSAGE_LENGTH;
-    }
-    chunks.push(remaining.substring(0, splitAt));
-    remaining = remaining.substring(splitAt).trimStart();
+/** A ``` fence line, capturing its info-string (language) when opening. */
+const FENCE_LINE = /^```(\S*)/;
+
+/**
+ * Largest cut index `<= max` in `s` that does not split a UTF-16 surrogate
+ * pair (a 2-unit emoji/codepoint) in half.
+ */
+function safeCut(s: string, max: number): number {
+  let cut = Math.min(max, s.length);
+  if (cut > 0 && cut < s.length) {
+    const prev = s.charCodeAt(cut - 1);
+    if (prev >= 0xd800 && prev <= 0xdbff) cut -= 1; // don't orphan a high surrogate
   }
+  return Math.max(1, cut);
+}
+
+/**
+ * The single fence-aware, surrogate-safe chunker used by every Slack splitter
+ * (message overflow, section blocks, the details container). Packs whole lines
+ * up to `maxLen`, and:
+ *
+ * - never splits a ``` code block across a chunk boundary — it closes the fence
+ *   at the end of the chunk and reopens it (preserving the language) at the top
+ *   of the next, so neither chunk renders with a dangling/unclosed fence;
+ * - never splits between the two halves of a surrogate pair (a hard-split of an
+ *   over-long single line cuts on a codepoint boundary);
+ * - optionally trims leading whitespace/newlines from continuation chunks
+ *   (matches the old per-site behavior).
+ */
+export function chunkText(
+  text: string,
+  maxLen: number,
+  opts: { trimContinuation?: 'whitespace' | 'newlines' | 'none' } = {},
+): string[] {
+  const trim = opts.trimContinuation ?? 'none';
+  if (text.length === 0) return [];
+
+  const chunks: string[] = [];
+  let inFence = false;
+  let fenceLang = '';
+  let curLines: string[] = [];
+  let reopenPrefix = ''; // '```lang\n' seeded into a chunk continuing an open fence
+
+  const closeLen = () => (inFence ? '\n```'.length : 0);
+  const curLen = () => reopenPrefix.length + curLines.join('\n').length;
+
+  const emit = () => {
+    if (curLines.length === 0) return; // never emit a bare fence-reopen prefix
+    let out = reopenPrefix + curLines.join('\n');
+    if (inFence) out += '\n```';
+    chunks.push(out);
+    curLines = [];
+    reopenPrefix = inFence ? '```' + fenceLang + '\n' : '';
+  };
+
+  // Trim leading whitespace/newlines from the first content line of a fresh
+  // (non-first, non-fence-reopen) continuation chunk — matches the old per-site
+  // behavior. Applied only when a line actually begins such a chunk.
+  const startsContinuation = () =>
+    curLines.length === 0 && reopenPrefix === '' && chunks.length > 0;
+  const trimCont = (s: string): string => {
+    if (trim === 'whitespace') return s.replace(/^\s+/, '');
+    if (trim === 'newlines') return s.replace(/^\n+/, '');
+    return s;
+  };
+
+  const addLine = (line: string) => {
+    // Start a fresh chunk if appending the line would overflow the current one.
+    // (Overflow must be re-checked AFTER emit(): emitting inside an open fence
+    // grows reopenPrefix, which can push a line that fit pre-emit over the cap.)
+    if (curLines.length > 0 && curLen() + 1 + line.length + closeLen() > maxLen) emit();
+    if (startsContinuation()) line = trimCont(line);
+    // A line too long to fit even in a fresh chunk (whose fence-reopen prefix
+    // counts against the budget) must be hard-split (surrogate-safe).
+    if (reopenPrefix.length + line.length + closeLen() > maxLen) {
+      let rest = line;
+      while (reopenPrefix.length + rest.length + closeLen() > maxLen) {
+        const room = maxLen - reopenPrefix.length - closeLen();
+        const cut = safeCut(rest, room);
+        curLines = [rest.slice(0, cut)];
+        emit();
+        rest = rest.slice(cut);
+      }
+      if (rest.length > 0) curLines.push(rest);
+      return;
+    }
+    // Blank lines are appended too, so paragraph spacing survives.
+    curLines.push(line);
+  };
+
+  const lines = text.split('\n');
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
+    const fence = FENCE_LINE.exec(line);
+    addLine(line);
+    if (fence) {
+      inFence = !inFence;
+      fenceLang = inFence ? fence[1] : '';
+    }
+  }
+  emit();
   return chunks;
+}
+
+export function splitMessage(text: string): string[] {
+  return chunkText(text, MAX_MESSAGE_LENGTH, { trimContinuation: 'whitespace' });
 }

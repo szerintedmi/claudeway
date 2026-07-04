@@ -58,6 +58,9 @@ interface FieldDeltas {
 
 interface OpenTool {
   toolName: string;
+  /** Stream content-block index — the stable key a completion is matched on
+   *  (undefined only for synthetic subagent cards / index-less legacy events). */
+  index: number | undefined;
   /** Card receiving this tool's updates: its own card, or the enclosing step. */
   task: TrackedTask;
   /** True when `task` is a step card (the tool renders as its details line). */
@@ -136,25 +139,44 @@ export class TaskTracker {
         // Step-bound tools show up as a completed-line log entry; a 'start'
         // alone adds no information (the step spinner already shows activity)
         // and every details send appends, so emit nothing yet.
-        this.openTools.push({ toolName: event.toolName, task: this.activeStep, inStep: true });
+        this.openTools.push({
+          toolName: event.toolName,
+          index: event.index,
+          task: this.activeStep,
+          inStep: true,
+        });
       } else {
         const task = this.create(
           event.toolName,
           formatToolTaskTitle(event.toolName, null),
           'in_progress',
         );
-        this.openTools.push({ toolName: event.toolName, task, inStep: false });
+        this.openTools.push({
+          toolName: event.toolName,
+          index: event.index,
+          task,
+          inStep: false,
+        });
         chunks.push(this.toChunk(task));
       }
     } else if (event.phase === 'complete') {
-      // Match the innermost open call for this tool (LIFO); tolerate a missing
+      // Match the open call by its stream content-block index — a stable key, so
+      // parallel same-name calls finishing out of order label the right card.
+      // Fall back to the innermost same-name call (LIFO), then tolerate a missing
       // 'start' by attaching to the step (or a fresh card) in its final state.
       let entry: OpenTool | undefined;
-      for (let i = this.openTools.length - 1; i >= 0; i--) {
-        if (this.openTools[i].toolName === event.toolName) {
-          entry = this.openTools.splice(i, 1)[0];
-          break;
+      let idx =
+        event.index !== undefined ? this.openTools.findIndex((t) => t.index === event.index) : -1;
+      if (idx === -1) {
+        for (let i = this.openTools.length - 1; i >= 0; i--) {
+          if (this.openTools[i].toolName === event.toolName) {
+            idx = i;
+            break;
+          }
         }
+      }
+      if (idx !== -1) {
+        entry = this.openTools.splice(idx, 1)[0];
       }
       const title = formatToolTaskTitle(event.toolName, event.keyArg ?? null);
       if (entry ? entry.inStep : this.activeStep !== null) {
@@ -182,7 +204,9 @@ export class TaskTracker {
           formatToolTaskTitle(event.toolName, null),
           'in_progress',
         );
-        this.openTools.push({ toolName: event.toolName, task, inStep: false });
+        // Subagent events carry no content-block index; leaving it undefined
+        // means this card is only ever matched by name (Task/Agent).
+        this.openTools.push({ toolName: event.toolName, index: undefined, task, inStep: false });
       }
       if (event.phase === 'subagent_progress') {
         const delta = `${truncateField(event.description ?? '')}\n`;

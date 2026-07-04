@@ -109,7 +109,7 @@ export class FileSecretStore implements SecretStore {
   private load(): StoreFile {
     if (!existsSync(this.storePath)) return { version: 1, users: {} };
     const parsed = JSON.parse(readFileSync(this.storePath, 'utf-8')) as StoreFile;
-    if (parsed.version !== 1 || typeof parsed.users !== 'object') {
+    if (parsed.version !== 1 || typeof parsed.users !== 'object' || parsed.users === null) {
       throw new Error(`Unrecognized secret store format at ${this.storePath}`);
     }
     return parsed;

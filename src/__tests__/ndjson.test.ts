@@ -1,4 +1,5 @@
 import { parseStreamLine } from '../claude.js';
+import { ToolUseAccumulators } from '../claude-stream-parser.js';
 
 describe('parseStreamLine — text_delta events', () => {
   const makeDelta = (text: string) =>
@@ -260,6 +261,30 @@ describe('parseStreamLine — tool events', () => {
       event: { type: 'content_block_stop', index: 1 },
     });
     expect(parseStreamLine(line)).toEqual({ type: 'tool_stop', index: 1 });
+  });
+});
+
+describe('ToolUseAccumulators — overlapping tool blocks', () => {
+  it('accumulates and closes interleaved blocks independently', () => {
+    const accums = new ToolUseAccumulators();
+    accums.start('Read', 0);
+    accums.start('Bash', 1); // starts before index 0 stops
+    accums.appendInput(0, '{"file_path":"a.ts"}');
+    accums.appendInput(1, '{"command":"ls"}');
+    // Stops arrive out of order; each returns its own block, none dropped.
+    const first = accums.stop(0);
+    expect(first).toEqual({ toolName: 'Read', partialJson: '{"file_path":"a.ts"}', index: 0 });
+    const second = accums.stop(1);
+    expect(second).toEqual({ toolName: 'Bash', partialJson: '{"command":"ls"}', index: 1 });
+  });
+
+  it('ignores stops for non-tool blocks and double stops', () => {
+    const accums = new ToolUseAccumulators();
+    expect(accums.stop(0)).toBeNull(); // text block's content_block_stop
+    accums.start('Read', 1);
+    expect(accums.stop(1)?.toolName).toBe('Read');
+    expect(accums.stop(1)).toBeNull(); // already closed
+    accums.appendInput(1, '{}'); // append after close is a no-op, no throw
   });
 });
 

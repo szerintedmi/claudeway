@@ -16,6 +16,26 @@ import {
  */
 const STREAM_CLOSED_ERROR_CODES = new Set(['message_not_in_streaming_state', 'stopped_by_user']);
 
+/**
+ * Slack errors that will never succeed on retry for this turn (bad channel,
+ * missing scope, revoked/invalid auth, archived channel). Retrying these every
+ * flush tick just drains the shared append budget and degrades other channels,
+ * so we tear the stream down and fall back to full-text delivery instead.
+ */
+const PERMANENT_ERROR_CODES = new Set([
+  'channel_not_found',
+  'not_in_channel',
+  'is_archived',
+  'missing_scope',
+  'invalid_auth',
+  'not_authed',
+  'account_inactive',
+  'token_revoked',
+  'no_permission',
+  'restricted_action',
+  'org_login_required',
+]);
+
 export function slackErrorCode(err: unknown): string | undefined {
   return (err as { data?: { error?: string } } | undefined)?.data?.error;
 }
@@ -23,6 +43,11 @@ export function slackErrorCode(err: unknown): string | undefined {
 export function isStreamClosedError(err: unknown): boolean {
   const code = slackErrorCode(err);
   return code != null && STREAM_CLOSED_ERROR_CODES.has(code);
+}
+
+export function isPermanentStreamError(err: unknown): boolean {
+  const code = slackErrorCode(err);
+  return code != null && PERMANENT_ERROR_CODES.has(code);
 }
 
 /**
@@ -250,6 +275,12 @@ export class SlackTurnStream {
         this.streamBroken = true;
         this.stopFlushLoop();
         console.error('[native-stream] stream finalized early:', code);
+      } else if (isPermanentStreamError(err)) {
+        // Never going to succeed for this turn — stop retrying so we don't burn
+        // the shared append budget. deliveredOk() flips false → full-text fallback.
+        this.streamBroken = true;
+        this.stopFlushLoop();
+        console.error('[native-stream] permanent append error, giving up:', code);
       } else {
         console.error('[native-stream] append failed, will retry:', code ?? err);
       }
@@ -291,6 +322,11 @@ export class SlackTurnStream {
         if (isStreamClosedError(err)) {
           this.streamBroken = true;
           console.error('[native-stream] stream already finalized at stop:', code);
+          return;
+        }
+        if (isPermanentStreamError(err)) {
+          this.streamBroken = true;
+          console.error('[native-stream] permanent error at stop, giving up:', code);
           return;
         }
         if (attempt >= FINALIZE_RETRY_DELAYS_MS.length) {

@@ -1,4 +1,6 @@
-import { spawn, type ChildProcess } from 'child_process';
+import { type ChildProcess } from 'child_process';
+import { homedir } from 'os';
+import { spawnTrackedClaude } from './child-processes.js';
 import { existsSync, unlinkSync, rmSync } from 'fs';
 import { resolve } from 'path';
 import { v5 as uuidv5 } from 'uuid';
@@ -9,12 +11,29 @@ import {
   type UserPermissions,
 } from './config.js';
 import { getMcpConfigPath } from './mcp.js';
-import { gitCredConfigured, type ResolvedCredentials } from './credentials.js';
-import { ensureGitCredentialFiles } from './git-credentials.js';
-import { scrubSecrets } from './secrets.js';
+import { type ResolvedCredentials } from './credentials.js';
+import {
+  parseStreamLine,
+  extractKeyArg,
+  ToolUseAccumulators,
+  type ToolEventPayload,
+} from './claude-stream-parser.js';
+import {
+  buildAllowedEnv,
+  buildSpawnEnv,
+  buildInjectedEnv,
+  processIdentityKey,
+  scrub,
+} from './claude-spawn-env.js';
 
 // Re-export ProcessMode for consumers that only import from claude.ts
 export type { ProcessMode } from './config.js';
+// Re-export the stream-parser surface so existing importers of '../claude.js'
+// (tests, the interfaces module) keep working after the split.
+export { parseStreamLine } from './claude-stream-parser.js';
+export type { ToolEventPayload, StreamLineEvent } from './claude-stream-parser.js';
+// Re-export the spawn-env surface used by tests importing from '../claude.js'.
+export { buildAllowedEnv, processIdentityKey } from './claude-spawn-env.js';
 
 export interface ClaudeOptions {
   message: string;
@@ -110,6 +129,12 @@ interface PersistentProcessEntry {
   totalCost: number;
   totalTokens: number;
   idleTimer: ReturnType<typeof setTimeout>;
+  /**
+   * Absolute cap on the process lifetime. A persistent process is reused across
+   * turns and its idle timer resets on every byte of output, so without this it
+   * could live forever (one-shot streaming has the same 12h cap).
+   */
+  absoluteTimer: ReturnType<typeof setTimeout>;
   lineBuffer: string;
   /** Stderr of the current turn (bounded; reset when a new turn is written to stdin) */
   stderrBuf: string;
@@ -122,7 +147,7 @@ interface PersistentProcessEntry {
     fullText: string;
     sessionId: string | null;
     cost: number | null;
-    toolAccum: ToolAccumulator | null;
+    toolAccums: ToolUseAccumulators;
   } | null;
 }
 
@@ -168,6 +193,7 @@ export function killProcess(channelId: string): boolean {
   for (const [key, entry] of persistentRegistry) {
     if (key === channelId || key.startsWith(`${channelId}:`)) {
       clearTimeout(entry.idleTimer);
+      clearTimeout(entry.absoluteTimer);
       entry.proc.kill('SIGTERM');
       killed = true;
     }
@@ -200,6 +226,7 @@ export function killAllProcesses(): string[] {
   }
   for (const [channelId, entry] of persistentRegistry) {
     clearTimeout(entry.idleTimer);
+    clearTimeout(entry.absoluteTimer);
     entry.proc.kill('SIGTERM');
     killed.push(channelId);
   }
@@ -214,389 +241,8 @@ export function deriveSessionId(channelId: string, folder: string, threadTs?: st
   return uuidv5(`${channelId}:${folder}${threadTs ? `:${threadTs}` : ''}`, CLAUDEWAY_NAMESPACE);
 }
 
-// --- Stream-json line parser (pure, exported for testing) ---
-
-export type ToolEventPayload =
-  | { phase: 'start'; toolName: string }
-  | { phase: 'complete'; toolName: string; keyArg: string | null }
-  | { phase: 'subagent_progress'; toolName: string; description: string }
-  | {
-      phase: 'subagent_completed';
-      toolName: string;
-      description: string;
-      usage?: { toolUses: number; tokens: number; durationMs: number };
-    };
-
-export type StreamLineEvent =
-  | { type: 'text_delta'; text: string }
-  | { type: 'reasoning_delta'; text: string }
-  | {
-      type: 'result';
-      text: string;
-      sessionId: string | null;
-      cost: number | null;
-      tokens: number | null;
-    }
-  | { type: 'user_receipt' }
-  | { type: 'tool_start'; toolName: string; index: number }
-  | { type: 'tool_input_delta'; partialJson: string; index: number }
-  | { type: 'tool_stop'; index: number }
-  | { type: 'subagent_progress'; description: string; toolName: string }
-  | {
-      type: 'subagent_completed';
-      description: string;
-      usage?: { toolUses: number; tokens: number; durationMs: number };
-    }
-  | null;
-
-/**
- * Parse one NDJSON line from Claude CLI --output-format stream-json output.
- * Returns a typed event or null (unrecognised / whitespace / invalid JSON).
- */
-export function parseStreamLine(line: string): StreamLineEvent {
-  if (!line.trim()) return null;
-  try {
-    const obj = JSON.parse(line);
-
-    // Text delta — {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}}
-    if (
-      obj.type === 'stream_event' &&
-      obj.event?.type === 'content_block_delta' &&
-      obj.event.delta?.type === 'text_delta' &&
-      obj.event.delta.text
-    ) {
-      return { type: 'text_delta', text: obj.event.delta.text };
-    }
-
-    // Reasoning (extended thinking) delta — same envelope as text_delta but the
-    // delta carries `thinking` instead of `text`. Surfaced separately so it can be
-    // shown as "working notes" without polluting the final-answer text stream.
-    if (
-      obj.type === 'stream_event' &&
-      obj.event?.type === 'content_block_delta' &&
-      obj.event.delta?.type === 'thinking_delta' &&
-      obj.event.delta.thinking
-    ) {
-      return { type: 'reasoning_delta', text: obj.event.delta.thinking };
-    }
-
-    // Result event
-    if (obj.type === 'result') {
-      const usage = obj.usage;
-      const tokens = usage != null ? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) : null;
-      return {
-        type: 'result',
-        text: obj.result ?? '',
-        sessionId: obj.session_id ?? null,
-        cost: obj.cost_usd ?? obj.total_cost_usd ?? null,
-        tokens,
-      };
-    }
-
-    // User message receipt (persistent mode --replay-user-messages)
-    if (obj.type === 'user') {
-      return { type: 'user_receipt' };
-    }
-
-    // Tool use start — content_block_start with tool_use type
-    if (
-      obj.type === 'stream_event' &&
-      obj.event?.type === 'content_block_start' &&
-      obj.event.content_block?.type === 'tool_use'
-    ) {
-      return {
-        type: 'tool_start',
-        toolName: obj.event.content_block.name ?? 'unknown',
-        index: obj.event.index ?? -1,
-      };
-    }
-
-    // Tool input delta — partial JSON for tool arguments
-    if (
-      obj.type === 'stream_event' &&
-      obj.event?.type === 'content_block_delta' &&
-      obj.event.delta?.type === 'input_json_delta'
-    ) {
-      return {
-        type: 'tool_input_delta',
-        partialJson: obj.event.delta.partial_json ?? '',
-        index: obj.event.index ?? -1,
-      };
-    }
-
-    // Content block stop — only meaningful when matched with a tool block by index
-    if (obj.type === 'stream_event' && obj.event?.type === 'content_block_stop') {
-      return { type: 'tool_stop', index: obj.event.index ?? -1 };
-    }
-
-    // Sub-agent progress: system events with task_progress subtype
-    if (obj.type === 'system' && obj.subtype === 'task_progress' && obj.description) {
-      return {
-        type: 'subagent_progress',
-        description: obj.description,
-        toolName: obj.last_tool_name ?? 'unknown',
-      };
-    }
-
-    // Sub-agent completed
-    if (
-      obj.type === 'system' &&
-      obj.subtype === 'task_notification' &&
-      obj.status === 'completed'
-    ) {
-      const usage = obj.usage;
-      return {
-        type: 'subagent_completed',
-        description: obj.summary ?? obj.description ?? '',
-        ...(usage
-          ? {
-              usage: {
-                toolUses: usage.tool_uses ?? 0,
-                tokens: usage.total_tokens ?? 0,
-                durationMs: usage.duration_ms ?? 0,
-              },
-            }
-          : {}),
-      };
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// Known tool parameter priority map for extracting the most relevant argument
-const TOOL_KEY_PARAMS: Record<string, string[]> = {
-  Read: ['file_path'],
-  Write: ['file_path'],
-  Edit: ['file_path'],
-  MultiEdit: ['file_path'],
-  Bash: ['command'],
-  Glob: ['pattern'],
-  Grep: ['pattern'],
-  LS: ['path'],
-  WebFetch: ['url'],
-  WebSearch: ['query'],
-  Agent: ['description'],
-};
-
-function extractKeyArg(toolName: string, accumulatedJson: string): string | null {
-  try {
-    const parsed = JSON.parse(accumulatedJson);
-    const priority = TOOL_KEY_PARAMS[toolName] ?? [];
-    for (const key of priority) {
-      if (typeof parsed[key] === 'string' && parsed[key].length > 0) {
-        const val: string = parsed[key];
-        return val.length > 80 ? val.substring(0, 77) + '...' : val;
-      }
-    }
-    // Fallback: first string-valued key
-    for (const val of Object.values(parsed)) {
-      if (typeof val === 'string' && val.length > 0) {
-        return (val as string).length > 80
-          ? (val as string).substring(0, 77) + '...'
-          : (val as string);
-      }
-    }
-  } catch {
-    // Partial JSON may not be valid — return null gracefully
-  }
-  return null;
-}
-
-interface ToolAccumulator {
-  toolName: string;
-  partialJson: string;
-  index: number;
-}
-
-/** Env vars that disable all git authentication — hard enforcement for read-only users. */
-function buildGitReadOnlyEnv(): Record<string, string> {
-  return {
-    GIT_TERMINAL_PROMPT: '0',
-    GIT_ASKPASS: '/bin/false',
-    GIT_SSH_COMMAND: '/bin/false',
-    GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_CONFIG_SYSTEM: '/dev/null',
-    GIT_CONFIG_NOSYSTEM: '1',
-    SSH_AUTH_SOCK: '',
-    SSH_AGENT_PID: '',
-  };
-}
-
-// TODO: Parameterize email domain when adding non-Slack adapters (currently hardcoded .slack)
-/** Env vars that set git author/committer identity from user profile. */
-function buildGitAuthorEnv(userName: string, channelName: string): Record<string, string> {
-  const email = `${userName.toLowerCase().replace(/\s+/g, '.')}@${channelName}.slack`;
-  return {
-    GIT_AUTHOR_NAME: userName,
-    GIT_AUTHOR_EMAIL: email,
-    GIT_COMMITTER_NAME: userName,
-    GIT_COMMITTER_EMAIL: email,
-  };
-}
-
-/**
- * Git enforcement env (merged-plan decisions #7/#8).
- * - Resolved git token (personal or explicit shared default): per-spawn
- *   gitconfig with SSH→HTTPS rewrite + credential helper. The token never
- *   enters the subprocess env.
- * - Adapter configured but no token resolved: hard block git authentication.
- * - Adapter not configured: leave ambient git behavior unchanged.
- */
-function buildGitEnv(options: ClaudeOptions): Record<string, string> {
-  const gitCred = options.credentials?.git ?? null;
-  if (gitCred) {
-    const gitconfigPath = ensureGitCredentialFiles(gitCred);
-    return {
-      GIT_TERMINAL_PROMPT: '0',
-      GIT_ASKPASS: '/bin/false',
-      GIT_SSH_COMMAND: '/bin/false', // force HTTPS — the gitconfig rewrites SSH remotes
-      GIT_CONFIG_GLOBAL: gitconfigPath,
-      GIT_CONFIG_SYSTEM: '/dev/null',
-      GIT_CONFIG_NOSYSTEM: '1',
-      SSH_AUTH_SOCK: '',
-      SSH_AGENT_PID: '',
-    };
-  }
-
-  if (gitCredConfigured(options.config)) return buildGitReadOnlyEnv();
-  return {};
-}
-
-/** Build all permission-related env vars for a Claude subprocess. */
-function buildPermissionsEnv(options: ClaudeOptions): Record<string, string> {
-  const env: Record<string, string> = {};
-
-  // Git author identity for all users with a resolved name
-  if (options.userName && options.channelName) {
-    Object.assign(env, buildGitAuthorEnv(options.userName, options.channelName));
-  }
-
-  Object.assign(env, buildGitEnv(options));
-
-  // Scratch directory
-  if (options.scratchDir) {
-    env.CLAUDEWAY_SCRATCH_DIR = options.scratchDir;
-  }
-
-  return env;
-}
-
-/** Scrub resolved secret values from text before it is logged or surfaced. */
-function scrub(text: string, secretValues: readonly string[] | undefined): string {
-  return secretValues && secretValues.length > 0 ? scrubSecrets(text, secretValues) : text;
-}
-
-/** Env vars always passed through to Claude subprocess (safe, non-secret). */
-const BASELINE_ENV_VARS = new Set([
-  'HOME',
-  'USER',
-  'PATH',
-  'SHELL',
-  'LANG',
-  'LC_ALL',
-  'TERM',
-  'TMPDIR',
-  'NODE_PATH',
-  'XDG_CONFIG_HOME',
-  'XDG_DATA_HOME',
-]);
-
-interface AllowedEnvContext {
-  config: Config;
-  channelId: string;
-  userPermissions: UserPermissions;
-  /** Explicitly injected vars (git author, git read-only, scratch/temp dirs) */
-  extraEnv?: Record<string, string>;
-  /** Per-user credential env (personal or explicit shared default) — highest precedence. */
-  userCredEnv?: Record<string, string>;
-}
-
-/**
- * Build the complete env for a Claude subprocess using an allowlist approach.
- * Only baseline vars + global env + permission-linked env + injected vars +
- * per-user credential env are included.
- */
-export function buildAllowedEnv(ctx: AllowedEnvContext): Record<string, string> {
-  const env: Record<string, string> = {};
-
-  // 1. Baseline vars from process.env
-  for (const key of BASELINE_ENV_VARS) {
-    if (process.env[key]) env[key] = process.env[key]!;
-  }
-
-  // 2. Global env vars
-  for (const varName of ctx.config.env ?? []) {
-    if (process.env[varName]) env[varName] = process.env[varName]!;
-  }
-
-  // 3. Permission-linked env vars
-  for (const permName of ctx.userPermissions) {
-    for (const varName of ctx.config.permissions?.[permName]?.env ?? []) {
-      if (process.env[varName]) env[varName] = process.env[varName]!;
-    }
-  }
-
-  // 4. Explicit injected vars (git author, git read-only enforcement, CLAUDEWAY_* spawn vars)
-  if (ctx.extraEnv) Object.assign(env, ctx.extraEnv);
-
-  // 5. Per-user credentials — highest precedence (user secret > explicit shared default > unset)
-  if (ctx.userCredEnv) Object.assign(env, ctx.userCredEnv);
-
-  // 6. HOME fallback
-  if (!env.HOME && env.USER) env.HOME = `/Users/${env.USER}`;
-
-  return env;
-}
-
-/**
- * Compute the resolved env var names that would be exposed to Claude,
- * without including secret values. Used for restart key comparison.
- */
-function resolveExposedEnvVarNames(
-  config: Config,
-  _channelId: string,
-  permissions: UserPermissions,
-): string[] {
-  const vars = new Set<string>();
-
-  // Global env
-  for (const v of config.env ?? []) vars.add(v);
-
-  // Permission-linked env
-  for (const permName of permissions) {
-    for (const v of config.permissions?.[permName]?.env ?? []) vars.add(v);
-  }
-
-  return [...vars].sort();
-}
-
-/**
- * Compute a composite identity key for persistent process restart comparison.
- * Includes user identity, permissions, resolved env var names, a hash of the
- * user's resolved secret VALUES (never the values themselves), and the set of
- * MCP servers forced read-only — so a token change or read-only/full MCP
- * switch mid-thread triggers the existing kill/respawn path.
- */
-export function processIdentityKey(
-  userId: string,
-  permissions: UserPermissions,
-  config: Config,
-  channelId: string,
-  model: string,
-  effort: string,
-  secretsHash = '',
-  readOnlyMcpServers: string[] = [],
-): string {
-  const permPart = permissionKeyStr(permissions);
-  const envPart = resolveExposedEnvVarNames(config, channelId, permissions).join(',');
-  return `${userId}|${permPart}|${envPart}|${model}|${effort}|${secretsHash}|${readOnlyMcpServers.join(',')}`;
-}
-
 function spawnClaudeProcess(args: string[], cwd: string, env: Record<string, string>) {
-  return spawn('claude', args, {
+  return spawnTrackedClaude(args, {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     env,
@@ -639,12 +285,12 @@ function runClaudeProcess(
       }, timeoutMs);
     };
 
-    proc.stdout.on('data', (data: Buffer) => {
+    proc.stdout!.on('data', (data: Buffer) => {
       stdout += data.toString();
       resetTimer();
     });
 
-    proc.stderr.on('data', (data: Buffer) => {
+    proc.stderr!.on('data', (data: Buffer) => {
       stderr += data.toString();
       resetTimer();
     });
@@ -740,7 +386,7 @@ function runClaudeStreamingProcess(
     let cost: number | null = null;
     let tokens: number | null = null;
     let lineBuffer = '';
-    let toolAccum: ToolAccumulator | null = null;
+    const toolAccums = new ToolUseAccumulators();
 
     function processLine(line: string) {
       const event = parseStreamLine(line);
@@ -756,18 +402,20 @@ function runClaudeStreamingProcess(
         tokens = event.tokens ?? tokens;
         if (event.text) fullText = event.text;
       } else if (event.type === 'tool_start') {
-        toolAccum = { toolName: event.toolName, partialJson: '', index: event.index };
-        void onToolEvent?.({ phase: 'start', toolName: event.toolName });
-      } else if (
-        event.type === 'tool_input_delta' &&
-        toolAccum &&
-        event.index === toolAccum.index
-      ) {
-        toolAccum.partialJson += event.partialJson;
-      } else if (event.type === 'tool_stop' && toolAccum && event.index === toolAccum.index) {
-        const keyArg = extractKeyArg(toolAccum.toolName, toolAccum.partialJson);
-        void onToolEvent?.({ phase: 'complete', toolName: toolAccum.toolName, keyArg });
-        toolAccum = null;
+        toolAccums.start(event.toolName, event.index);
+        void onToolEvent?.({ phase: 'start', toolName: event.toolName, index: event.index });
+      } else if (event.type === 'tool_input_delta') {
+        toolAccums.appendInput(event.index, event.partialJson);
+      } else if (event.type === 'tool_stop') {
+        const acc = toolAccums.stop(event.index);
+        if (acc) {
+          void onToolEvent?.({
+            phase: 'complete',
+            toolName: acc.toolName,
+            keyArg: extractKeyArg(acc.toolName, acc.partialJson),
+            index: acc.index,
+          });
+        }
       } else if (event.type === 'subagent_progress') {
         void onToolEvent?.({
           phase: 'subagent_progress',
@@ -793,7 +441,7 @@ function runClaudeStreamingProcess(
     };
 
     let rawStdout = '';
-    proc.stdout.on('data', (data: Buffer) => {
+    proc.stdout!.on('data', (data: Buffer) => {
       const chunk = data.toString();
       rawStdout += chunk;
       lineBuffer += chunk;
@@ -806,7 +454,7 @@ function runClaudeStreamingProcess(
       resetTimer();
     });
 
-    proc.stderr.on('data', (data: Buffer) => {
+    proc.stderr!.on('data', (data: Buffer) => {
       const chunk = data.toString();
       stderr += chunk;
       console.error(`[claude-stderr] ${scrub(chunk.trimEnd(), secretValues)}`);
@@ -869,7 +517,7 @@ function runClaudeStreamingProcess(
  * Claude encodes folder paths by replacing / with - (keeping the leading dash).
  */
 export function sessionArtifactPaths(sessionId: string, cwd: string) {
-  const home = process.env.HOME ?? `/Users/${process.env.USER ?? ''}`;
+  const home = process.env.HOME ?? homedir();
   const encodedPath = cwd.replace(/[/.]/g, '-');
   return {
     jsonl: resolve(home, '.claude', 'projects', encodedPath, `${sessionId}.jsonl`),
@@ -958,34 +606,30 @@ function makeFreshArgs(args: string[], sessionId: string): string[] {
 }
 
 /**
- * Build injected env vars (temp dirs, permissions) — these go through extraEnv,
- * not from process.env passthrough.
+ * Run `attempt(args)`; on a session "already in use" failure, clear the
+ * session's artifacts and retry ONCE with a fresh (non-resume) arg set. Shared
+ * by the oneshot and streaming runners (was duplicated in both).
  */
-function buildInjectedEnv(options: ClaudeOptions): Record<string, string> {
-  const env: Record<string, string> = {};
-
-  if (options.tempDir) {
-    env.CLAUDEWAY_TEMP_DIR = options.tempDir;
-    env.CLAUDEWAY_CHANNEL_ID = options.channelId;
+async function withSessionRetry<T>(
+  channelId: string,
+  sessionId: string,
+  cwd: string,
+  args: string[],
+  attempt: (args: string[]) => Promise<T>,
+): Promise<T> {
+  try {
+    return await attempt(args);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('already in use')) {
+      console.log(
+        `[${channelId}] Session ${sessionId} already in use — clearing artifacts and retrying`,
+      );
+      clearSessionArtifacts(sessionId, cwd);
+      return await attempt(makeFreshArgs(args, sessionId));
+    }
+    throw err;
   }
-
-  Object.assign(env, buildPermissionsEnv(options));
-
-  return env;
-}
-
-/**
- * Build the complete env for a Claude subprocess using the allowlist approach.
- * Only baseline vars + configured secret groups + explicit injected vars are included.
- */
-function buildSpawnEnv(options: ClaudeOptions): Record<string, string> {
-  return buildAllowedEnv({
-    config: options.config,
-    channelId: options.channelId,
-    userPermissions: options.userPermissions,
-    extraEnv: buildInjectedEnv(options),
-    userCredEnv: options.credentials?.env,
-  });
 }
 
 export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
@@ -999,9 +643,9 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
 
   const secretValues = options.credentials?.secretValues;
 
-  try {
-    return await runClaudeProcess(
-      args,
+  return withSessionRetry(options.channelId, sessionId, cwd, args, (a) =>
+    runClaudeProcess(
+      a,
       cwd,
       options.timeoutMs,
       options.channelId,
@@ -1010,28 +654,8 @@ export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
       regKey,
       spawnEnv,
       secretValues,
-    );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('already in use')) {
-      console.log(
-        `[${options.channelId}] Session ${sessionId} already in use — clearing artifacts and retrying`,
-      );
-      clearSessionArtifacts(sessionId, cwd);
-      return await runClaudeProcess(
-        makeFreshArgs(args, sessionId),
-        cwd,
-        options.timeoutMs,
-        options.channelId,
-        sessionId,
-        options.message,
-        regKey,
-        spawnEnv,
-        secretValues,
-      );
-    }
-    throw err;
-  }
+    ),
+  );
 }
 
 export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promise<ClaudeResult> {
@@ -1045,9 +669,9 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
 
   const secretValues = options.credentials?.secretValues;
 
-  try {
-    return await runClaudeStreamingProcess(
-      args,
+  return withSessionRetry(options.channelId, sessionId, cwd, args, (a) =>
+    runClaudeStreamingProcess(
+      a,
       cwd,
       options.timeoutMs,
       options.onTextDelta,
@@ -1060,32 +684,8 @@ export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promi
       options.onProcessSpawned,
       options.onReasoningDelta,
       secretValues,
-    );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('already in use')) {
-      console.log(
-        `[${options.channelId}] Session ${sessionId} already in use — clearing artifacts and retrying`,
-      );
-      clearSessionArtifacts(sessionId, cwd);
-      return await runClaudeStreamingProcess(
-        makeFreshArgs(args, sessionId),
-        cwd,
-        options.timeoutMs,
-        options.onTextDelta,
-        options.channelId,
-        sessionId,
-        options.message,
-        regKey,
-        options.onToolEvent,
-        spawnEnv,
-        options.onProcessSpawned,
-        options.onReasoningDelta,
-        secretValues,
-      );
-    }
-    throw err;
-  }
+    ),
+  );
 }
 
 // --- Persistent process mode ---
@@ -1166,13 +766,12 @@ function createPersistentProcess(
   // Build complete env via allowlist
   const env = buildAllowedEnv({
     config: options.config,
-    channelId: options.channelId,
     userPermissions: options.userPermissions,
     extraEnv: injected,
     userCredEnv: options.credentials?.env,
   });
 
-  const proc = spawn('claude', args, {
+  const proc = spawnTrackedClaude(args, {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
     env,
@@ -1182,7 +781,6 @@ function createPersistentProcess(
     options.userId,
     options.userPermissions,
     options.config,
-    options.channelId,
     options.model,
     options.effort ?? '',
     options.credentials?.secretsHash ?? '',
@@ -1201,6 +799,7 @@ function createPersistentProcess(
     totalCost: 0,
     totalTokens: 0,
     idleTimer: setTimeout(() => {}, 0), // placeholder; reset immediately below
+    absoluteTimer: setTimeout(() => {}, 0), // placeholder; set immediately below
     lineBuffer: '',
     stderrBuf: '',
     currentTurn: null,
@@ -1214,10 +813,17 @@ function createPersistentProcess(
     }, timeoutMs);
   }
 
-  // Start idle timer
+  // Start idle timer + the absolute lifetime cap (idle output resets the idle
+  // timer forever, so this backstop guarantees the process is eventually recycled).
   resetIdleTimer();
+  entry.absoluteTimer = setTimeout(() => {
+    console.log(
+      `[${options.channelId}] Persistent process absolute timeout (${ABSOLUTE_TIMEOUT_MS / 3600000}h) — killing`,
+    );
+    proc.kill('SIGTERM');
+  }, ABSOLUTE_TIMEOUT_MS);
 
-  proc.stdout.on('data', (data: Buffer) => {
+  proc.stdout!.on('data', (data: Buffer) => {
     resetIdleTimer();
     entry.lineBuffer += data.toString();
     const lines = entry.lineBuffer.split('\n');
@@ -1227,7 +833,7 @@ function createPersistentProcess(
     }
   });
 
-  proc.stderr.on('data', (data: Buffer) => {
+  proc.stderr!.on('data', (data: Buffer) => {
     resetIdleTimer();
     // Scrub secret values BEFORE buffering/logging — the buffer feeds error replies
     const text = scrub(data.toString(), options.credentials?.secretValues);
@@ -1238,6 +844,7 @@ function createPersistentProcess(
 
   proc.on('close', (code) => {
     clearTimeout(entry.idleTimer);
+    clearTimeout(entry.absoluteTimer);
     persistentRegistry.delete(regKey);
 
     // Process remaining buffered line
@@ -1266,6 +873,7 @@ function createPersistentProcess(
 
   proc.on('error', (err) => {
     clearTimeout(entry.idleTimer);
+    clearTimeout(entry.absoluteTimer);
     persistentRegistry.delete(regKey);
     if (entry.currentTurn) {
       const turn = entry.currentTurn;
@@ -1299,29 +907,27 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
   }
 
   if (event.type === 'tool_start' && entry.currentTurn) {
-    entry.currentTurn.toolAccum = { toolName: event.toolName, partialJson: '', index: event.index };
-    void entry.currentTurn.onToolEvent?.({ phase: 'start', toolName: event.toolName });
+    entry.currentTurn.toolAccums.start(event.toolName, event.index);
+    void entry.currentTurn.onToolEvent?.({
+      phase: 'start',
+      toolName: event.toolName,
+      index: event.index,
+    });
     return;
   }
 
-  if (
-    event.type === 'tool_input_delta' &&
-    entry.currentTurn?.toolAccum &&
-    event.index === entry.currentTurn.toolAccum.index
-  ) {
-    entry.currentTurn.toolAccum.partialJson += event.partialJson;
+  if (event.type === 'tool_input_delta' && entry.currentTurn) {
+    entry.currentTurn.toolAccums.appendInput(event.index, event.partialJson);
     return;
   }
 
-  if (
-    event.type === 'tool_stop' &&
-    entry.currentTurn?.toolAccum &&
-    event.index === entry.currentTurn.toolAccum.index
-  ) {
-    const { toolName, partialJson } = entry.currentTurn.toolAccum;
-    const keyArg = extractKeyArg(toolName, partialJson);
-    void entry.currentTurn.onToolEvent?.({ phase: 'complete', toolName, keyArg });
-    entry.currentTurn.toolAccum = null;
+  if (event.type === 'tool_stop' && entry.currentTurn) {
+    const acc = entry.currentTurn.toolAccums.stop(event.index);
+    if (acc) {
+      const { toolName, partialJson, index } = acc;
+      const keyArg = extractKeyArg(toolName, partialJson);
+      void entry.currentTurn.onToolEvent?.({ phase: 'complete', toolName, keyArg, index });
+    }
     return;
   }
 
@@ -1365,6 +971,7 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
  */
 async function killAndWait(entry: PersistentProcessEntry): Promise<void> {
   clearTimeout(entry.idleTimer);
+  clearTimeout(entry.absoluteTimer);
   return new Promise<void>((resolve) => {
     const killTimer = setTimeout(() => {
       try {
@@ -1402,7 +1009,6 @@ export async function runClaudePersistentStreaming(
     options.userId,
     options.userPermissions,
     options.config,
-    channelId,
     options.model,
     options.effort ?? '',
     options.credentials?.secretsHash ?? '',
@@ -1468,7 +1074,7 @@ export async function runClaudePersistentStreaming(
       fullText: '',
       sessionId: entry.sessionId,
       cost: null,
-      toolAccum: null,
+      toolAccums: new ToolUseAccumulators(),
     };
 
     // Provide kill callback for cancellation

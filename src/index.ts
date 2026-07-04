@@ -1,6 +1,6 @@
-import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
-import { execSync } from 'child_process';
+import { writeFileSync, readFileSync, unlinkSync } from 'fs';
 import { resolve } from 'path';
+import { reapOrphanedChildren, terminateOwnedChildren } from './child-processes.js';
 import { loadConfig, resolvedTempDir, DEFAULT_TEMP_MAX_AGE_DAYS } from './config.js';
 import { ensureQueueDir } from './queue.js';
 import { syncRepos } from './sync-repos.js';
@@ -15,17 +15,34 @@ import { getSecretStore } from './secrets.js';
 const PIDFILE = resolve(process.cwd(), 'claudeway.pid');
 
 function acquireLock(): void {
-  if (existsSync(PIDFILE)) {
-    const oldPid = parseInt(readFileSync(PIDFILE, 'utf-8').trim(), 10);
+  // Atomic create-or-fail: only one racing launch can win the `wx` create, so
+  // two simultaneous starts can't both believe they hold the lock (the old
+  // existsSync→kill→writeFile sequence had that TOCTOU window).
+  for (;;) {
     try {
-      process.kill(oldPid, 0);
-      console.error(`Another Claudeway instance is running (PID ${oldPid}). Exiting.`);
-      process.exit(1);
-    } catch {
+      writeFileSync(PIDFILE, String(process.pid), { encoding: 'utf-8', flag: 'wx' });
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      const oldPid = parseInt(readFileSync(PIDFILE, 'utf-8').trim(), 10);
+      if (Number.isInteger(oldPid) && oldPid > 0) {
+        try {
+          process.kill(oldPid, 0);
+          console.error(`Another Claudeway instance is running (PID ${oldPid}). Exiting.`);
+          process.exit(1);
+        } catch {
+          // Recorded process is gone — stale pidfile, remove and retry the create.
+        }
+      }
       console.log(`Removing stale pidfile (PID ${oldPid})`);
+      try {
+        unlinkSync(PIDFILE);
+      } catch {
+        // A concurrent launcher may have removed it first — loop and retry the
+        // `wx` create, which will now either succeed or lose to the winner.
+      }
     }
   }
-  writeFileSync(PIDFILE, String(process.pid), 'utf-8');
 }
 
 function releaseLock(): void {
@@ -36,40 +53,59 @@ function releaseLock(): void {
   }
 }
 
-function killOrphanProcesses(): void {
-  try {
-    execSync('pkill -9 -f "claude.*dangerously-skip-permissions" 2>/dev/null', {
-      stdio: 'ignore',
-    });
-  } catch {
-    // No orphans found, that's fine
-  }
-}
-
 // --- Shutdown ---
 
 // Adapter shutdown hooks — called in order before exit
 const shutdownHooks: (() => Promise<void>)[] = [];
 
-function shutdown(): void {
-  console.log('Claudeway shutting down');
-  Promise.allSettled(shutdownHooks.map((fn) => fn())).finally(() => {
-    killOrphanProcesses();
+let shuttingDown = false;
+
+/**
+ * Graceful shutdown: run adapter hooks, then SIGTERM→grace→SIGKILL only the
+ * Claude children this instance owns (never a host-wide kill), then release the
+ * lock and exit. `code` is non-zero for a fatal-error shutdown.
+ */
+function shutdown(code = 0): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Claudeway shutting down${code ? ' (fatal error)' : ''}`);
+  const finish = () => {
     releaseLock();
-    process.exit(0);
-  });
-  // Force exit after 3s if hooks hang
-  setTimeout(() => {
-    killOrphanProcesses();
-    releaseLock();
-    process.exit(0);
-  }, 3000);
+    process.exit(code);
+  };
+  Promise.allSettled(shutdownHooks.map((fn) => fn()))
+    .then(() => terminateOwnedChildren())
+    .finally(finish);
+  // Backstop: if hooks or child termination hang, force the exit.
+  setTimeout(finish, 8000).unref?.();
 }
 
 // --- Shared startup sequence ---
 
 acquireLock();
-killOrphanProcesses();
+
+// Install cleanup + signal handlers immediately, before any fallible startup
+// work below — otherwise a throw during the secrets/config checks would leak
+// the pidfile (these used to be registered only after those checks).
+process.on('exit', releaseLock);
+process.on('SIGTERM', () => shutdown(0));
+process.on('SIGINT', () => shutdown(0));
+
+// Fatal-error policy: an uncaught exception or rejection leaves the process in
+// an unknown state — log it and shut down cleanly with a non-zero code rather
+// than limp on with a possibly-corrupt process.
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+  shutdown(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
+  shutdown(1);
+});
+
+// Reap Claude children orphaned by a previously crashed instance — scoped to
+// the PIDs this cwd recorded, never a host-wide pattern kill.
+reapOrphanedChildren();
 
 const config = loadConfig();
 const tempMaxAgeDays = config.defaults.tempMaxAgeDays ?? DEFAULT_TEMP_MAX_AGE_DAYS;
@@ -86,18 +122,6 @@ if (!config.baseUrl) {
       '(e.g. baseUrl: "http://192.168.1.10:8791")',
   );
 }
-
-process.on('exit', releaseLock);
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
-
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
-});
-
-process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled rejection:', reason);
-});
 
 ensureQueueDir();
 syncRepos();
