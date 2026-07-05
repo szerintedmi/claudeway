@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.36.0] - 2026-07-05
+
+### Changed
+- **Docker git auth is PAT-only over HTTPS**: startup repo sync uses the shared GitHub PAT (`SHARED_GITHUB_TOKEN` via the `github` `userCredentials` mapping) through the SSH→HTTPS credential helper. Removed the SSH key mount, `GIT_SSH_KEY`, and the Dockerfile `~/.ssh` setup
+- **Docker image cleanup**: dropped the vestigial `git credential.helper store` config and the no-op `docker-entrypoint.sh` (repo sync runs in-app); pruned stale `.dockerignore` entries and excluded `.docker/` from the build context
+
 ## [0.35.0] - 2026-07-04
 
 ### Changed

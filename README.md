@@ -49,8 +49,7 @@ Create `.env` (full list in [`.env.example`](.env.example)):
 | `CLAUDEWAY_SECRETS_KEY` | yes* | Master key for the encrypted per-user credential store (`openssl rand -hex 32`) |
 | `VOICE_AUTH_TOKEN` | voice only | WebSocket voice client auth token |
 | `DEEPGRAM_API_KEY` | voice only | STT/TTS provider key |
-| `SHARED_*` | optional | Shared credential defaults referenced by `userCredentials.*.defaultFromEnv` |
-| `GIT_SSH_KEY` | Docker only | SSH key path for repo cloning |
+| `SHARED_*` | optional | Shared credential defaults referenced by `userCredentials.*.defaultFromEnv` (incl. `SHARED_GITHUB_TOKEN` for repo cloning/git ops over HTTPS) |
 
 \* Alternatively put the key in `.secrets/key`. The server refuses to start without it.
 

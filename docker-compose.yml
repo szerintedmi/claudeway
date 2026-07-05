@@ -49,14 +49,8 @@ services:
       # Claude CLI session state (created at runtime, persisted across restarts)
       - claudeway-claude-state:/home/claudeway/.claude
 
-      # Git SSH key (read-only) — for cloning repos via SSH.
-      # Set GIT_SSH_KEY in .env to your private key path (default: ~/.ssh/id_ed25519).
-      - type: bind
-        source: ${GIT_SSH_KEY:-~/.ssh/id_ed25519}
-        target: /home/claudeway/.ssh/id_ed25519
-        read_only: true
-        bind:
-          create_host_path: false
+      # Git auth is a GitHub PAT over HTTPS (SHARED_GITHUB_TOKEN + the github
+      # userCredentials mapping); see docs/deployment.md.
 
       # Persistent state (repos, queue) — shared with host
       - ./.docker:/app/.docker

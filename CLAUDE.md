@@ -8,7 +8,7 @@ Always adhere to Anthropic's Terms of Service 100%. Claudeway is a personal tool
 
 Claudeway is a multi-channel Claude Code CLI gateway. Messages arrive via Slack Socket Mode or a WebSocket voice interface (with configurable STT/TTS providers), get processed by the Claude CLI (`claude -p`), and responses are delivered back through the originating channel.
 
-User-facing docs: `README.md` (quick start, commands) + `docs/configuration.md`, `docs/deployment.md`, `docs/troubleshooting.md`, `docs/per-user-credentials.md` — keep them in sync with behavior changes.
+User-facing docs: `README.md` (quick start, commands) + `docs/configuration.md`, `docs/deployment.md`, `docs/docker.md`, `docs/troubleshooting.md`, `docs/per-user-credentials.md` — keep them in sync with behavior changes.
 
 ## Architecture
 

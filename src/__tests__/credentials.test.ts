@@ -2,7 +2,11 @@ import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'node:crypto';
-import { resolveUserCredentials, gitCredConfigured } from '../credentials.js';
+import {
+  resolveUserCredentials,
+  gitCredConfigured,
+  resolveSharedGitCredential,
+} from '../credentials.js';
 import { FileSecretStore } from '../secrets.js';
 import type { Config } from '../config.js';
 
@@ -243,5 +247,34 @@ describe('config helpers', () => {
     expect(gitCredConfigured(makeConfig())).toBe(true);
     const bare = makeConfig({ userCredentials: undefined });
     expect(gitCredConfigured(bare)).toBe(false);
+  });
+});
+
+describe('resolveSharedGitCredential', () => {
+  it('resolves the git-credential-helper credential from its env default', () => {
+    process.env.SHARED_GITHUB_TOKEN = 'ghp_shared';
+    const cred = resolveSharedGitCredential(makeConfig());
+    expect(cred).not.toBeNull();
+    expect(cred?.token).toBe('ghp_shared');
+    expect(cred?.source).toBe('shared');
+    expect(cred?.cacheKey).toBe('shared|github');
+  });
+
+  it('returns null when the shared env default is unset', () => {
+    delete process.env.SHARED_GITHUB_TOKEN;
+    expect(resolveSharedGitCredential(makeConfig())).toBeNull();
+  });
+
+  it('returns null when no git-credential-helper credential is configured', () => {
+    process.env.SHARED_GITHUB_TOKEN = 'ghp_shared';
+    const config = makeConfig({
+      userCredentials: {
+        jira: {
+          label: 'Jira',
+          fields: { JIRA_API_TOKEN: { defaultFromEnv: 'SHARED_JIRA_API_TOKEN' } },
+        },
+      },
+    });
+    expect(resolveSharedGitCredential(config)).toBeNull();
   });
 });

@@ -35,13 +35,6 @@ COPY scripts/claudeway-attach ./scripts/
 # Make claudeway-attach available in PATH for Claude CLI's Bash tool
 RUN ln -s /app/scripts/claudeway-attach /usr/local/bin/claudeway-attach
 
-# Configure git to use credential store (PAT-based, file mounted at runtime)
-RUN git config --system credential.helper 'store --file=/home/claudeway/.git-credentials'
-
-# Copy entrypoint script
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-
 # Create runtime directories. The per-session temp base (.claudeway-tmp) is
 # bind-mounted in docker-compose.yml so it persists across container recreation.
 RUN mkdir -p .docker/queue .docker/repos .docker/claudeway-tmp .claudeway-tmp && \
@@ -52,18 +45,10 @@ RUN mkdir -p .docker/queue .docker/repos .docker/claudeway-tmp .claudeway-tmp &&
 RUN mkdir -p /home/claudeway/.claude/debug && \
     chown -R claudeway:claudeway /home/claudeway/.claude
 
-# Create SSH directory and config for git SSH access
-RUN mkdir -p /home/claudeway/.ssh && \
-    printf "Host github.com\n  IdentityFile /home/claudeway/.ssh/id_ed25519\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n" > /home/claudeway/.ssh/config && \
-    chown -R claudeway:claudeway /home/claudeway/.ssh && \
-    chmod 700 /home/claudeway/.ssh && \
-    chmod 600 /home/claudeway/.ssh/config
-
 USER claudeway
 
 # Set git user (can be overridden by mounting .gitconfig)
 RUN git config --global user.name "Claudeway Bot" && \
     git config --global user.email "claudeway@localhost"
 
-ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["bun", "src/index.ts"]

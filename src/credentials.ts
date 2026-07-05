@@ -77,6 +77,30 @@ export function gitCredConfigured(config: Config): boolean {
   );
 }
 
+/**
+ * Resolve the shared (env-default) git token for startup repo sync, which runs
+ * with no user context. Scans configured git-credential-helper credentials and
+ * returns the first whose `defaultFromEnv` is set — feeds syncRepos() so
+ * clones/pulls authenticate over HTTPS (via SSH→HTTPS rewrite) with the shared
+ * PAT.
+ */
+export function resolveSharedGitCredential(config: Config): GitCredentialResolution | null {
+  for (const [credName, def] of Object.entries(config.userCredentials ?? {})) {
+    if (credentialExposeAs(def) !== 'git-credential-helper') continue;
+    const tokenField = credentialFields(def)[0];
+    const envName = tokenField?.def.defaultFromEnv;
+    if (envName && process.env[envName]) {
+      return {
+        token: process.env[envName],
+        username: GIT_CREDENTIAL_USERNAME,
+        source: 'shared',
+        cacheKey: `shared|${credName}`,
+      };
+    }
+  }
+  return null;
+}
+
 export function resolveUserCredentials(
   config: Config,
   userId: string,
