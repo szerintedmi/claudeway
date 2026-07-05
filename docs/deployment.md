@@ -20,14 +20,23 @@ launchctl load -w ~/Library/LaunchAgents/com.claudeway.plist   # start again
 
 ## Docker
 
-Docker provides filesystem isolation — the Claude CLI only sees repos defined in `config.yaml`.
+Docker provides filesystem isolation — the Claude CLI only sees repos defined in `config.yaml`. For how the container is put together (what's mounted, the env model, git auth, persistence), see [docker.md](docker.md).
 
 1. Define repos in `config.yaml` and map channels to them. Repos are cloned/pulled on every startup.
 2. Make sure `baseUrl` points at a host/port reachable from users' browsers and the creds form port (default 8791) is published — after the container is up, each user enrolls via `!creds` as usual.
-3. Mount your SSH private key for git access — edit `docker-compose.yml`:
-   ```yaml
-   - ~/.ssh/id_ed25519:/home/claudeway/.ssh/id_ed25519:ro
-   ```
+3. Git access uses a GitHub PAT over HTTPS. Two things are required:
+   - A `userCredentials` entry in `config.yaml` mapping the token to git (the `github` block in `config.example.yaml` is the template):
+     ```yaml
+     userCredentials:
+       github:
+         exposeAs: git-credential-helper
+         fields:
+           GITHUB_TOKEN:
+             defaultFromEnv: SHARED_GITHUB_TOKEN
+     ```
+   - `SHARED_GITHUB_TOKEN` in `.env` — a fine-grained PAT with **Contents: Read** on every repo in `config.yaml` (**Read and write** for commits/PRs).
+
+   Without the mapping the token is ignored and private clones fail. SSH-form repo URLs (`git@github.com:…`) are served over HTTPS via the credential helper. A user who enrolls a personal GitHub PAT through `!creds` uses it for their own turns.
 4. (Optional) Include Claude CLI skills in the image:
    ```bash
    cp docker-skills.conf.example docker-skills.conf

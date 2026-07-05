@@ -19,3 +19,4 @@
 [ ] Voice UI: parse `assistant` events with tool_result content to show Bash command output as sub-detail (like Claude CLI does)
 [ ] expose new TTS SST to capabilities to all channales (e.g receive voice from slack / generate )
 [ ] Streaming STT (OpenAI?)
+[ ] BigQuery (`bq` CLI) with per-user creds: shared read-only default + `!creds` override; needs new `exposeAs: file` delivery (docs/plans/2026-07-05-bigquery-per-user-credentials.md)
