@@ -56,9 +56,24 @@ interface RawReplyMessage {
   text?: string;
   username?: string;
   attachments?: SlackAttachment[];
-  files?: Array<{ id?: string; name?: string; mimetype?: string; size?: number }>;
+  files?: Array<{
+    id?: string;
+    name?: string;
+    mimetype?: string;
+    size?: number;
+    url_private_download?: string;
+  }>;
 }
 
+/**
+ * `conversations.replies` returns full file objects, so context (prior-message)
+ * files carry `url_private_download` just like current-message files do. We
+ * preserve it as `downloadRef` so the coordinator can fetch context attachments
+ * into `incoming/` at processing time. It stays SERVER-SIDE (never rendered):
+ * the prompt formatter reads only name/id/size/localPath, and the coordinator
+ * strips `downloadRef` before render. Files without a download URL (some
+ * external/hosted types) degrade to ref-only, exactly as before.
+ */
 function collectFileMeta(m: RawReplyMessage): SlackFileMeta[] {
   const attachmentFiles = (m.attachments ?? []).flatMap((a) => a.files ?? []);
   return [...(m.files ?? []), ...attachmentFiles]
@@ -68,6 +83,7 @@ function collectFileMeta(m: RawReplyMessage): SlackFileMeta[] {
       name: f.name!,
       ...(f.mimetype ? { mimetype: f.mimetype } : {}),
       ...(f.size !== undefined ? { size: f.size } : {}),
+      ...(f.url_private_download ? { downloadRef: f.url_private_download } : {}),
     }));
 }
 

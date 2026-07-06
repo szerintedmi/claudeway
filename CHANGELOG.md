@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.37.0] - 2026-07-06
+
+### Fixed
+- **Slack attachments posted in earlier thread messages are now downloaded** (closes the Phase-2 gap noted under 0.34.0): a file shared in one message and then referenced by a later `@mention` was invisible to Claude — only the triggering message's files were fetched, so `incoming/` stayed empty and the file could not be read. `conversations.replies` already returns each context file's `url_private_download`, which is now preserved as a server-side `downloadRef` (`collectFileMeta`, `src/adapters/slack/thread.ts`) and downloaded into the session's `incoming/` alongside current-message files (`resolveContextFiles`, `src/adapters/slack/coordinator.ts`), rendered with a `path=` like any other attachment. Volume is bounded by the history watermark (resumed sessions only re-scan unseen messages) and a skip-if-exists guard so a file downloads at most once; context-file failures surface as distinct thread warnings ("referenced in earlier messages"). The download URL stays server-side, never in the prompt or subprocess env
+
 ## [0.36.0] - 2026-07-05
 
 ### Changed

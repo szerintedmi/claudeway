@@ -50,7 +50,7 @@ Files are downloaded to `/tmp/claudeway-files/`, passed to Claude CLI by path, a
 
 1. **Queue persistence mismatch**: The queue is durable (survives restarts), but temp files are not. If the process restarts after a message is queued but before it's processed, the `filePaths` in the queued message point to deleted files. This is the same existing bug with `imagePaths` — not new to this change.
 
-2. **Thread context file gaps**: The thread context feature (implemented in `src/thread.ts`) injects text from prior thread messages into the prompt. However, it only extracts `text` — files attached to prior thread messages are completely invisible to Claude. If someone shares a file earlier in a thread and then asks Claude to analyze it via `@mention`, Claude won't have access to that file. Extending thread context to include file references would require durable storage (since those files were never downloaded), making this a future concern.
+2. **Thread context file gaps** — *resolved*: This was originally a gap: thread context injected only message `text`, so a file shared earlier in a thread and then referenced via a later `@mention` was invisible to Claude. It is now closed. `conversations.replies` returns each context file's `url_private_download`, which `collectFileMeta` (`src/adapters/slack/thread.ts`) preserves as a server-side `downloadRef`; the coordinator (`resolveContextFiles` in `src/adapters/slack/coordinator.ts`) downloads context attachments into the session's `incoming/` alongside current-message files and renders them with a `path=`. Durable per-session temp storage (the temp-dir consolidation) is what made this practical — the files persist across turns instead of being deleted after each.
 
 3. **Multi-turn sessions**: In persistent/streaming modes, Claude maintains a session. If Claude refers back to a file from a previous message in the same session, the temp file has already been cleaned up.
 
@@ -90,7 +90,7 @@ This is explicitly **out of scope** for the initial implementation. The ephemera
 - **File type detection or special handling**: No MIME-type-specific logic. All files are treated uniformly — downloaded and passed as paths.
 - **File content extraction**: No server-side text extraction from PDFs, Office documents, etc. Claude CLI handles this via its Read tool.
 - **Durable file storage**: See "Future consideration" above.
-- **Thread context file downloads**: Only files from the triggering message are downloaded. Files attached to prior thread messages are not included (thread context in `src/thread.ts` only extracts text). This is a known gap — see "File Storage Considerations" above.
+- ~~**Thread context file downloads**: Only files from the triggering message are downloaded.~~ **Now implemented**: files attached to prior thread messages in the injected context are also downloaded (see the *resolved* note under "Limitations of ephemeral storage").
 - **Configurable size limit**: The 25MB limit is a constant. Per-channel configuration can be added later if needed.
 
 ## Verification
