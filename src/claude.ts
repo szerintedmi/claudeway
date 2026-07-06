@@ -587,6 +587,25 @@ function clearSessionArtifacts(sessionId: string, cwd: string): void {
   }
 }
 
+/**
+ * Resolve the placeholder tokens the config system prompt may contain into
+ * concrete values for this spawn:
+ *   - `CONFIG_PATH`            → the on-disk config path
+ *   - `$CLAUDEWAY_TEMP_DIR`    → the resolved per-session temp dir (both the
+ *     `${...}` and bare `$...` forms), so the model reads an absolute path it
+ *     can hand straight to Write/Bash instead of an unexpanded env var it would
+ *     otherwise have to resolve (or sidestep by reaching for `/tmp`).
+ * The env var is still exported to the subprocess (buildInjectedEnv), so shell
+ * commands keep working; this only makes the prompt copy concrete.
+ */
+export function renderSystemPrompt(systemPrompt: string, tempDir?: string): string {
+  let prompt = systemPrompt.replace('CONFIG_PATH', getConfigPath());
+  if (tempDir) {
+    prompt = prompt.replace(/\$\{?CLAUDEWAY_TEMP_DIR\}?/g, tempDir);
+  }
+  return prompt;
+}
+
 // Exported for tests (leading-dash prompt regression guard)
 export function buildClaudeArgs(
   options: ClaudeOptions,
@@ -594,8 +613,7 @@ export function buildClaudeArgs(
 ): { args: string[]; sessionId: string; cwd: string; resuming: boolean } {
   const { message, cwd: rawCwd, model, systemPrompt, channelId, threadTs } = options;
 
-  const configPath = getConfigPath();
-  const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
+  const prompt = renderSystemPrompt(systemPrompt, options.tempDir);
   // Session IDs derive from the LOGICAL repo folder, not the worktree path —
   // otherwise every pre-worktree session ID would change (decision #9 caveat).
   const { sessionId, cwd, resuming } =
@@ -737,8 +755,7 @@ function buildPersistentClaudeArgs(options: ClaudeOptions): {
 } {
   const { cwd: rawCwd, model, systemPrompt, channelId, threadTs } = options;
 
-  const configPath = getConfigPath();
-  const prompt = systemPrompt.replace('CONFIG_PATH', configPath);
+  const prompt = renderSystemPrompt(systemPrompt, options.tempDir);
   // See buildClaudeArgs: session IDs stay keyed to the logical repo folder
   const { sessionId, cwd, resuming } =
     options.session ??

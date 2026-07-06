@@ -2,6 +2,7 @@ import {
   deriveSessionId,
   sessionArtifactPaths,
   buildClaudeArgs,
+  renderSystemPrompt,
   type ClaudeOptions,
 } from '../claude.js';
 import type { Config, UserPermissions } from '../config.js';
@@ -83,6 +84,26 @@ describe('buildClaudeArgs — leading-dash prompt safety', () => {
   it('keeps the message as the single arg after the separator', () => {
     const { args } = buildClaudeArgs(options, 'stream-json');
     expect(args.indexOf('--')).toBe(args.length - 2);
+  });
+});
+
+describe('renderSystemPrompt — placeholder substitution', () => {
+  it('expands both $CLAUDEWAY_TEMP_DIR and ${CLAUDEWAY_TEMP_DIR} to the resolved path', () => {
+    const out = renderSystemPrompt(
+      'temp dir: $CLAUDEWAY_TEMP_DIR, downloads: ${CLAUDEWAY_TEMP_DIR}/incoming',
+      '/base/C0TEST/sess',
+    );
+    expect(out).toBe('temp dir: /base/C0TEST/sess, downloads: /base/C0TEST/sess/incoming');
+  });
+
+  it('leaves the literal token when no tempDir is provided', () => {
+    const out = renderSystemPrompt('temp dir: $CLAUDEWAY_TEMP_DIR', undefined);
+    expect(out).toBe('temp dir: $CLAUDEWAY_TEMP_DIR');
+  });
+
+  it('still substitutes CONFIG_PATH', () => {
+    const out = renderSystemPrompt('config at CONFIG_PATH', '/base/sess');
+    expect(out).not.toContain('CONFIG_PATH');
   });
 });
 

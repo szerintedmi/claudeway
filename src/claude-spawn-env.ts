@@ -10,7 +10,7 @@ import { permissionKey as permissionKeyStr, type Config, type UserPermissions } 
 import { gitCredConfigured } from './credentials.js';
 import { ensureGitCredentialFiles } from './git-credentials.js';
 import { scrubSecrets } from './secrets.js';
-import { toolTmpDir } from './tempdir.js';
+import { envTmpDir } from './tempdir.js';
 import type { ClaudeOptions } from './claude.js';
 
 /**
@@ -215,8 +215,17 @@ export function buildInjectedEnv(options: ClaudeOptions): Record<string, string>
     // (D8) so generic tool temp (mktemp, python tempfile, …) lands inside the
     // managed tree instead of leaking to /tmp. TMPDIR is in BASELINE_ENV_VARS,
     // but step 4 of buildAllowedEnv (Object.assign of extraEnv) overrides it.
+    const tmp = envTmpDir(options.tempDir);
     env.CLAUDEWAY_TEMP_DIR = options.tempDir;
-    env.TMPDIR = toolTmpDir(options.tempDir);
+    env.TMPDIR = tmp;
+    // Claude Code's OWN internal temp (cwd-tracking files, background-task dirs)
+    // ignores TMPDIR and only honors CLAUDE_CODE_TMPDIR (else hardcodes /tmp);
+    // the sandbox path falls back CLAUDE_CODE_TMPDIR → CLAUDE_TMPDIR → /tmp/claude.
+    // Set both so the CLI's internal temp lands in the managed tree too, not
+    // shared /tmp. (Model-authored explicit paths are unaffected by any of these
+    // — those are steered by the prompt's $CLAUDEWAY_TEMP_DIR guidance.)
+    env.CLAUDE_CODE_TMPDIR = tmp;
+    env.CLAUDE_TMPDIR = tmp;
     env.CLAUDEWAY_CHANNEL_ID = options.channelId;
   }
 

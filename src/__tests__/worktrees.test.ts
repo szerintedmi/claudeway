@@ -94,10 +94,10 @@ describe('ensureThreadWorktree', () => {
 
   it('reuses the worktree for subsequent turns in the thread', () => {
     const dir1 = ensureThreadWorktree('myrepo', 'C001', '111.222', opts());
-    writeFileSync(join(dir1!, 'scratch.txt'), 'turn one\n');
+    writeFileSync(join(dir1!, 'note.txt'), 'turn one\n');
     const dir2 = ensureThreadWorktree('myrepo', 'C001', '111.222', opts());
     expect(dir2).toBe(dir1);
-    expect(existsSync(join(dir2!, 'scratch.txt'))).toBe(true);
+    expect(existsSync(join(dir2!, 'note.txt'))).toBe(true);
   });
 
   it('isolates concurrent threads on the same repo', () => {
@@ -121,14 +121,14 @@ describe('ensureThreadWorktree', () => {
     const origin = join(base, 'origin.git');
     git(['clone', '--bare', repo, origin], base);
     git(['remote', 'add', 'origin', origin], repo);
-    const scratch = join(base, 'scratch');
-    git(['clone', origin, scratch], base);
-    git(['config', 'user.email', 'test@test'], scratch);
-    git(['config', 'user.name', 'Test'], scratch);
-    writeFileSync(join(scratch, 'newer.txt'), 'ahead\n');
-    git(['add', '.'], scratch);
-    git(['commit', '-m', 'ahead'], scratch);
-    git(['push', 'origin', 'main'], scratch);
+    const pusher = join(base, 'pusher');
+    git(['clone', origin, pusher], base);
+    git(['config', 'user.email', 'test@test'], pusher);
+    git(['config', 'user.name', 'Test'], pusher);
+    writeFileSync(join(pusher, 'newer.txt'), 'ahead\n');
+    git(['add', '.'], pusher);
+    git(['commit', '-m', 'ahead'], pusher);
+    git(['push', 'origin', 'main'], pusher);
 
     const dir = ensureThreadWorktree('myrepo', 'C001', '111.1', opts());
     expect(existsSync(join(dir!, 'newer.txt'))).toBe(true);

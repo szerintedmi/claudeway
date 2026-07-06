@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.37.2] - 2026-07-06
+
+### Fixed
+- **Temp files no longer leak to shared `/tmp`**: the system prompt now expands `$CLAUDEWAY_TEMP_DIR` to the concrete session path (so the model targets it instead of hardcoding `/tmp`), and `CLAUDE_CODE_TMPDIR`/`CLAUDE_TMPDIR` are injected alongside `TMPDIR` to keep the CLI's own internal temp (which ignores `TMPDIR`) inside the managed session tree. Renamed `toolTmpDir` → `envTmpDir`
+
 ## [0.37.1] - 2026-07-06
 
 ### Changed

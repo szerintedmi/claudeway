@@ -217,6 +217,14 @@ describe('buildInjectedEnv', () => {
     expect(env.CLAUDEWAY_CHANNEL_ID).toBe('C001');
   });
 
+  it("points Claude Code's own temp vars (CLAUDE_CODE_TMPDIR / CLAUDE_TMPDIR) at the tmp/ subfolder", () => {
+    const sessionDir = '/base/C001/6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+    const env = buildInjectedEnv(baseOpts(sessionDir));
+    // The CLI's internal temp ignores TMPDIR — these are what keep it out of /tmp
+    expect(env.CLAUDE_CODE_TMPDIR).toBe(join(sessionDir, 'tmp'));
+    expect(env.CLAUDE_TMPDIR).toBe(join(sessionDir, 'tmp'));
+  });
+
   it('no longer emits the retired CLAUDEWAY_SCRATCH_DIR / CLAUDEWAY_TEMP_BASE vars', () => {
     const env = buildInjectedEnv(baseOpts('/base/C001/sess'));
     expect(env.CLAUDEWAY_SCRATCH_DIR).toBeUndefined();
@@ -227,6 +235,8 @@ describe('buildInjectedEnv', () => {
     const env = buildInjectedEnv(baseOpts());
     expect(env.CLAUDEWAY_TEMP_DIR).toBeUndefined();
     expect(env.TMPDIR).toBeUndefined();
+    expect(env.CLAUDE_CODE_TMPDIR).toBeUndefined();
+    expect(env.CLAUDE_TMPDIR).toBeUndefined();
   });
 
   it('prepends the repo scripts/ dir to PATH so claudeway-attach resolves', () => {

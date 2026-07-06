@@ -51,7 +51,7 @@ Docker provides filesystem isolation — the Claude CLI only sees repos defined 
 
 Session state, repos, queue, and per-session working files persist across container recreation. `docker-compose.yml` bind-mounts `./.docker` (repos, queue) and `./.docker/claudeway-tmp` → `/app/.claudeway-tmp` (the per-session temp base: inbound downloads, generated files, tool temp, attachment manifests), plus the `claudeway-claude-state` named volume (Claude CLI session transcripts) and `./.secrets` (credential store).
 
-Note: Claude's `$TMPDIR` points at `<session>/tmp` under this bind-mounted temp base, so generic tool scratch (`mktemp`, Python `tempfile`, …) lands on disk under the mount rather than the 100 MB `/tmp` tmpfs. If you want a cap on tool scratch, size the temp volume or keep a tmpfs for `<session>/tmp`.
+Note: Claude's `$TMPDIR` (and `$CLAUDE_CODE_TMPDIR` / `$CLAUDE_TMPDIR`, which the CLI's own internal temp uses instead of `TMPDIR`) all point at `<session>/tmp` under this bind-mounted temp base, so generic tool temp (`mktemp`, Python `tempfile`, …) and the CLI's internal temp files land on disk under the mount rather than the 100 MB `/tmp` tmpfs. If you want a cap on tool temp, size the temp volume or keep a tmpfs for `<session>/tmp`.
 
 **Env var security:** `docker-compose.yml` lists env vars explicitly (what enters the container); `config.yaml` controls what reaches the Claude subprocess or tool adapters. Prefer `userCredentials` for API keys/tokens so shared defaults and per-user overrides are declared in one place.
 
