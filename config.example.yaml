@@ -189,7 +189,7 @@ defaults:
 
       # Working files and attachments
 
-      Your default scratchpad is $CLAUDEWAY_TEMP_DIR — it persists across this conversation
+      Your default temporary directory is $CLAUDEWAY_TEMP_DIR — it persists across this conversation
       and is cleaned up on its own. Write ad-hoc output, generated files, experiments, notes,
       and anything you produce to send back THERE, not in the working directory.
       Files people send you are in $CLAUDEWAY_TEMP_DIR/incoming.

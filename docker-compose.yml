@@ -57,8 +57,9 @@ services:
 
       # Per-session temp base (inbound downloads, generated files, tool temp,
       # attachment manifest). Bind-mounted so it survives container recreation.
-      # NOTE: Claude's TMPDIR (<session>/tmp) lands here on disk instead of the
-      # /tmp tmpfs below, so tool scratch is not bounded by that 100MB cap.
+      # NOTE: Claude's TMPDIR + CLAUDE_CODE_TMPDIR (<session>/tmp) land here on
+      # disk instead of the /tmp tmpfs below, so tool temp is not bounded by that
+      # 100MB cap.
       - ./.docker/claudeway-tmp:/app/.claudeway-tmp
 
       # Encrypted per-user credential store — must survive container recreation

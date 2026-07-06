@@ -23,7 +23,7 @@ box and why" overview.
 | **Bind mount (ro)** | `./config.yaml` → `/app/config.yaml` | `create_host_path: false` — container fails fast if missing |
 | | `./mcp.json` → `/app/mcp.json` | same |
 | **Bind mount (rw)** | `./.docker` → `/app/.docker` | Cloned repos + message queue, persisted to host |
-| | `./.docker/claudeway-tmp` → `/app/.claudeway-tmp` | Per-session temp: downloads, generated files, tool scratch, attachment manifests |
+| | `./.docker/claudeway-tmp` → `/app/.claudeway-tmp` | Per-session temp: downloads, generated files, tool temp, attachment manifests |
 | | `./.secrets` → `/app/.secrets` | Encrypted per-user credential store + generated git-credential files |
 | **Named volume** | `claudeway-claude-state` → `/home/claudeway/.claude` | Claude CLI session transcripts |
 | **tmpfs** | `/tmp` (100 MB) | Ephemeral |
@@ -80,9 +80,11 @@ Survives `docker compose up`/`down`/recreate via the mounts above:
 | Encrypted credential store | `./.secrets` |
 | Claude session transcripts | `claudeway-claude-state` volume |
 
-`$TMPDIR` points at `<session>/tmp` under the bind-mounted temp base, so generic
-tool scratch (`mktemp`, Python `tempfile`, …) lands on disk under the mount
-rather than the 100 MB `/tmp` tmpfs.
+`$TMPDIR` (and `$CLAUDE_CODE_TMPDIR` / `$CLAUDE_TMPDIR`, which the CLI's own
+internal temp uses instead of `TMPDIR`) point at `<session>/tmp` under the
+bind-mounted temp base, so generic tool temp (`mktemp`, Python `tempfile`, …)
+and the CLI's internal temp files land on disk under the mount rather than
+the 100 MB `/tmp` tmpfs.
 
 ## Startup sequence
 

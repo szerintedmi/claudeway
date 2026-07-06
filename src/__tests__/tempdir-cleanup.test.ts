@@ -13,7 +13,7 @@ import {
   cleanupStaleTempDirs,
   resolveSessionTempDir,
   resolveIncomingDir,
-  toolTmpDir,
+  envTmpDir,
   drainAttachmentManifest,
   readAttachmentManifest,
   ATTACHMENTS_FILE,
@@ -43,7 +43,7 @@ describe('resolveSessionTempDir', () => {
     const dir = resolveSessionTempDir(root, 'C001', SESSION);
     expect(dir).toBe(join(root, 'C001', SESSION));
     expect(existsSync(resolveIncomingDir(dir))).toBe(true);
-    expect(existsSync(toolTmpDir(dir))).toBe(true);
+    expect(existsSync(envTmpDir(dir))).toBe(true);
     expect(existsSync(join(dir, LAST_USED_MARKER))).toBe(true);
   });
 

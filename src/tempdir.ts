@@ -31,7 +31,7 @@ import { sanitize } from './path-safety.js';
  */
 
 export const INCOMING_SUBDIR = 'incoming';
-export const TOOL_TMP_SUBDIR = 'tmp';
+export const ENV_TMP_SUBDIR = 'tmp';
 export const ATTACHMENTS_FILE = '.attachments';
 export const LAST_USED_MARKER = '.last-used';
 
@@ -40,9 +40,15 @@ export function resolveIncomingDir(sessionTempDir: string): string {
   return join(sessionTempDir, INCOMING_SUBDIR);
 }
 
-/** `<sessionTempDir>/tmp` — the `$TMPDIR` target for generic tool temp (D8). */
-export function toolTmpDir(sessionTempDir: string): string {
-  return join(sessionTempDir, TOOL_TMP_SUBDIR);
+/**
+ * `<sessionTempDir>/tmp` — the target for the `$TMPDIR`-family env vars
+ * (`TMPDIR`, `CLAUDE_CODE_TMPDIR`, `CLAUDE_TMPDIR`), i.e. env-driven *implicit*
+ * temp (mktemp, Python `tempfile`, the CLI's own internal scratch). Kept in a
+ * subfolder so it stays out of the session root, where Claude's deliberate
+ * working files live (D8).
+ */
+export function envTmpDir(sessionTempDir: string): string {
+  return join(sessionTempDir, ENV_TMP_SUBDIR);
 }
 
 /** Touch the `.last-used` marker so age-based GC sees recent activity (D7). */
@@ -75,7 +81,7 @@ export function resolveSessionTempDir(
 ): string {
   const dir = join(baseDir, sanitize(channelId), sessionId);
   mkdirSync(resolveIncomingDir(dir), { recursive: true });
-  mkdirSync(toolTmpDir(dir), { recursive: true });
+  mkdirSync(envTmpDir(dir), { recursive: true });
   touchLastUsed(dir);
   return dir;
 }
