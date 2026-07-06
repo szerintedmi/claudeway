@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'fs';
+import { mkdirSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { resolveIncomingDir } from '../../tempdir.js';
 import { sanitize, isInside } from '../../path-safety.js';
@@ -55,6 +55,14 @@ export async function downloadSlackFiles(
       if (!isInside(sessionTempDir, localPath)) {
         console.error(`[files] Refusing unsafe download path for ${file.name}`);
         failedCount++;
+        continue;
+      }
+      // Already on disk (Slack file ids are immutable and the id prefixes the
+      // path, so a match is the same bytes). Skip the fetch — this keeps context
+      // attachments from re-downloading every turn they stay in the window.
+      if (existsSync(localPath)) {
+        paths.push(localPath);
+        pathsById.set(file.id, localPath);
         continue;
       }
       const res = await fetch(file.url_private_download!, {

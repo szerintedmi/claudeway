@@ -176,6 +176,28 @@ describe('fetchThreadEntries', () => {
     expect(result?.[0].text).toBe('real message');
   });
 
+  it('carries url_private_download through as downloadRef so context files can be fetched', async () => {
+    const client = makeRepliesClient([
+      {
+        ts: '100',
+        user: 'U1',
+        text: '',
+        files: [
+          {
+            id: 'F1',
+            name: 'trace.json',
+            size: 81920,
+            url_private_download: 'https://slack/download/F1',
+          },
+        ],
+      },
+    ]);
+    const result = await fetchThreadEntries(client, 'C1', '99', OPTS);
+    expect(result?.[0].files).toEqual([
+      { id: 'F1', name: 'trace.json', size: 81920, downloadRef: 'https://slack/download/F1' },
+    ]);
+  });
+
   it('collects files from shared-message attachments too', async () => {
     const client = makeRepliesClient([
       {

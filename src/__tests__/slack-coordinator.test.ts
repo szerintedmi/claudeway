@@ -221,6 +221,44 @@ describe('prepare download at processing time (D10)', () => {
     expect(warnings?.some((w) => w.includes('Failed to download'))).toBe(true);
   });
 
+  it('downloads context (prior-message) files referenced by a later @mention', async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return { ok: true, arrayBuffer: async () => new TextEncoder().encode('{"trace":1}').buffer };
+    }) as unknown as typeof globalThis.fetch;
+
+    // The file was posted in an EARLIER message; the current message only
+    // @mentions the bot and carries no attachment of its own — exactly the case
+    // that previously left incoming/ empty.
+    const contextMsg = {
+      ts: '150.000100',
+      user: 'U111',
+      text: '',
+      files: [
+        {
+          id: 'FCTX',
+          name: 'trace.json',
+          size: 20,
+          url_private_download: 'https://slack/download/FCTX',
+        },
+      ],
+    };
+    const coord = makeSlackPromptCoordinator(mockClient([contextMsg]));
+    const q = queuedMsg('200.000400'); // current message has no files
+    const { text } = await coord.prepare(q, session(false), { sessionTempDir: sessionDir });
+
+    const incoming = resolveIncomingDir(sessionDir);
+    expect(readdirSync(incoming)).toContain('FCTX-trace.json');
+    expect(text).toContain(`path=${join(incoming, 'FCTX-trace.json')}`);
+    // The server-side download URL must never reach the rendered prompt
+    expect(text).not.toContain('https://slack/download/FCTX');
+
+    // Re-preparing the same turn must not re-download an already-present file
+    await coord.prepare(q, session(false), { sessionTempDir: sessionDir });
+    expect(fetchCalls).toBe(1);
+  });
+
   it('warns about oversized files without attempting a download', async () => {
     let called = false;
     globalThis.fetch = (async () => {

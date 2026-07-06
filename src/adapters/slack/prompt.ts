@@ -14,7 +14,7 @@ import type { SlackFileMeta } from '../../queue.js';
  *   {File attachment(s): name="..." id=F1 type=... size=... ref=slack-file:C123:<ts>:F1}
  *
  *   [<ts> <@U333> Cara]: message text                                         (current message; every turn)
- *   {File attachment(s): ... path=/local/path}                                (current files only)
+ *   {File attachment(s): ... path=/local/path}                                (any downloaded file)
  *
  * The current message needs no id header: the channel id is in the new-session
  * thread header (and the resumed session transcript), and the message ts lives
@@ -40,7 +40,7 @@ export function formatFileSize(bytes?: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** Opaque ref the Phase-2 fetch helper resolves — never a Slack URL. */
+/** Stable per-file citation handle (channel:ts:fileId) — never a Slack URL. */
 export function slackFileRef(channelId: string, messageTs: string, fileId: string): string {
   return `slack-file:${channelId}:${messageTs}:${fileId}`;
 }
@@ -48,8 +48,9 @@ export function slackFileRef(channelId: string, messageTs: string, fileId: strin
 /**
  * `{File attachment(s): ...}` line for one message. Curly braces keep it
  * visually distinct from the square-bracket message prefixes; multiple files
- * are separated by ` ; ` so each scans as a distinct item. `path=` appears
- * only for eagerly downloaded current-message files.
+ * are separated by ` ; ` so each scans as a distinct item. `path=` appears for
+ * any downloaded file (current message or injected context); a file with no
+ * download URL renders ref-only.
  */
 export function formatFileMetaLine(
   channelId: string,

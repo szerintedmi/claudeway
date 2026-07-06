@@ -35,6 +35,58 @@ export function selectContextEntries(
 }
 
 /**
+ * Download a batch of file metas into the session's incoming/ and return the
+ * id→localPath map plus any non-fatal warnings. `origin` only differentiates the
+ * warning wording so a stale/deleted context attachment doesn't read like the
+ * user's fresh upload failed. Files without a download reference are skipped.
+ */
+async function downloadMetas(
+  metas: SlackFileMeta[],
+  token: string,
+  sessionTempDir: string,
+  origin: 'current' | 'context',
+): Promise<{ pathsById: Map<string, string>; warnings: string[] }> {
+  const downloadable: SlackFile[] = metas
+    .filter((f) => f.downloadRef)
+    .map((f) => ({
+      id: f.id,
+      name: f.name,
+      mimetype: f.mimetype ?? '',
+      size: f.size ?? 0,
+      url_private_download: f.downloadRef,
+    }));
+  if (downloadable.length === 0) return { pathsById: new Map(), warnings: [] };
+
+  const result = await downloadSlackFiles(downloadable, token, sessionTempDir);
+  const warnings: string[] = [];
+  const where = origin === 'current' ? '' : ' referenced in earlier messages';
+  if (result.failedCount > 0) {
+    warnings.push(
+      `Failed to download ${result.failedCount} of ${result.totalCount} file(s)${where}. Check server logs.`,
+    );
+  }
+  if (result.oversizedCount > 0) {
+    warnings.push(
+      `Skipped ${result.oversizedCount} file(s)${where} over the 25MB attachment limit.`,
+    );
+  }
+  return { pathsById: result.pathsById, warnings };
+}
+
+/**
+ * Rebuild metas with the resolved local path; drop the server-side downloadRef
+ * so it can never leak into the rendered prompt.
+ */
+function applyLocalPaths(files: SlackFileMeta[], pathsById: Map<string, string>): SlackFileMeta[] {
+  return files.map((f) => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { downloadRef, ...rest } = f;
+    const localPath = pathsById.get(f.id);
+    return localPath ? { ...rest, localPath } : { ...rest };
+  });
+}
+
+/**
  * Download the current message's files into the session's incoming/ and return
  * the render metas with `localPath` filled in (so the prompt's `path=` points at
  * the freshly downloaded file), plus any non-fatal warnings. Files without a
@@ -47,41 +99,32 @@ async function resolveCurrentFiles(
   sessionTempDir: string,
 ): Promise<{ files?: SlackFileMeta[]; warnings: string[] }> {
   if (!files || files.length === 0) return { files, warnings: [] };
+  const { pathsById, warnings } = await downloadMetas(files, token, sessionTempDir, 'current');
+  return { files: applyLocalPaths(files, pathsById), warnings };
+}
 
-  const downloadable: SlackFile[] = files
-    .filter((f) => f.downloadRef)
-    .map((f) => ({
-      id: f.id,
-      name: f.name,
-      mimetype: f.mimetype ?? '',
-      size: f.size ?? 0,
-      url_private_download: f.downloadRef,
-    }));
-
-  const warnings: string[] = [];
-  let pathsById = new Map<string, string>();
-  if (downloadable.length > 0) {
-    const result = await downloadSlackFiles(downloadable, token, sessionTempDir);
-    pathsById = result.pathsById;
-    if (result.failedCount > 0) {
-      warnings.push(
-        `Failed to download ${result.failedCount} of ${result.totalCount} file(s). Check server logs.`,
-      );
-    }
-    if (result.oversizedCount > 0) {
-      warnings.push(`Skipped ${result.oversizedCount} file(s) over the 25MB attachment limit.`);
-    }
+/**
+ * Download files attached to prior thread messages (the ones rendered under
+ * `--- Slack context ---`) into the same incoming/ dir, filling `localPath` on
+ * each entry in place so they render with a `path=` just like current-message
+ * files. This is what makes "user posted the file in one message, then @mentioned
+ * the bot in the next" work — those attachments are context, not current, but
+ * `conversations.replies` gives us their download URL. Volume is bounded by the
+ * history window (resumed sessions only see messages past the watermark) and by
+ * skip-if-exists in downloadSlackFiles, so a file downloads at most once.
+ */
+async function resolveContextFiles(
+  context: SlackThreadEntry[],
+  token: string,
+  sessionTempDir: string,
+): Promise<{ warnings: string[] }> {
+  const metas = context.flatMap((e) => e.files ?? []);
+  if (metas.length === 0) return { warnings: [] };
+  const { pathsById, warnings } = await downloadMetas(metas, token, sessionTempDir, 'context');
+  for (const e of context) {
+    if (e.files && e.files.length > 0) e.files = applyLocalPaths(e.files, pathsById);
   }
-
-  // Rebuild metas with the resolved local path; drop the server-side downloadRef
-  // so it can never leak into the rendered prompt.
-  const rendered = files.map((f) => {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { downloadRef, ...rest } = f;
-    const localPath = pathsById.get(f.id);
-    return localPath ? { ...rest, localPath } : { ...rest };
-  });
-  return { files: rendered, warnings };
+  return { warnings };
 }
 
 export function makeSlackPromptCoordinator(
@@ -123,13 +166,21 @@ export function makeSlackPromptCoordinator(
         currentTs: queued.ts,
       });
 
-      // Download current-message files at processing time (D10), keyed by the
-      // resolved session — so a folder/repo change while the message was queued
-      // lands the files under the correct session's incoming/, not an orphaned
-      // enqueue-time bucket. Failures/oversized files become warnings, not throws.
+      // Download attachments at processing time (D10), keyed by the resolved
+      // session — so a folder/repo change while the message was queued lands the
+      // files under the correct session's incoming/, not an orphaned enqueue-time
+      // bucket. Both the current message's files and any attachments in the
+      // injected context are fetched, so a file posted in one message and
+      // referenced by a later @mention is still available on disk. Failures and
+      // oversized files become warnings, not throws.
       const token = client.token ?? process.env.SLACK_BOT_TOKEN ?? '';
       const { files: currentFiles, warnings } = await resolveCurrentFiles(
         slack.files,
+        token,
+        ctx.sessionTempDir,
+      );
+      const { warnings: contextWarnings } = await resolveContextFiles(
+        context,
         token,
         ctx.sessionTempDir,
       );
@@ -149,7 +200,8 @@ export function makeSlackPromptCoordinator(
           files: currentFiles,
         },
       });
-      return warnings.length > 0 ? { text, warnings } : { text };
+      const allWarnings = [...warnings, ...contextWarnings];
+      return allWarnings.length > 0 ? { text, warnings: allWarnings } : { text };
     },
 
     async onTurnCommitted(queued: QueuedMessage, session: SessionState): Promise<void> {
