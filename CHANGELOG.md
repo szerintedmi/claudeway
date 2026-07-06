@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.37.1] - 2026-07-06
+
+### Changed
+- **Claude enrollment hints now name `claude setup-token`**: the unenrolled-user refusal and the `!creds` DM link reply tell users to run `claude setup-token` up front, instead of only revealing it once they reach the web form
+
 ## [0.37.0] - 2026-07-06
 
 ### Fixed
