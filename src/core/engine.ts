@@ -118,7 +118,7 @@ export async function processQueuedMessage(
     });
     await responder
       .warn(
-        `This server requires your own Claude credential — ${credsDmInstruction('connect it')}, then resend your message here.`,
+        `This server requires your own Claude credential — run \`claude setup-token\` on your own machine, then ${credsDmInstruction('connect it')} and resend your message here.`,
       )
       .catch(() => {});
     dequeue(queued.channelId, queued.ts);

@@ -111,6 +111,7 @@ export async function handleCredsCommand(
     await reply(
       ctx,
       `:key: Set up your credentials here (single-use link, expires in ${minutes} min):\n${url}\n` +
+        'For your Claude token, run `claude setup-token` on your own machine and paste it into the form.\n' +
         'Never paste tokens into Slack — only into this form.',
     );
     return true;
