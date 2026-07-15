@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, mock } from 'bun:test';
+import { EventEmitter } from 'events';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -272,13 +273,44 @@ describe('queue modelOverride persistence', () => {
   });
 });
 
+// Fake spawn seam for the engine-resolution tests below: the REAL engine and
+// runner code runs end-to-end (config resolution → runClaudeStreaming →
+// buildClaudeArgs), and only the child process is stubbed — the model/effort
+// overrides are asserted on the actual CLI args handed to spawn. Claude-runner
+// tests must mock THIS seam (child-processes.js); never whole-module-mock
+// ../claude.js — bun cannot truly un-mock a module, so a frozen re-registered
+// namespace permanently severs claude.js's own imports for every test file
+// that runs later in the process.
+const capturedSpawnArgs: string[][] = [];
+mock.module('../child-processes.js', () => ({
+  spawnTrackedClaude: (args: string[]) => {
+    capturedSpawnArgs.push(args);
+    const proc = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      kill: (sig?: string) => void;
+      pid: number;
+      killed: boolean;
+    };
+    proc.stdout = new EventEmitter();
+    proc.stderr = new EventEmitter();
+    proc.kill = () => {};
+    proc.pid = 4243;
+    proc.killed = false;
+    setTimeout(() => {
+      proc.stdout.emit(
+        'data',
+        Buffer.from(JSON.stringify({ type: 'result', result: 'ok', cost_usd: 0 }) + '\n'),
+      );
+      proc.emit('close', 0);
+    }, 0);
+    return proc;
+  },
+}));
+
 describe('engine model resolution', () => {
   let tmpDir: string;
   const originalCwd = process.cwd;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let actualClaude: any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const capturedOpts: any[] = [];
 
   const configYaml = `
 channels:
@@ -309,27 +341,6 @@ defaults:
     writeFileSync(join(secretsDir(tmpDir), 'key'), randomBytes(32).toString('hex'));
     resetSecretStoreForTests();
     getSecretStore(tmpDir).set('U001', 'claude', { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-test' });
-
-    actualClaude = await import('../claude.js');
-    const fakeResult = { response: 'ok', sessionId: null, cost: null, tokens: null };
-    mock.module('../claude.js', () => ({
-      ...actualClaude,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      runClaude: async (opts: any) => {
-        capturedOpts.push(opts);
-        return fakeResult;
-      },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      runClaudeStreaming: async (opts: any) => {
-        capturedOpts.push(opts);
-        return fakeResult;
-      },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      runClaudePersistentStreaming: async (opts: any) => {
-        capturedOpts.push(opts);
-        return fakeResult;
-      },
-    }));
   });
 
   afterAll(async () => {
@@ -337,8 +348,8 @@ defaults:
     rmSync(tmpDir, { recursive: true, force: true });
     const { resetSecretStoreForTests } = await import('../secrets.js');
     resetSecretStoreForTests();
-    // Restore the real module for any test files that run after this one
-    mock.module('../claude.js', () => actualClaude);
+    // The child-processes fake stays registered (bun cannot un-mock a module);
+    // it is inert for later files — nothing else spawns Claude for real.
   });
 
   function makeResponder() {
@@ -377,55 +388,63 @@ defaults:
     };
   }
 
+  /** Run one queued message through the REAL engine + runner; return the CLI
+   *  args the runner handed to the (faked) spawn. */
   async function runWith(
     channelId: string,
     overrides: { modelOverride?: string; effortOverride?: QueuedMessage['effortOverride'] } = {},
-  ) {
+  ): Promise<string[]> {
     const { processQueuedMessage } = await import('../core/engine.js');
-    capturedOpts.length = 0;
+    capturedSpawnArgs.length = 0;
     await processQueuedMessage(makeQueued(channelId, overrides), makeResponder());
-    expect(capturedOpts.length).toBe(1);
-    return capturedOpts[0];
+    expect(capturedSpawnArgs.length).toBe(1);
+    return capturedSpawnArgs[0];
   }
 
+  /** Value following a CLI flag (buildClaudeArgs emits `--model X`, `--effort Y`). */
+  const argAfter = (args: string[], flag: string): string | undefined => {
+    const i = args.indexOf(flag);
+    return i === -1 ? undefined : args[i + 1];
+  };
+
   it('passes the model override to the batch runner', async () => {
-    const opts = await runWith('CMODELBATCH', { modelOverride: 'override-model' });
-    expect(opts.model).toBe('override-model');
+    const args = await runWith('CMODELBATCH', { modelOverride: 'override-model' });
+    expect(argAfter(args, '--model')).toBe('override-model');
   });
 
   it('passes the model override to the streaming runner', async () => {
-    const opts = await runWith('CMODELSTREAM', { modelOverride: 'override-model' });
-    expect(opts.model).toBe('override-model');
+    const args = await runWith('CMODELSTREAM', { modelOverride: 'override-model' });
+    expect(argAfter(args, '--model')).toBe('override-model');
   });
 
   it('falls back to the channel/default model without an override', async () => {
-    const batchOpts = await runWith('CMODELBATCH');
-    expect(batchOpts.model).toBe('channel-default-model');
-    const streamOpts = await runWith('CMODELSTREAM');
-    expect(streamOpts.model).toBe('channel-default-model');
+    const batchArgs = await runWith('CMODELBATCH');
+    expect(argAfter(batchArgs, '--model')).toBe('channel-default-model');
+    const streamArgs = await runWith('CMODELSTREAM');
+    expect(argAfter(streamArgs, '--model')).toBe('channel-default-model');
   });
 
   it('passes the effort override to the batch runner', async () => {
-    const opts = await runWith('CMODELBATCH', { effortOverride: 'xhigh' });
-    expect(opts.effort).toBe('xhigh');
+    const args = await runWith('CMODELBATCH', { effortOverride: 'xhigh' });
+    expect(argAfter(args, '--effort')).toBe('xhigh');
   });
 
   it('passes the effort override to the streaming runner', async () => {
-    const opts = await runWith('CMODELSTREAM', { effortOverride: 'xhigh' });
-    expect(opts.effort).toBe('xhigh');
+    const args = await runWith('CMODELSTREAM', { effortOverride: 'xhigh' });
+    expect(argAfter(args, '--effort')).toBe('xhigh');
   });
 
   it('falls back to the channel/default effort without an override', async () => {
-    const batchOpts = await runWith('CMODELBATCH');
-    expect(batchOpts.effort).toBe('medium');
-    const streamOpts = await runWith('CMODELSTREAM');
-    expect(streamOpts.effort).toBe('medium');
+    const batchArgs = await runWith('CMODELBATCH');
+    expect(argAfter(batchArgs, '--effort')).toBe('medium');
+    const streamArgs = await runWith('CMODELSTREAM');
+    expect(argAfter(streamArgs, '--effort')).toBe('medium');
   });
 
   it('ignores an unknown effort override from a queue file (engine chokepoint guard)', async () => {
-    const opts = await runWith('CMODELBATCH', {
+    const args = await runWith('CMODELBATCH', {
       effortOverride: 'bogus' as unknown as QueuedMessage['effortOverride'],
     });
-    expect(opts.effort).toBe('medium');
+    expect(argAfter(args, '--effort')).toBe('medium');
   });
 });
