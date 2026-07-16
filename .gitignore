@@ -8,6 +8,7 @@ mcp-readonly*.json
 *.tsbuildinfo
 *.log
 *.pid
+*.pids
 .claudeway-tmp/
 .git-credentials
 .docker/
