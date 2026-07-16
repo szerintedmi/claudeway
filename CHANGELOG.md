@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.37.4] - 2026-07-16
+
+### Fixed
+- **In-body Slack `@mentions` now carry the person's name, so the bot stops guessing wrong names**: only the *author* of each context/current message was name-resolved (`[<ts> <@U…> Name]`); `<@U…>` mentions *inside* the message text passed through as bare ids. When a message addressed or cc'd someone by id, the model saw an unnamed id and could invent a plaintext name for it (observed: a message addressed to `<@U…>` (Oskar) drew a reply that opened "So Val —"). A new `annotateBodyMentions` (`src/adapters/slack/thread.ts`) rewrites every in-body mention to a standard `<@U…> (Name)` form — reusing the cached `resolveUserName`, applied to both fetched context (`fetchThreadEntries`) and the current message (`coordinator.prepare`). The real `<@U…>` token is preserved so the model can echo it back as a live mention; enterprise-grid `W` ids and `|fallback` labels are normalized; unresolvable ids degrade to the bare token; it's a no-op without `users:read` scope. The default Slack system prompt now also instructs the agent to address people via their `<@U…>` token and never guess a name for an unshown id
+
 ## [0.37.3] - 2026-07-16
 
 ### Fixed

@@ -3,6 +3,7 @@ import type { WebClient } from '@slack/web-api';
 import {
   resetUserNameCache,
   resolveUserName,
+  annotateBodyMentions,
   fetchThreadEntries,
 } from '../adapters/slack/thread.js';
 
@@ -88,6 +89,75 @@ describe('resolveUserName', () => {
   });
 });
 
+describe('annotateBodyMentions', () => {
+  it('rewrites an in-body mention to `<@id> (Name)`', async () => {
+    const out = await annotateBodyMentions(makeUserClient('Oskar'), '<@U0AAL4ZS4DQ>: heads up');
+    expect(out).toBe('<@U0AAL4ZS4DQ> (Oskar): heads up');
+  });
+
+  it('resolves multiple distinct ids, one lookup each (cached)', async () => {
+    let infoCalls = 0;
+    const client = {
+      users: {
+        info: async ({ user }: { user: string }) => {
+          infoCalls++;
+          return { user: { profile: { display_name_normalized: user + '!' } } };
+        },
+      },
+    } as unknown as WebClient;
+    const out = await annotateBodyMentions(client, 'cc <@U1> and <@U2>, again <@U1>');
+    expect(out).toBe('cc <@U1> (U1!) and <@U2> (U2!), again <@U1> (U1!)');
+    expect(infoCalls).toBe(2);
+  });
+
+  it('handles enterprise-grid W ids and strips any |fallback label', async () => {
+    const out = await annotateBodyMentions(makeUserClient('Val'), 'ping <@W123|val>');
+    expect(out).toBe('ping <@W123> (Val)');
+  });
+
+  it('degrades to the bare token when the name is unresolvable', async () => {
+    const client = {
+      users: {
+        info: async () => {
+          throw new Error('external user');
+        },
+      },
+    } as unknown as WebClient;
+    const out = await annotateBodyMentions(client, 'hi <@U999>');
+    expect(out).toBe('hi <@U999>');
+  });
+
+  it('is a no-op (no API calls) when canResolveUsers is false', async () => {
+    let infoCalls = 0;
+    const client = {
+      users: {
+        info: async () => {
+          infoCalls++;
+          return {};
+        },
+      },
+    } as unknown as WebClient;
+    const out = await annotateBodyMentions(client, 'hi <@U1>', false);
+    expect(out).toBe('hi <@U1>');
+    expect(infoCalls).toBe(0);
+  });
+
+  it('leaves text without mentions untouched (no API calls)', async () => {
+    let infoCalls = 0;
+    const client = {
+      users: {
+        info: async () => {
+          infoCalls++;
+          return {};
+        },
+      },
+    } as unknown as WebClient;
+    const out = await annotateBodyMentions(client, 'no mentions here');
+    expect(out).toBe('no mentions here');
+    expect(infoCalls).toBe(0);
+  });
+});
+
 describe('fetchThreadEntries', () => {
   const OPTS = { botUserId: 'UBOT' };
 
@@ -132,6 +202,29 @@ describe('fetchThreadEntries', () => {
     const result = await fetchThreadEntries(client, 'C1', '99', OPTS);
     expect(result?.[0].authorName).toBe('U1-display');
     expect(result?.[0].userId).toBe('U1');
+  });
+
+  it('annotates in-body mentions in fetched context with the resolved name', async () => {
+    const client = makeRepliesClient([
+      { ts: '100', user: 'U1', text: '<@U2>: my AI buddy wrote this' },
+    ]);
+    const result = await fetchThreadEntries(client, 'C1', '99', OPTS);
+    // author id resolves via the prefix path; the in-body <@U2> now carries a name
+    expect(result?.[0].text).toBe('<@U2> (U2-display): my AI buddy wrote this');
+  });
+
+  it('does not annotate in-body mentions when canResolveUsers is false', async () => {
+    const client = {
+      users: { info: async () => ({}) },
+      conversations: {
+        replies: async () => ({ messages: [{ ts: '100', user: 'U1', text: 'cc <@U2>' }] }),
+      },
+    } as unknown as WebClient;
+    const result = await fetchThreadEntries(client, 'C1', '99', {
+      ...OPTS,
+      canResolveUsers: false,
+    });
+    expect(result?.[0].text).toBe('cc <@U2>');
   });
 
   it('omits authorName when canResolveUsers is false (no users.info call)', async () => {
