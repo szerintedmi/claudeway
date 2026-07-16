@@ -1,5 +1,7 @@
 # Remote-Control Execution Mode
 
+> **Update 2026-07-15:** `runClaude` and `runClaudeProcess` (the oneshot `--output-format json` runner) were removed on 2026-07-15 — batch mode now goes through `runClaudeStreaming` (`ClaudeResult` gained a lossless `fullText` field). Any dispatch integration described below in terms of `runClaude` should be reworked against `runClaudeStreaming` / `runClaudePersistentStreaming`.
+
 ## Context
 
 Claudeway currently runs every Claude turn through `claude -p` (headless/print mode) — see `buildClaudeArgs()` (`src/claude.ts:823-866`) and the three runners `runClaude()` (`src/claude.ts:898`), `runClaudeStreaming()` (`src/claude.ts:940`), and `runClaudePersistentStreaming()` (`src/claude.ts:1262`). All emit/parse line-delimited `--output-format stream-json` (`parseStreamLine()`, `src/claude.ts:237-336`).
@@ -95,7 +97,7 @@ Slack/Voice msg ──> engine.processQueuedMessage (unchanged)
                                                         return ClaudeResult { response, usage, ... }
 ```
 
-A new module `src/claude-remote-control.ts` (keeps `src/claude.ts` from ballooning) owns the PTY session registry and the runner. `src/claude.ts` exports stay the same; `runClaude*` gain a dispatch at the top:
+A new module `src/claude-remote-control.ts` (keeps `src/claude.ts` from ballooning) owns the PTY session registry and the runner. `src/claude.ts` exports stay the same; `runClaude*` gain a dispatch at the top *(`runClaude` removed 2026-07-15 — apply the same dispatch to `runClaudeStreaming` instead)*:
 
 ```typescript
 export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
@@ -169,7 +171,7 @@ Port munder-difflin's `submitToPty` (`useHive.ts:65-75`): write `\x1b[200~` + me
 - Reuse `buildAllowedEnv` from `src/claude.ts` (export it if not already), then **delete `ANTHROPIC_API_KEY`** from the returned env for RC.
 
 ### Step 3: Dispatch from existing runners (`src/claude.ts`)
-- Top-of-function dispatch in `runClaude`, `runClaudeStreaming`, `runClaudePersistentStreaming` → `runClaudeRemoteControl` when `options.executionMode === 'remote-control'`.
+- Top-of-function dispatch in `runClaude`, `runClaudeStreaming`, `runClaudePersistentStreaming` → `runClaudeRemoteControl` when `options.executionMode === 'remote-control'`. *(`runClaude` removed 2026-07-15 — only the two streaming runners need the dispatch.)*
 - Add `executionMode?: ExecutionMode` and `remoteControl?: ResolvedRemoteControlConfig` to `ClaudeOptions` (`:16-34`).
 - Export `buildAllowedEnv` / `deriveSessionId` / `sessionArtifactPaths` / `processIdentityKey` if needed by the new module.
 
@@ -231,7 +233,7 @@ Do these *before* building Steps 1–8; they can each invalidate or reshape the 
 |------|-------|
 | `src/config.ts` | `ExecutionMode`/`RemoteControlConfig` types; add to `ChannelConfig`/`Defaults`/`ResolvedChannelConfig`; resolve + validate |
 | `src/claude-remote-control.ts` | **NEW** — RC session registry, PTY spawn/drive, transcript read, runner |
-| `src/claude.ts` | Dispatch in `runClaude*`; add `executionMode`/`remoteControl` to `ClaudeOptions`; export `buildAllowedEnv`/`deriveSessionId`/`sessionArtifactPaths`/`processIdentityKey` |
+| `src/claude.ts` | Dispatch in `runClaude*` (`runClaude` removed 2026-07-15 — streaming runners only); add `executionMode`/`remoteControl` to `ClaudeOptions`; export `buildAllowedEnv`/`deriveSessionId`/`sessionArtifactPaths`/`processIdentityKey` |
 | `src/core/engine.ts` | Thread `executionMode`/`remoteControl` into claude options |
 | `src/index.ts` | Tear down RC PTYs on shutdown |
 | `config.example.yaml` | Document `executionMode` + `remoteControl` block |

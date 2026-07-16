@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.37.3] - 2026-07-16
+
+### Fixed
+- **Slack streaming lost earlier answer blocks in multi-subagent turns**: when parallel background subagents finished at different times, their task-notifications re-invoked the main agent mid-turn, producing several answer blocks in one run — but the end-of-turn rebuild replaced the whole streamed message with just the CLI `result` (the final block only), so earlier answers the user had watched stream in vanished. Native streaming now archives each released answer run and stitches them back on rebuild (`buildMultiBlockRebuildText`, with equal/suffix/prefix dedup); `subagent_completed` is treated as an assistant-turn boundary that finalizes the current run as an answer block (the next turn often opens with an empty thinking block, so answers otherwise merged), while `subagent_progress` heartbeats no longer split or demote live answer text. Batch mode gains classified `answerText` (pre-tool narration dropped, completed answer blocks kept) so multi-block turns are preserved while single-block turns match the old output; the `content_block_stop`-fires-for-text-blocks trap is guarded by the tool-accumulator hit. Removed the oneshot JSON runner (`runClaude`/`runClaudeProcess`) — its single `result` field can't recover multi-block runs; batch now uses the streaming runner
+
 ## [0.37.2] - 2026-07-06
 
 ### Fixed

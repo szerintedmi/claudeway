@@ -10,7 +10,6 @@ import {
   type UserPermissions,
 } from '../config.js';
 import {
-  runClaude,
   runClaudeStreaming,
   runClaudePersistentStreaming,
   resolveSessionState,
@@ -313,10 +312,16 @@ export async function processQueuedMessage(
       const result =
         processMode === 'persistent'
           ? await runClaudePersistentStreaming({ ...claudeOpts, onTextDelta: () => {} })
-          : await runClaude(claudeOpts);
+          : await runClaudeStreaming({ ...claudeOpts, onTextDelta: () => {} });
 
       await commitTurn();
-      await responder.sendResponse(result.response);
+      // Multi-block runs (background-subagent notifications re-invoke the main
+      // agent) hold earlier completed answer blocks that result.response — the CLI
+      // result field, final block only — loses. answerText carries those blocks
+      // with pre-tool narration classified out, so batch output stays as clean as
+      // the old one-shot runner for single-block turns.
+      const responseText = result.answerText?.trim() ? result.answerText : result.response;
+      await responder.sendResponse(responseText);
       await responder.onComplete();
 
       if (result.cost !== null) {

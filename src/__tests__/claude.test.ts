@@ -76,7 +76,7 @@ describe('buildClaudeArgs — leading-dash prompt safety', () => {
   };
 
   it('terminates option parsing with -- before the positional message', () => {
-    const { args } = buildClaudeArgs(options, 'json');
+    const { args } = buildClaudeArgs(options, 'stream-json');
     expect(args[args.length - 1]).toBe(options.message);
     expect(args[args.length - 2]).toBe('--');
   });

@@ -82,6 +82,15 @@ export interface ClaudeStreamingOptions extends ClaudeOptions {
 
 export interface ClaudeResult {
   response: string;
+  /**
+   * Completed answer blocks joined with `\n\n` — earlier blocks are text runs
+   * ended by `subagent_completed` (background-subagent notifications re-invoke
+   * the main agent mid-run, so a run can hold several answers); runs ended by
+   * tool/reasoning activity are pre-tool narration and excluded; the final
+   * block is the CLI `result` text. Unlike `response`, which holds only the
+   * final block.
+   */
+  answerText?: string;
   sessionId: string | null;
   cost: number | null;
   tokens: number | null;
@@ -151,6 +160,12 @@ interface PersistentProcessEntry {
     onReasoningDelta?: (text: string) => void;
     onToolEvent?: (event: ToolEventPayload) => void;
     fullText: string;
+    // Set by tool/reasoning activity so the next text run gets a `\n\n` boundary.
+    boundarySinceText: boolean;
+    // Completed answer blocks (runs ended by subagent_completed) and the run
+    // in progress — tool/reasoning activity drops the run as narration.
+    answerBlocks: string[];
+    currentRun: string;
     sessionId: string | null;
     cost: number | null;
     toolAccums: ToolUseAccumulators;
@@ -285,98 +300,18 @@ function spawnClaudeProcess(args: string[], cwd: string, env: Record<string, str
   });
 }
 
-function runClaudeProcess(
-  args: string[],
-  cwd: string,
-  timeoutMs: number,
-  channelId: string,
-  sessionId: string,
-  message: string,
-  regKey: string,
-  env: Record<string, string>,
-  secretValues?: readonly string[],
-): Promise<ClaudeResult> {
-  return new Promise((resolve, reject) => {
-    const proc = spawnClaudeProcess(args, cwd, env);
-
-    processRegistry.set(regKey, {
-      proc,
-      channelId,
-      sessionId,
-      startedAt: new Date(),
-      message: message.substring(0, 80),
-      messageCount: 1,
-      totalCost: 0,
-      totalTokens: 0,
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    const resetTimer = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        proc.kill('SIGTERM');
-        reject(new Error(`Claude idle timeout after ${timeoutMs / 1000}s of inactivity`));
-      }, timeoutMs);
-    };
-
-    proc.stdout!.on('data', (data: Buffer) => {
-      stdout += data.toString();
-      resetTimer();
-    });
-
-    proc.stderr!.on('data', (data: Buffer) => {
-      stderr += data.toString();
-      resetTimer();
-    });
-
-    let timer = setTimeout(() => {
-      proc.kill('SIGTERM');
-      reject(new Error(`Claude idle timeout after ${timeoutMs / 1000}s of inactivity`));
-    }, timeoutMs);
-
-    const absoluteTimer = setTimeout(() => {
-      proc.kill('SIGTERM');
-      reject(new Error(`Claude absolute timeout after ${ABSOLUTE_TIMEOUT_MS / 3600000}h`));
-    }, ABSOLUTE_TIMEOUT_MS);
-
-    proc.on('close', (code) => {
-      processRegistry.delete(regKey);
-      clearTimeout(timer);
-      clearTimeout(absoluteTimer);
-
-      if (code !== 0) {
-        reject(new Error(`Claude exited with code ${code}: ${scrub(stderr.trim(), secretValues)}`));
-        return;
-      }
-
-      try {
-        const json = JSON.parse(stdout);
-        const usage = json.usage;
-        resolve({
-          response: json.result ?? json.content ?? stdout,
-          sessionId: json.session_id ?? null,
-          cost: json.cost_usd ?? null,
-          tokens: usage != null ? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) : null,
-        });
-      } catch {
-        resolve({
-          response: stdout.trim(),
-          sessionId: null,
-          cost: null,
-          tokens: null,
-        });
-      }
-    });
-
-    proc.on('error', (err) => {
-      processRegistry.delete(regKey);
-      clearTimeout(timer);
-      clearTimeout(absoluteTimer);
-      reject(new Error(`Failed to spawn claude: ${err.message}`));
-    });
-  });
+/**
+ * Join the completed answer blocks and the final block into ClaudeResult's
+ * answerText. A straggler subagent_completed right before the run ends pushes
+ * the final answer into answerBlocks AND returns it as the result text — drop
+ * the duplicate. Shared by the oneshot and persistent runners.
+ */
+function buildAnswerText(answerBlocks: string[], finalBlock: string): string {
+  const blocks =
+    answerBlocks.length > 0 && answerBlocks[answerBlocks.length - 1].trim() === finalBlock.trim()
+      ? answerBlocks.slice(0, -1)
+      : answerBlocks;
+  return [...blocks, finalBlock].filter((b) => b.trim().length > 0).join('\n\n');
 }
 
 function runClaudeStreamingProcess(
@@ -418,6 +353,16 @@ function runClaudeStreamingProcess(
 
     let stderr = '';
     let fullText = '';
+    // The CLI `result` field — final block only; kept separate from the
+    // accumulated fullText so multi-block runs aren't collapsed to the last block.
+    let resultText: string | null = null;
+    // Set by tool/reasoning activity so the next text run gets a `\n\n` boundary.
+    let boundarySinceText = false;
+    // Completed answer blocks (text runs ended by subagent_completed) and the
+    // run in progress — tool/reasoning activity classifies a run as pre-tool
+    // narration and drops it from the answer.
+    const answerBlocks: string[] = [];
+    let currentRun = '';
     let sessionId: string | null = null;
     let cost: number | null = null;
     let tokens: number | null = null;
@@ -428,23 +373,39 @@ function runClaudeStreamingProcess(
       const event = parseStreamLine(line);
       if (!event) return;
       if (event.type === 'text_delta') {
+        // Consecutive answer blocks (separated only by tool/reasoning activity)
+        // would otherwise concatenate without whitespace — the separator goes
+        // only into the accumulator; the raw delta still flows to onTextDelta.
+        if (boundarySinceText && fullText.length > 0 && !fullText.endsWith('\n'))
+          fullText += '\n\n';
+        boundarySinceText = false;
         fullText += event.text;
+        currentRun += event.text;
         onTextDelta(event.text);
       } else if (event.type === 'reasoning_delta') {
+        boundarySinceText = true;
+        currentRun = ''; // run ended by reasoning → pre-tool narration, dropped
         onReasoningDelta?.(event.text);
       } else if (event.type === 'result') {
         sessionId = event.sessionId ?? sessionId;
         cost = event.cost ?? cost;
         tokens = event.tokens ?? tokens;
-        if (event.text) fullText = event.text;
+        if (event.text) resultText = event.text;
       } else if (event.type === 'tool_start') {
+        boundarySinceText = true;
+        currentRun = ''; // run ended by a tool → pre-tool narration, dropped
         toolAccums.start(event.toolName, event.index);
         void onToolEvent?.({ phase: 'start', toolName: event.toolName, index: event.index });
       } else if (event.type === 'tool_input_delta') {
         toolAccums.appendInput(event.index, event.partialJson);
       } else if (event.type === 'tool_stop') {
         const acc = toolAccums.stop(event.index);
+        // content_block_stop fires for text blocks too — only an accumulator
+        // hit identifies a real tool, so the boundary/narration classification
+        // must stay inside the guard or a text block's own stop would erase it.
         if (acc) {
+          boundarySinceText = true;
+          currentRun = ''; // run ended by a tool → pre-tool narration, dropped
           void onToolEvent?.({
             phase: 'complete',
             toolName: acc.toolName,
@@ -453,12 +414,22 @@ function runClaudeStreamingProcess(
           });
         }
       } else if (event.type === 'subagent_progress') {
+        // Deliberately no boundary flag: subagent heartbeats are asynchronous
+        // and can land mid-sentence between two deltas of one text block — a
+        // false boundary would inject `\n\n` inside a sentence.
         void onToolEvent?.({
           phase: 'subagent_progress',
           toolName: event.toolName,
           description: event.description,
         });
       } else if (event.type === 'subagent_completed') {
+        // A completion lands between distinct assistant responses, so it IS a
+        // turn boundary (unlike subagent_progress heartbeats): the run so far
+        // is a completed answer block, and the fullText fallback gets its
+        // `\n\n` separator.
+        if (currentRun.trim()) answerBlocks.push(currentRun);
+        currentRun = '';
+        boundarySinceText = true;
         void onToolEvent?.({
           phase: 'subagent_completed',
           toolName: 'Agent',
@@ -521,7 +492,7 @@ function runClaudeStreamingProcess(
         return;
       }
 
-      if (!fullText) {
+      if (!fullText && !resultText) {
         const details: string[] = [];
         if (stderr) details.push(`stderr: ${stderr.trimEnd().slice(-500)}`);
         if (rawStdout) details.push(`stdout(last 500): ${rawStdout.trimEnd().slice(-500)}`);
@@ -531,8 +502,15 @@ function runClaudeStreamingProcess(
         return;
       }
 
+      // The result event text is the authoritative final block; the still-open
+      // run is the fallback when the CLI omitted it.
+      const answerText = buildAnswerText(answerBlocks, resultText ?? currentRun);
+
       resolve({
-        response: fullText,
+        // Result text wins (preserves today's semantics); accumulated text is
+        // the fallback. answerText carries every completed answer block.
+        response: resultText ?? fullText,
+        answerText,
         sessionId,
         cost,
         tokens,
@@ -607,9 +585,11 @@ export function renderSystemPrompt(systemPrompt: string, tempDir?: string): stri
 }
 
 // Exported for tests (leading-dash prompt regression guard)
+// outputFormat is 'stream-json' only — the oneshot 'json' runner is gone (its
+// single JSON result field couldn't recover multi-block runs).
 export function buildClaudeArgs(
   options: ClaudeOptions,
-  outputFormat: 'json' | 'stream-json',
+  outputFormat: 'stream-json',
 ): { args: string[]; sessionId: string; cwd: string; resuming: boolean } {
   const { message, cwd: rawCwd, model, systemPrompt, channelId, threadTs } = options;
 
@@ -624,7 +604,8 @@ export function buildClaudeArgs(
     '-p',
     '--output-format',
     outputFormat,
-    ...(outputFormat === 'stream-json' ? ['--verbose', '--include-partial-messages'] : []),
+    '--verbose',
+    '--include-partial-messages',
     '--model',
     model,
     ...(options.effort ? ['--effort', options.effort] : []),
@@ -687,32 +668,6 @@ async function withSessionRetry<T>(
     }
     throw err;
   }
-}
-
-export async function runClaude(options: ClaudeOptions): Promise<ClaudeResult> {
-  const { args, sessionId, cwd, resuming } = buildClaudeArgs(options, 'json');
-  const spawnEnv = buildSpawnEnv(options);
-  const regKey = registryKey(options.channelId, options.threadTs);
-
-  console.log(
-    `[${options.channelId}] ${resuming ? 'Resuming' : 'Starting'} session ${sessionId} [${permissionKeyStr(options.userPermissions) || 'read-only'}]`,
-  );
-
-  const secretValues = options.credentials?.secretValues;
-
-  return withSessionRetry(options.channelId, sessionId, cwd, args, (a) =>
-    runClaudeProcess(
-      a,
-      cwd,
-      options.timeoutMs,
-      options.channelId,
-      sessionId,
-      options.message,
-      regKey,
-      spawnEnv,
-      secretValues,
-    ),
-  );
 }
 
 export async function runClaudeStreaming(options: ClaudeStreamingOptions): Promise<ClaudeResult> {
@@ -909,9 +864,11 @@ function createPersistentProcess(
         const stderrPart = entry.stderrBuf.trim() ? `: ${entry.stderrBuf.trim()}` : '';
         turn.reject(new Error(`Persistent Claude process exited with code ${code}${stderrPart}`));
       } else {
-        // Process ended cleanly mid-turn — resolve with what we have
+        // Process ended cleanly mid-turn — resolve with what we have (the
+        // classifier still applies, or batch mode would re-expose narration)
         turn.resolve({
           response: turn.fullText,
+          answerText: buildAnswerText(turn.answerBlocks, turn.currentRun),
           sessionId: turn.sessionId,
           cost: turn.cost,
           tokens: null,
@@ -945,17 +902,33 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
   }
 
   if (event.type === 'text_delta' && entry.currentTurn) {
+    // Consecutive answer blocks (separated only by tool/reasoning activity)
+    // would otherwise concatenate without whitespace — the separator goes only
+    // into the accumulator; the raw delta still flows to onTextDelta.
+    if (
+      entry.currentTurn.boundarySinceText &&
+      entry.currentTurn.fullText.length > 0 &&
+      !entry.currentTurn.fullText.endsWith('\n')
+    ) {
+      entry.currentTurn.fullText += '\n\n';
+    }
+    entry.currentTurn.boundarySinceText = false;
     entry.currentTurn.fullText += event.text;
+    entry.currentTurn.currentRun += event.text;
     entry.currentTurn.onTextDelta?.(event.text);
     return;
   }
 
   if (event.type === 'reasoning_delta' && entry.currentTurn) {
+    entry.currentTurn.boundarySinceText = true;
+    entry.currentTurn.currentRun = ''; // run ended by reasoning → narration, dropped
     entry.currentTurn.onReasoningDelta?.(event.text);
     return;
   }
 
   if (event.type === 'tool_start' && entry.currentTurn) {
+    entry.currentTurn.boundarySinceText = true;
+    entry.currentTurn.currentRun = ''; // run ended by a tool → narration, dropped
     entry.currentTurn.toolAccums.start(event.toolName, event.index);
     void entry.currentTurn.onToolEvent?.({
       phase: 'start',
@@ -972,7 +945,12 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
 
   if (event.type === 'tool_stop' && entry.currentTurn) {
     const acc = entry.currentTurn.toolAccums.stop(event.index);
+    // content_block_stop fires for text blocks too — only an accumulator hit
+    // identifies a real tool, so the boundary/narration classification must
+    // stay inside the guard or a text block's own stop would erase it.
     if (acc) {
+      entry.currentTurn.boundarySinceText = true;
+      entry.currentTurn.currentRun = ''; // run ended by a tool → narration, dropped
       const { toolName, partialJson, index } = acc;
       const keyArg = extractKeyArg(toolName, partialJson);
       void entry.currentTurn.onToolEvent?.({ phase: 'complete', toolName, keyArg, index });
@@ -981,6 +959,9 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
   }
 
   if (event.type === 'subagent_progress' && entry.currentTurn) {
+    // Deliberately no boundary flag: subagent heartbeats are asynchronous and
+    // can land mid-sentence between two deltas of one text block — a false
+    // boundary would inject `\n\n` inside a sentence.
     void entry.currentTurn.onToolEvent?.({
       phase: 'subagent_progress',
       toolName: event.toolName,
@@ -990,6 +971,14 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
   }
 
   if (event.type === 'subagent_completed' && entry.currentTurn) {
+    // A completion lands between distinct assistant responses, so it IS a turn
+    // boundary (unlike subagent_progress heartbeats): the run so far is a
+    // completed answer block, and the fullText fallback gets its `\n\n` too.
+    if (entry.currentTurn.currentRun.trim()) {
+      entry.currentTurn.answerBlocks.push(entry.currentTurn.currentRun);
+    }
+    entry.currentTurn.currentRun = '';
+    entry.currentTurn.boundarySinceText = true;
     void entry.currentTurn.onToolEvent?.({
       phase: 'subagent_completed',
       toolName: 'Agent',
@@ -1005,8 +994,12 @@ function processPersistentLine(entry: PersistentProcessEntry, line: string): voi
     entry.totalTokens += event.tokens ?? 0;
     const turn = entry.currentTurn;
     entry.currentTurn = null;
+    // Result event text is the authoritative final block; the still-open run
+    // is the fallback when the CLI omitted it.
+    const answerText = buildAnswerText(turn.answerBlocks, event.text || turn.currentRun);
     turn.resolve({
       response: event.text || turn.fullText,
+      answerText,
       sessionId: event.sessionId ?? turn.sessionId,
       cost: event.cost ?? turn.cost,
       tokens: event.tokens,
@@ -1094,6 +1087,7 @@ export async function runClaudePersistentStreaming(
       entry.currentTurn = null;
       turn.resolve({
         response: turn.fullText,
+        answerText: buildAnswerText(turn.answerBlocks, turn.currentRun),
         sessionId: turn.sessionId,
         cost: turn.cost,
         tokens: null,
@@ -1143,6 +1137,9 @@ export async function runClaudePersistentStreaming(
       onReasoningDelta: options.onReasoningDelta,
       onToolEvent: options.onToolEvent,
       fullText: '',
+      boundarySinceText: false,
+      answerBlocks: [],
+      currentRun: '',
       sessionId: entry.sessionId,
       cost: null,
       toolAccums: new ToolUseAccumulators(),

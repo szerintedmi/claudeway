@@ -10,6 +10,7 @@ import type { ResponseMode } from '../../config.js';
 import {
   markdownToSlackMrkdwn,
   splitDetails,
+  inlineDetailsMarker,
   formatToolStatus,
   MAX_MESSAGE_LENGTH,
   FILE_THRESHOLD,
@@ -262,6 +263,16 @@ class NativeStreamingResponder implements IStreamingResponder {
   private runBuffer = '';
   /** True once the current run was released to the body and streams live. */
   private runReleased = false;
+  /**
+   * Earlier answer blocks that were released to the body and then ended by a run
+   * boundary — needed so the final rebuild can preserve multi-block turns.
+   */
+  private releasedRuns: string[] = [];
+  /**
+   * Set when an answer block was finalized; the next visible text starts a new
+   * block and gets a paragraph break.
+   */
+  private pendingBlockSeparator = false;
   private finished = false;
 
   /** ts the streaming reaction was placed on, if any. */
@@ -324,13 +335,30 @@ class NativeStreamingResponder implements IStreamingResponder {
 
   onToolEvent(event: ToolEventPayload): void {
     if (this.finished) return;
-    this.demoteBufferedRun();
+    if (event.phase === 'subagent_completed') {
+      // A completed background subagent ends the assistant turn: the current text
+      // run — even under the narration holdback — is a finished ANSWER block, not
+      // narration. The next turn may open with an EMPTY thinking block (no
+      // reasoning delta), so without this boundary consecutive answers merge.
+      this.finalizeRunAsAnswer();
+    } else if (event.phase !== 'subagent_progress') {
+      // Progress heartbeats interleave arbitrarily with live answer text — not a
+      // main-thread run boundary.
+      this.demoteBufferedRun();
+    }
     for (const chunk of this.tracker.onToolEvent(event)) {
       this.stream.appendTask(chunk);
     }
   }
 
   private emitVisible(text: string): void {
+    // Separator goes only into the visible stream — lastTextRun/runBuffer/
+    // releasedRuns keep raw run text (the rebuild joins with '\n\n' itself,
+    // and answerAlreadyLive compares raw runs).
+    if (this.pendingBlockSeparator) {
+      this.pendingBlockSeparator = false;
+      text = '\n\n' + text;
+    }
     const visible = this.gate.push(text);
     if (visible) this.stream.appendMarkdown(visible);
   }
@@ -346,16 +374,46 @@ class NativeStreamingResponder implements IStreamingResponder {
   }
 
   /**
-   * A tool/reasoning event ends the current text run. A run still held in the
-   * buffer was narration, not the answer — surface it as a completed work-log
-   * card instead of body text. A run already released to the body stays there
-   * (streamed markdown can't be retracted; over-cap narration is rare).
+   * A tool/reasoning event ends the current text run. Two cases:
+   *
+   * - The run was released to the body — it is a completed ANSWER block, not
+   *   narration. Archive it into {@link releasedRuns} so the final rebuild can
+   *   preserve multi-block turns instead of collapsing it into the work log.
+   * - The run is still held in the buffer — it was narration, not the answer;
+   *   surface it as a completed work-log card instead of body text.
+   *
+   * The two branches are mutually exclusive: when `runReleased` is true the
+   * `runBuffer` is always empty, and with `reasoningCards` off text streams
+   * straight to the body leaving `runBuffer` empty — so `runReleased ||
+   * !this.reasoningCards` marks body text and the buffered branch never also
+   * fires. (Streamed markdown can't be retracted; over-cap narration is rare.)
    */
   private demoteBufferedRun(): void {
-    if (this.runBuffer.trim().length > 0) {
+    if ((this.runReleased || !this.reasoningCards) && this.lastTextRun.trim().length > 0) {
+      this.releasedRuns.push(this.lastTextRun);
+      // A following block should not butt against the archived one live.
+      this.pendingBlockSeparator = true;
+    } else if (this.runBuffer.trim().length > 0) {
       for (const chunk of this.tracker.narration(this.runBuffer)) {
         this.stream.appendTask(chunk);
       }
+    }
+    this.runBuffer = '';
+    this.runReleased = false;
+    this.lastTextRun = '';
+  }
+
+  /**
+   * A completed background subagent ends the assistant turn: whatever text run
+   * is open is a finished ANSWER block. Release a still-buffered run to the body
+   * (bypassing the narration holdback — this is not the demotion path), archive
+   * the run, and start fresh.
+   */
+  private finalizeRunAsAnswer(): void {
+    if (!this.runReleased && this.runBuffer.trim().length > 0) this.releaseRun();
+    if ((this.runReleased || !this.reasoningCards) && this.lastTextRun.trim().length > 0) {
+      this.releasedRuns.push(this.lastTextRun);
+      this.pendingBlockSeparator = true;
     }
     this.runBuffer = '';
     this.runReleased = false;
@@ -381,7 +439,15 @@ class NativeStreamingResponder implements IStreamingResponder {
     // resolve any text held back by the details gate.
     let tailText = '';
     if (!this.runReleased && this.runBuffer.length > 0) {
-      tailText += this.gate.push(this.runBuffer);
+      let tail = this.runBuffer;
+      if (this.pendingBlockSeparator && tail.trim().length > 0) {
+        // finish() releases the tail without going through emitVisible — consume
+        // the pending block separator here so the last block doesn't butt against
+        // the previous one live.
+        this.pendingBlockSeparator = false;
+        tail = '\n\n' + tail;
+      }
+      tailText += this.gate.push(tail);
       this.runBuffer = '';
     }
     tailText += this.gate.finish().tail;
@@ -411,6 +477,13 @@ class NativeStreamingResponder implements IStreamingResponder {
   /** Raw text of the final run (nothing streamed after it) — the live answer. */
   getLastTextRun(): string {
     return this.lastTextRun;
+  }
+
+  /** Answer text released to the body, in order: archived earlier blocks plus the live final run. */
+  getAnswerBlocks(): string[] {
+    const blocks = [...this.releasedRuns];
+    if (this.lastTextRun.trim().length > 0) blocks.push(this.lastTextRun);
+    return blocks;
   }
 
   /** ts of the turn's stream message, if it ever opened. */
@@ -539,11 +612,16 @@ export class SlackChannelResponder implements ChannelResponder {
       // matches Claude's authoritative `result` text. A mismatch means the
       // answer got lost/garbled live (e.g. a late tool event followed the real
       // answer) — rebuild the message from `result` with the work-log cards on
-      // top. A details section streamed inline (visible while live) and is
-      // folded into a collapsed container by the same rebuild once the turn
-      // ends. A trivial work log (bare "Thinking" card, no tools/reasoning)
-      // rebuilds too, so its redundant box is stripped and the answer stands
-      // alone. Oversized responses always take the file-upload path.
+      // top. A rebuild must preserve any earlier answer blocks the user already
+      // watched stream in: a multi-block turn (background-subagent
+      // task-notifications re-invoke the main agent mid-turn) has `finalText`
+      // holding only the LAST block, so the rebuild text is stitched from the
+      // released blocks plus `finalText` (buildMultiBlockRebuildText). A details
+      // section streamed inline (visible while live) and is folded into a
+      // collapsed container by the same rebuild once the turn ends. A trivial
+      // work log (bare "Thinking" card, no tools/reasoning) rebuilds too, so its
+      // redundant box is stripped and the answer stands alone. Oversized
+      // responses always take the file-upload path.
       const answerAlreadyLive =
         normalizeForCompare(stripDetailsForCompare(nsr.getLastTextRun())) ===
         normalizeForCompare(stripDetailsForCompare(finalText));
@@ -556,10 +634,15 @@ export class SlackChannelResponder implements ChannelResponder {
           (!isFallback && (!answerAlreadyLive || hasDetails || workLogTrivial)));
 
       if (needsRebuild) {
+        // Fallback finalText is already the full accumulated delta text, so
+        // prepending the released blocks would duplicate them.
+        const rebuildText = isFallback
+          ? finalText
+          : buildMultiBlockRebuildText(nsr.getAnswerBlocks(), finalText);
         await deliverText(this.client, {
           channel: this.channelId,
           threadTs: this.threadTs,
-          text: finalText,
+          text: rebuildText,
           replaceTs: nsr.getStreamTs(),
           replaceBlocksPrefix: nsr.getTaskBlocks(),
         });
@@ -575,20 +658,28 @@ export class SlackChannelResponder implements ChannelResponder {
     // the response is oversized or holds a details marker (folded by rewriting
     // the bubble through the block layout).
     //
+    // The rebuild must mirror the live bubble's content, not just the CLI
+    // result's final block: the bubble shows the full accumulated delta text
+    // (`getFullText()`), which for a multi-block turn (background-subagent
+    // task-notifications re-invoke the main agent mid-turn) holds MORE than
+    // `finalText` (the last block only). Fall back to `finalText` only when the
+    // live text is empty.
+    //
     // The live flush() truncates on the POST-conversion length
     // (markdownToSlackMrkdwn inflates via link conversion), so the rebuild
-    // decision must use that same converted length — comparing raw finalText
+    // decision must use that same converted length — comparing raw liveText
     // here would leave a converted-over/raw-under answer stuck at `_[streaming...]_`.
     const sr = responder as StreamingResponder;
+    const liveText = sr.getFullText().trim().length > 0 ? sr.getFullText() : finalText;
     if (
-      finalText.length > FILE_THRESHOLD ||
-      markdownToSlackMrkdwn(finalText).length > MAX_MESSAGE_LENGTH ||
-      splitDetails(finalText).details !== null
+      liveText.length > FILE_THRESHOLD ||
+      markdownToSlackMrkdwn(liveText).length > MAX_MESSAGE_LENGTH ||
+      splitDetails(liveText).details !== null
     ) {
       await deliverText(this.client, {
         channel: this.channelId,
         threadTs: this.threadTs,
-        text: finalText,
+        text: liveText,
         replaceTs: sr.getMessageTs(),
       });
     }
@@ -620,4 +711,38 @@ function normalizeForCompare(text: string): string {
 /** Details are withheld from the wire, so compare only the pre-marker body. */
 function stripDetailsForCompare(text: string): string {
   return splitDetails(text).body;
+}
+
+/**
+ * Rebuild text for a turn whose body may hold several answer blocks
+ * (background-subagent task-notifications re-invoke the main agent mid-turn).
+ * `finalText` — the CLI `result` — carries only the LAST block, so a rebuild
+ * from it alone would erase every earlier block the user already watched
+ * stream in. Earlier blocks keep their details inline (matching how they
+ * streamed live); only the final block's details section is left for
+ * deliverText to fold. A live tail that is a truncated prefix of the result
+ * (broken/early-finalized stream) is superseded by `finalText` outright.
+ */
+export function buildMultiBlockRebuildText(blocks: string[], finalText: string): string {
+  if (blocks.length === 0) return finalText;
+  const nFinal = normalizeForCompare(stripDetailsForCompare(finalText));
+  const last = blocks[blocks.length - 1];
+  const nLast = normalizeForCompare(stripDetailsForCompare(last));
+  if (nLast === nFinal) {
+    // The live tail matches the authoritative result — replace it with finalText.
+    return [...blocks.slice(0, -1).map(inlineDetailsMarker), finalText].join('\n\n');
+  }
+  if (nFinal.length > 0 && nLast.endsWith(nFinal)) {
+    // Runs merged (no boundary between blocks): the live tail already CONTAINS
+    // the result text — keep it rather than duplicating the final block.
+    return [...blocks.slice(0, -1).map(inlineDetailsMarker), last].join('\n\n');
+  }
+  if (nLast.length > 0 && nFinal.startsWith(nLast)) {
+    // The live tail is a truncated PREFIX of the result (stream broke or was
+    // finalized early mid-block) — finalText supersedes it; appending would
+    // duplicate the prefix.
+    return [...blocks.slice(0, -1).map(inlineDetailsMarker), finalText].join('\n\n');
+  }
+  // The result text never streamed (lost/garbled live) — append it after the blocks.
+  return [...blocks.map(inlineDetailsMarker), finalText].join('\n\n');
 }

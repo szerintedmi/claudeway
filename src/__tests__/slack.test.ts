@@ -13,13 +13,18 @@ import {
   formatToolTaskTitle,
 } from '../adapters/slack/formatting.js';
 import { formatDuration, formatTimeout, formatChannelConfig } from '../adapters/slack/commands.js';
-import { getSnippetType, SlackChannelResponder } from '../adapters/slack/responder.js';
+import {
+  getSnippetType,
+  SlackChannelResponder,
+  buildMultiBlockRebuildText,
+} from '../adapters/slack/responder.js';
 import {
   __resetAppendRateLimiterForTest,
   isPermanentStreamError,
   isStreamClosedError,
 } from '../adapters/slack/stream.js';
 import { TaskTracker } from '../adapters/slack/thinking-steps.js';
+import type { IStreamingResponder } from '../core/interfaces.js';
 import type { WebClient } from '@slack/web-api';
 
 describe('chunkText (fence-aware, surrogate-safe)', () => {
@@ -803,6 +808,42 @@ describe('StreamingResponder (stream-update) tool-status messages', () => {
     await microtasks();
     expect(posts).toHaveLength(1);
   });
+
+  it('rebuilds a multi-block turn from the accumulated text, keeping earlier blocks', async () => {
+    const { client, posts, updates } = createMockClient();
+    const responder = new SlackChannelResponder(
+      client,
+      'C123',
+      'thread-ts',
+      'msg-ts',
+      'stream-update',
+      'U1',
+    );
+    const sr = responder.createStreamingResponder();
+
+    const first = 'FIRST_BLOCK_TEXT here is the first answer. ';
+    // finalText is only the LAST block, but it carries a details marker so the
+    // rebuild fires — and it must be rebuilt from the accumulated live text.
+    const last = 'SECOND_BLOCK_TEXT tail answer.\n---DETAILS---\nfolded detail body';
+
+    sr.onTextDelta(first); // first delta posts the initial streamed message
+    await microtasks();
+    expect(posts).toHaveLength(1);
+    posts[0].resolve('stream-msg'); // resolve the post so messageTs is captured
+    await microtasks();
+
+    sr.onTextDelta(last); // accumulates into getFullText()
+    await microtasks();
+    await sr.finish();
+    await responder.onStreamComplete(last, sr);
+
+    // The rebuild (last chat.update, after finish) folds the details via block
+    // layout — its notification text is the pre-marker body. The FIRST block
+    // survives only if the rebuild read the accumulated text, not bare finalText.
+    const rebuilt = updates[updates.length - 1];
+    expect(rebuilt.text).toContain('FIRST_BLOCK_TEXT');
+    expect(rebuilt.text).toContain('SECOND_BLOCK_TEXT');
+  });
 });
 
 describe('SlackChannelResponder native streaming (Thinking Steps)', () => {
@@ -1171,8 +1212,10 @@ describe('SlackChannelResponder native streaming (Thinking Steps)', () => {
     await responder.onStreamComplete('The answer is 42.', sr);
 
     // Once released, a run stays in the body (streamed markdown can't be
-    // retracted) and is NOT duplicated as a narration card.
-    expect(wireMarkdown(calls)).toBe(`${longNarration}The answer is 42.`);
+    // retracted) and is NOT duplicated as a narration card. The tool boundary
+    // archives it as an answer block, so a live block separator precedes the
+    // next block (here released as the finish() tail).
+    expect(wireMarkdown(calls)).toBe(`${longNarration}\n\nThe answer is 42.`);
     expect(wireTasks(calls).some((c) => c.title?.startsWith('nnn'))).toBe(false);
     expect(calls.updates).toHaveLength(0);
   });
@@ -1191,7 +1234,10 @@ describe('SlackChannelResponder native streaming (Thinking Steps)', () => {
     await sr.finish();
     await responder.onStreamComplete('The answer is 42.', sr);
 
-    expect(wireMarkdown(calls)).toBe('Let me check. The answer is 42.');
+    // With classification off every run streams to the body; the tool boundary
+    // archives the first run as an answer block and a live paragraph break
+    // separates it from the next block (blocks never butt together).
+    expect(wireMarkdown(calls)).toBe('Let me check. \n\nThe answer is 42.');
     expect(wireTasks(calls).some((c) => c.title === 'Let me check.')).toBe(false);
     expect(calls.updates).toHaveLength(0);
   });
@@ -1385,7 +1431,10 @@ describe('SlackChannelResponder native streaming (Thinking Steps)', () => {
     // A tool call keeps the work log non-trivial, so the card-bearing message is
     // kept (pointed at the file) rather than stripped/deleted.
     sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'x.ts' });
-    sr.onTextDelta('partial ');
+    // The live stream got a truncated PREFIX of the final text — the rebuild's
+    // prefix-supersede branch replaces it with finalText instead of appending
+    // (which would duplicate the prefix ahead of the uploaded content).
+    sr.onTextDelta(huge.slice(0, 100));
     await microtasks();
     await sr.finish(); // stopStream fails terminally → broken
     await responder.onStreamComplete(huge, sr);
@@ -1490,6 +1539,298 @@ describe('SlackChannelResponder native streaming (Thinking Steps)', () => {
     await finishP;
     // Order is add-then-remove; the reaction never ends up stuck.
     expect(calls.reactions.map((r) => r.action)).toEqual(['add', 'remove']);
+  });
+
+  describe('multi-block turns (background subagent re-invocations)', () => {
+    // A run that crosses the narration holdback and is released to the body.
+    const bigBlock = (label: string) => `${label}. ${'padding text here. '.repeat(40)}`;
+    // Read the archived answer runs off the (native) streaming responder.
+    const answerBlocks = (sr: IStreamingResponder): string[] =>
+      (sr as unknown as { getAnswerBlocks(): string[] }).getAnswerBlocks();
+
+    it('does not rebuild when the final run matches the result (multi-block, no trigger)', async () => {
+      const { client, calls } = createMockClient();
+      const responder = makeResponder(client);
+      const sr = responder.createStreamingResponder();
+      await microtasks();
+
+      const a = bigBlock('ALPHA_BLOCK');
+      const b = bigBlock('BETA_BLOCK');
+      const c = bigBlock('GAMMA_BLOCK');
+
+      // Each reasoning delta is a run boundary that archives the released block.
+      sr.onTextDelta(a);
+      await microtasks();
+      sr.onReasoningDelta?.('Now reasoning about the second part in some detail. ');
+      await microtasks();
+      sr.onTextDelta(b);
+      await microtasks();
+      sr.onReasoningDelta?.('Now reasoning about the final part in some detail. ');
+      await microtasks();
+      sr.onTextDelta(c);
+      await microtasks();
+      await sr.finish();
+      await responder.onStreamComplete(c, sr);
+
+      // Final run (C) matches the result, no details, work log non-trivial
+      // (reasoning happened) → the live message stands, nothing is rewritten.
+      expect(calls.updates).toHaveLength(0);
+      expect(calls.posts).toHaveLength(0);
+      // All three blocks were archived for a potential rebuild.
+      const blocks = answerBlocks(sr);
+      expect(blocks).toHaveLength(3);
+      expect(blocks[0]).toContain('ALPHA_BLOCK');
+      expect(blocks[1]).toContain('BETA_BLOCK');
+      expect(blocks[2]).toContain('GAMMA_BLOCK');
+    });
+
+    it('rebuilds and preserves every earlier block when the last block has details', async () => {
+      const { client, calls } = createMockClient();
+      const responder = makeResponder(client);
+      const sr = responder.createStreamingResponder();
+      await microtasks();
+
+      const a = bigBlock('ALPHA_BLOCK');
+      const b = bigBlock('BETA_BLOCK');
+      const c = `${bigBlock('GAMMA_BLOCK')}\n---DETAILS---\nthe expandable detail section`;
+
+      sr.onTextDelta(a);
+      await microtasks();
+      sr.onReasoningDelta?.('Reasoning before the second block here in detail. ');
+      await microtasks();
+      sr.onTextDelta(b);
+      await microtasks();
+      sr.onReasoningDelta?.('Reasoning before the final block here in detail. ');
+      await microtasks();
+      sr.onTextDelta(c);
+      await microtasks();
+      await sr.finish();
+      await responder.onStreamComplete(c, sr);
+
+      // The regression: the details section forces a rebuild and earlier answer
+      // blocks (A and B) must survive — previously only the last block (C) did.
+      expect(calls.updates).toHaveLength(1);
+      const blocks = JSON.stringify(calls.updates[0].blocks);
+      expect(blocks).toContain('ALPHA_BLOCK');
+      expect(blocks).toContain('BETA_BLOCK');
+      expect(blocks).toContain('GAMMA_BLOCK');
+      expect(blocks).toContain('the expandable detail section');
+    });
+
+    it('does not let subagent_progress split or demote a live answer run', async () => {
+      const { client, calls } = createMockClient();
+      const responder = makeResponder(client);
+      const sr = responder.createStreamingResponder();
+      await microtasks();
+
+      sr.onTextDelta('The result is ready: '); // under the holdback → buffered
+      await microtasks();
+      // A background-subagent progress event is NOT a run boundary.
+      sr.onToolEvent({ phase: 'subagent_progress', toolName: 'Agent', description: 'searching' });
+      await microtasks();
+      sr.onTextDelta('forty-two.'); // same run continues
+      await microtasks();
+      const full = 'The result is ready: forty-two.';
+      await sr.finish();
+      await responder.onStreamComplete(full, sr);
+
+      // Answer already live and matching the result → no rebuild.
+      expect(calls.updates).toHaveLength(0);
+      // The buffered answer was NOT demoted into a narration work-log card.
+      expect(wireTasks(calls).some((t) => t.title?.includes('The result is ready'))).toBe(false);
+      // It streamed to the body intact.
+      expect(wireMarkdown(calls)).toBe(full);
+    });
+
+    it('finalizes the run as an answer block on subagent_completed', async () => {
+      const { client, calls } = createMockClient();
+      const responder = makeResponder(client);
+      const sr = responder.createStreamingResponder();
+      await microtasks();
+
+      sr.onTextDelta('The total comes to seven.'); // under the holdback → buffered
+      await microtasks();
+      // A background-subagent completion FINALIZES the current run as a
+      // completed ANSWER block: released to the body even under the 500-char
+      // holdback (never the narration path), archived, and a new run starts.
+      sr.onToolEvent({ phase: 'subagent_completed', toolName: 'Agent', description: 'done' });
+      await microtasks();
+      sr.onTextDelta('Next block text.');
+      await microtasks();
+      await sr.finish();
+      await responder.onStreamComplete('Next block text.', sr);
+
+      // Pre-completion text hit the body — with a live paragraph break before
+      // the next block — and was NOT demoted to a narration work-log card.
+      expect(wireMarkdown(calls)).toBe('The total comes to seven.\n\nNext block text.');
+      expect(wireTasks(calls).some((t) => t.title?.includes('The total comes to'))).toBe(false);
+      // Both runs are archived answer blocks (raw, separator-free).
+      expect(answerBlocks(sr)).toEqual(['The total comes to seven.', 'Next block text.']);
+      // Final run matches the result → the live message stands, no rebuild.
+      expect(calls.updates).toHaveLength(0);
+    });
+
+    it('preserves a subagent-completed multi-block turn live, blocks streamed once each (trace-shaped)', async () => {
+      const { client, calls } = createMockClient();
+      const responder = makeResponder(client);
+      const sr = responder.createStreamingResponder();
+      await microtasks();
+
+      // Block A crosses the holdback and ends with a details section; B and C
+      // stay under the holdback. Completions arrive with NO reasoning delta
+      // after them (models the trace's empty thinking block).
+      const blockA = `ALPHA_SENT ${'padding words here. '.repeat(32)}\n---DETAILS---\nALPHA_DETAIL body`;
+      const blockB = 'BRAVO_SENT second answer block, modest length under the holdback cap.';
+      const blockC = 'CHARLIE_SENT third answer block, also modest length.';
+
+      sr.onTextDelta(blockA);
+      await microtasks();
+      sr.onToolEvent({ phase: 'subagent_completed', toolName: 'Agent', description: 'task one' });
+      await microtasks();
+      sr.onTextDelta(blockB);
+      await microtasks();
+      sr.onToolEvent({ phase: 'subagent_completed', toolName: 'Agent', description: 'task two' });
+      await microtasks();
+      sr.onTextDelta(blockC);
+      await microtasks();
+      await sr.finish();
+      await responder.onStreamComplete(blockC, sr);
+
+      // All three blocks archived raw (details marker unrewritten, no injected
+      // separators).
+      expect(answerBlocks(sr)).toEqual([blockA, blockB, blockC]);
+      // Final run matches the result, finalText holds no details, work log is
+      // non-trivial → the live message stands: nothing rewritten or re-posted.
+      expect(calls.updates).toHaveLength(0);
+      expect(calls.posts).toHaveLength(0);
+      // Each block's text streamed exactly once (the user-visible dedup bug).
+      const md = wireMarkdown(calls);
+      for (const sentinel of ['ALPHA_SENT', 'ALPHA_DETAIL', 'BRAVO_SENT', 'CHARLIE_SENT']) {
+        expect(md.split(sentinel).length - 1).toBe(1);
+      }
+      // Live separator: a paragraph break lands between block A and block B.
+      expect(md).toContain('ALPHA_DETAIL body\n\nBRAVO_SENT');
+    });
+
+    it('rebuilds a subagent-completed multi-block turn losslessly when the last block has details (trace-shaped)', async () => {
+      const { client, calls } = createMockClient();
+      const responder = makeResponder(client);
+      const sr = responder.createStreamingResponder();
+      await microtasks();
+
+      const blockA = `ALPHA_SENT ${'padding words here. '.repeat(32)}\n---DETAILS---\nALPHA_DETAIL body`;
+      const blockB = 'BRAVO_SENT second answer block, modest length.';
+      const blockC = 'CHARLIE_SENT closing block.\n---DETAILS---\nCHARLIE_DETAIL body';
+
+      sr.onTextDelta(blockA);
+      await microtasks();
+      sr.onToolEvent({ phase: 'subagent_completed', toolName: 'Agent', description: 'task one' });
+      await microtasks();
+      sr.onTextDelta(blockB);
+      await microtasks();
+      sr.onToolEvent({ phase: 'subagent_completed', toolName: 'Agent', description: 'task two' });
+      await microtasks();
+      sr.onTextDelta(blockC);
+      await microtasks();
+      await sr.finish();
+      await responder.onStreamComplete(blockC, sr);
+
+      // finalText carries a details section → the rebuild fires, stitched from
+      // ALL archived blocks — the user's repro lost A/B or duplicated C here.
+      expect(calls.updates).toHaveLength(1);
+      const blocks = calls.updates[0].blocks as Record<string, unknown>[];
+      const json = JSON.stringify(blocks);
+      const sentinels = [
+        'ALPHA_SENT',
+        'ALPHA_DETAIL',
+        'BRAVO_SENT',
+        'CHARLIE_SENT',
+        'CHARLIE_DETAIL',
+      ];
+      for (const sentinel of sentinels) {
+        expect(json.split(sentinel).length - 1).toBe(1);
+      }
+      // Only the FINAL block's details are folded into the collapsed container;
+      // block A's earlier marker was inlined into the body (no mid-message fold)
+      // and no raw marker leaks into the delivered blocks.
+      const container = blocks.find((b) => b.type === 'container');
+      expect(container).toBeDefined();
+      expect(JSON.stringify(container)).toContain('CHARLIE_DETAIL');
+      expect(JSON.stringify(container)).not.toContain('ALPHA_DETAIL');
+      expect(json).not.toContain('---DETAILS---');
+    });
+
+    it('rebuilds without duplicating the answer when a regular tool event trails it', async () => {
+      const { client, calls } = createMockClient();
+      const responder = makeResponder(client);
+      const sr = responder.createStreamingResponder();
+      await microtasks();
+
+      const answer = bigBlock('SOLO_ANSWER'); // released to the body
+      sr.onTextDelta(answer);
+      await microtasks();
+      // A regular tool event archives the released run and clears lastTextRun.
+      sr.onToolEvent({ phase: 'complete', toolName: 'Read', keyArg: 'x.ts' });
+      await microtasks();
+      await sr.finish();
+      await responder.onStreamComplete(answer, sr);
+
+      // lastTextRun is now empty → mismatch with the result → rebuild fires.
+      expect(calls.updates).toHaveLength(1);
+      const blocks = JSON.stringify(calls.updates[0].blocks);
+      // The archived block survives exactly once — no archive+append duplication.
+      expect(blocks.split('SOLO_ANSWER').length - 1).toBe(1);
+    });
+  });
+});
+
+describe('buildMultiBlockRebuildText', () => {
+  it('returns finalText unchanged when there are no earlier blocks', () => {
+    expect(buildMultiBlockRebuildText([], 'the answer')).toBe('the answer');
+  });
+
+  it('replaces the last block with finalText when they match (whitespace-insensitive)', () => {
+    const a = 'First block answer.';
+    const b = 'Second   block\nanswer.'; // same as finalText modulo whitespace
+    const finalText = 'Second block answer.';
+    expect(buildMultiBlockRebuildText([a, b], finalText)).toBe(`${a}\n\n${finalText}`);
+  });
+
+  it('keeps the last block raw (no finalText appended) when finalText is a suffix of it', () => {
+    // Merged runs: the last block already ends with the authoritative result.
+    const a = 'Earlier block.';
+    const last = 'Intro sentence. The final answer is X.';
+    const finalText = 'The final answer is X.'; // strict suffix of `last`
+    expect(buildMultiBlockRebuildText([a, last], finalText)).toBe(`${a}\n\n${last}`);
+  });
+
+  it('supersedes a truncated live prefix with finalText (no duplication)', () => {
+    // The live tail got cut off mid-answer: it is a strict PREFIX of the
+    // authoritative result, so finalText replaces it — appending would
+    // duplicate the prefix ahead of the full answer.
+    const a = 'Block A';
+    const truncated = 'The answer beg';
+    const finalText = 'The answer begins and continues.';
+    expect(buildMultiBlockRebuildText([a, truncated], finalText)).toBe(`${a}\n\n${finalText}`);
+  });
+
+  it('appends finalText after all blocks when it neither matches nor suffixes the last', () => {
+    const a = 'Block A.';
+    const b = 'Block B.';
+    const finalText = 'A wholly different closing answer.';
+    expect(buildMultiBlockRebuildText([a, b], finalText)).toBe(`${a}\n\n${b}\n\n${finalText}`);
+  });
+
+  it('inlines a details marker in an earlier block so it does not open a fold early', () => {
+    const a = 'Summary line\n---DETAILS---\nhidden earlier detail';
+    const b = 'Second block body.';
+    const finalText = 'The closing answer.'; // append case
+    const out = buildMultiBlockRebuildText([a, b], finalText);
+    // The earlier block's marker is rewritten to the inline header, not left raw,
+    // so the joined text never begins a fold before the final block.
+    expect(out).toContain(DETAILS_INLINE_HEADER);
+    expect(out).not.toContain('---DETAILS---');
+    expect(out).toBe(`${inlineDetailsMarker(a)}\n\n${b}\n\n${finalText}`);
   });
 });
 
