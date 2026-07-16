@@ -6,7 +6,7 @@ import {
   saveSlackHistoryState,
   compareSlackTs,
 } from '../../slack-history.js';
-import { fetchThreadEntries, type SlackThreadEntry } from './thread.js';
+import { annotateBodyMentions, fetchThreadEntries, type SlackThreadEntry } from './thread.js';
 import { renderSlackPrompt } from './prompt.js';
 import { downloadSlackFiles, type SlackFile } from './files.js';
 import type { SlackFileMeta } from '../../queue.js';
@@ -196,7 +196,7 @@ export function makeSlackPromptCoordinator(
           ts: queued.ts,
           userId: slack.senderId,
           authorName: slack.senderName,
-          text: slack.rawText,
+          text: await annotateBodyMentions(client, slack.rawText, canResolveUsers),
           files: currentFiles,
         },
       });

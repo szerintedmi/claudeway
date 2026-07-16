@@ -469,7 +469,7 @@ export function loadConfig(): Config {
     config.defaults = {
       model: 'opus',
       systemPrompt:
-        'Format all responses using Slack mrkdwn syntax (NOT standard Markdown). Key rules: *bold* (single asterisk), _italic_ (underscore), ~strikethrough~ (single tilde), `code`, ```code blocks``` (no language tag), > blockquote, <URL|label> for links (NOT [label](url)), :emoji: shortcodes. Standard Markdown ##headers, **bold**, [links](url), and tables do NOT work in Slack. Use - or numbered lists. Keep responses concise.',
+        'Format all responses using Slack mrkdwn syntax (NOT standard Markdown). Key rules: *bold* (single asterisk), _italic_ (underscore), ~strikethrough~ (single tilde), `code`, ```code blocks``` (no language tag), > blockquote, <URL|label> for links (NOT [label](url)), :emoji: shortcodes. Standard Markdown ##headers, **bold**, [links](url), and tables do NOT work in Slack. Use - or numbered lists. When addressing or referring to a person, use their `<@U...>` mention token (context shows each id with its resolved name as `<@U...> (Name)`) — never a bare first name you inferred, and never guess a name for an id whose name is not shown. Keep responses concise.',
       timeoutMs: 300000,
       responseMode: 'batch',
     };

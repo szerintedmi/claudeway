@@ -25,6 +25,40 @@ export function resetUserNameCache(): void {
   userNameCache.clear();
 }
 
+/**
+ * Slack user-mention token inside message text: `<@U123>` or `<@W123>` (enterprise
+ * grid) with an optional `|fallback` label. Bot-user mentions use the same shape.
+ */
+const BODY_MENTION_RE = /<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g;
+
+/**
+ * Rewrite in-body `<@U...>` mentions to a standard `<@U...> (Name)` form so the
+ * model always sees who an ID refers to. The author of each message is
+ * name-resolved separately (`formatEntryPrefix`); this covers mentions *inside*
+ * the message text — people addressed, cc'd, or quoted in the body. Without it a
+ * bare id carries no name and the model may invent a plaintext name for it.
+ *
+ * The real `<@U...>` token is preserved (so the model can echo it back as a live
+ * mention). Unresolvable ids degrade to the bare token, unchanged. Any existing
+ * `|fallback` label is normalized away. No-op when users:read scope is missing.
+ */
+export async function annotateBodyMentions(
+  client: WebClient,
+  text: string,
+  canResolveUsers = true,
+): Promise<string> {
+  if (!canResolveUsers || !text) return text;
+  const ids = new Set<string>();
+  for (const m of text.matchAll(BODY_MENTION_RE)) ids.add(m[1]);
+  if (ids.size === 0) return text;
+  const names = new Map<string, string>();
+  for (const id of ids) names.set(id, await resolveUserName(client, id));
+  return text.replace(BODY_MENTION_RE, (_whole, id: string) => {
+    const name = names.get(id);
+    return name && name !== id ? `<@${id}> (${name})` : `<@${id}>`;
+  });
+}
+
 export async function resolveUserName(client: WebClient, userId: string): Promise<string> {
   const cached = userNameCache.get(userId);
   if (cached !== undefined) return cached;
@@ -131,7 +165,8 @@ export async function fetchThreadEntries(
       const isSelfBot = !!m.user && m.user === opts.botUserId;
       const isBot = isSelfBot || !!m.bot_id;
       const attachmentText = extractTextFromAttachments(m.attachments);
-      const text = [m.text, attachmentText].filter(Boolean).join('\n\n').trim();
+      const rawText = [m.text, attachmentText].filter(Boolean).join('\n\n').trim();
+      const text = await annotateBodyMentions(client, rawText, canResolveUsers);
       const files = collectFileMeta(m);
       // Nothing renderable at all — skip (file-only messages stay: they render
       // as prefix + attachment metadata line)
