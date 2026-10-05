@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.37.5] - 2026-10-05
+
+### Changed
+- **Dependency updates (minor/patch)**: `@deepgram/sdk` ^5.14.0, `uuid` 14.0.2, `yaml` 2.9.1, `@types/bun` 1.4.2, `eslint` 10.12.0, `typescript-eslint` 8.71.0, `lint-staged` 17.6.0, `prettier` 3.9.9. Two majors held back: `@slack/bolt` stays on 4.7.3 — Bolt 5's `@slack/socket-mode` 3 calls `undici.ping()`, which Bun's built-in `undici` shim doesn't export, so the keepalive throws ~1.7s after connect and Socket Mode drops into a reconnect loop (incoming pings are also tracked via undici-only diagnostics channels); `typescript` stays on 6.0.3 — `typescript-eslint` 8.71 supports only `<6.1.0`
+
 ## [0.37.4] - 2026-07-16
 
 ### Fixed
