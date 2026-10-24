@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.37.6] - 2026-10-24
+
+### Changed
+- **Dependency updates, incl. Bolt 5**: `@slack/bolt` 4.7.3 → 5.1.0 (pulls `@slack/socket-mode` 3.1.0, `@slack/web-api` 8, `undici` 8), `@deepgram/sdk` 5.16.0, `uuid` 14.0.3, `@types/bun` 1.4.4, `eslint` 10.13.0, `typescript-eslint` 8.72.0, `prettier` 3.9.10. All direct dependencies are now pinned to exact versions (`@deepgram/sdk` dropped its `^`). The 0.37.5 Bolt 5 blocker is gone: Bun 1.4.4's built-in `undici` now exports `ping()` and publishes the `undici:websocket:ping`/`pong` diagnostics channels socket-mode's keepalive watchdog relies on (verified against a local WebSocket server). `typescript` stays on 6.0.3 — `typescript-eslint` 8.72 still supports only `<6.1.0`
+
 ## [0.37.5] - 2026-10-05
 
 ### Changed
